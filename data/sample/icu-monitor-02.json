@@ -1,0 +1,36 @@
+{
+  "schema_version": "0.1.0",
+  "source": {
+    "device_id": "icu-monitor-02",
+    "patient_pseudo_id": "pseudo-def456"
+  },
+  "samples": [
+    {
+      "wall_clock_utc": "2026-04-29T13:00:00.000000Z",
+      "monotonic_ns": 2000000000000,
+      "vitals": {
+        "heart_rate_bpm": 88.0,
+        "spo2_percent": 94.0
+      },
+      "events": []
+    },
+    {
+      "wall_clock_utc": "2026-04-29T13:00:01.000000Z",
+      "monotonic_ns": 2001000000000,
+      "vitals": {
+        "heart_rate_bpm": 90.0,
+        "spo2_percent": 93.5
+      },
+      "events": [
+        {
+          "name": "low_spo2_alarm",
+          "at_monotonic_ns": 2001500000000,
+          "data": {
+            "threshold": 94.0,
+            "severity": "warning"
+          }
+        }
+      ]
+    }
+  ]
+}

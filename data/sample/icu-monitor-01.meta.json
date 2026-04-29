@@ -1,0 +1,15 @@
+{
+  "source": {
+    "device_id": "icu-monitor-01",
+    "patient_pseudo_id": "pseudo-abc123"
+  },
+  "events": [
+    {
+      "name": "manual_bp_cuff_inflate",
+      "at_monotonic_ns": 1005500000000,
+      "data": {
+        "operator": "rn-077"
+      }
+    }
+  ]
+}

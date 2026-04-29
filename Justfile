@@ -175,6 +175,13 @@ py-test:
 py-typecheck:
     @echo "(typecheck stub — pyright wired in Task 2 alongside Pydantic schemas)"
 
+# Ingest local CSV/JSON telemetry under data/sample → ClinicalTelemetryPayload JSON.
+# Override DATA_PATH for a different source: `just DATA_PATH=data/foo py-ingest`.
+DATA_PATH := env_var_or_default('DATA_PATH', 'data/sample')
+
+py-ingest:
+    uv run python -m cds_harness.ingest {{DATA_PATH}} --pretty
+
 # =============================================================================
 # Rust (cargo + clippy + rustfmt + cargo-test)
 # =============================================================================
@@ -256,8 +263,7 @@ distclean: clean
 run-kernel:
     @echo "(kernel binary lands in Task 5)"
 
-run-harness:
-    @echo "(Python harness CLI lands in Task 4)"
+run-harness: py-ingest
 
 run-frontend: ts-dev
 
