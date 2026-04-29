@@ -1,11 +1,14 @@
 //! `cds-kernel` — neurosymbolic CDS deductive kernel.
 //!
-//! Phase 0 placeholder. The Nemo Datalog evaluator, Octagon abstract-interpretation
-//! domain, and subprocess warden land in Task 5. This crate currently exposes a
-//! stable identifier consumed by smoke tests so the workspace wiring is verifiable.
+//! Phase 0 home of (a) the four conceptual schema types (`schema` module,
+//! Task 2) that form the wire format between every pipeline stage, and
+//! (b) — landing in Task 5 — the Nemo Datalog evaluator, Octagon
+//! abstract-interpretation domain, and subprocess warden.
 
 #![forbid(unsafe_code)]
 #![deny(clippy::all)]
+
+pub mod schema;
 
 /// Stable identifier for this crate. Consumed by smoke tests + future trace logs.
 pub const KERNEL_ID: &str = "cds-kernel";

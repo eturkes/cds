@@ -1,0 +1,56 @@
+{
+  "schema_version": "0.1.0",
+  "root": {
+    "kind": "scope",
+    "id": "doc-1",
+    "scope_kind": "guideline",
+    "children": [
+      {
+        "kind": "indicator_constraint",
+        "guard": {
+          "kind": "atom",
+          "predicate": "has_diagnosis",
+          "terms": [
+            { "kind": "variable", "name": "P" },
+            { "kind": "constant", "value": "diabetes" }
+          ],
+          "source_span": {
+            "start": 0,
+            "end": 30,
+            "doc_id": "guideline-001"
+          }
+        },
+        "body": {
+          "kind": "relation",
+          "op": "less_than",
+          "args": [
+            {
+              "kind": "atom",
+              "predicate": "hba1c",
+              "terms": [
+                { "kind": "variable", "name": "P" }
+              ],
+              "source_span": {
+                "start": 31,
+                "end": 60,
+                "doc_id": "guideline-001"
+              }
+            },
+            {
+              "kind": "atom",
+              "predicate": "literal",
+              "terms": [
+                { "kind": "constant", "value": "7.0" }
+              ],
+              "source_span": {
+                "start": 60,
+                "end": 65,
+                "doc_id": "guideline-001"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

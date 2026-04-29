@@ -1,0 +1,9 @@
+{
+  "schema_version": "0.1.0",
+  "sat": false,
+  "muc": [
+    "atom:guideline-001:31-60",
+    "atom:guideline-002:0-30"
+  ],
+  "alethe_proof": "(proof (anchor :step t1) (step t1 ...))"
+}

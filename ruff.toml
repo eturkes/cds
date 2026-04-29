@@ -18,10 +18,7 @@ select = [
     "ANN", # flake8-annotations
     "PT",  # flake8-pytest-style
 ]
-ignore = [
-    "ANN101", # missing type annotation for self
-    "ANN102", # missing type annotation for cls
-]
+ignore = []
 
 [lint.per-file-ignores]
 "python/tests/**" = ["ANN", "S101"]

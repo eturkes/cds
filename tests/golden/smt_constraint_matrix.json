@@ -1,0 +1,20 @@
+{
+  "schema_version": "0.1.0",
+  "logic": "QF_LRA",
+  "theories": ["LRA"],
+  "preamble": "(set-logic QF_LRA)\n(declare-fun hba1c () Real)\n",
+  "assumptions": [
+    {
+      "label": "guideline-1-bound",
+      "formula": "(< hba1c 7.0)",
+      "enabled": true,
+      "provenance": "atom:guideline-001:31-60"
+    },
+    {
+      "label": "kernel-domain-bound",
+      "formula": "(>= hba1c 0.0)",
+      "enabled": true,
+      "provenance": null
+    }
+  ]
+}

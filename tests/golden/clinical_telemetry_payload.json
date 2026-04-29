@@ -1,0 +1,27 @@
+{
+  "schema_version": "0.1.0",
+  "source": {
+    "device_id": "icu-monitor-01",
+    "patient_pseudo_id": "pseudo-abc123"
+  },
+  "samples": [
+    {
+      "wall_clock_utc": "2026-04-29T12:55:00.123456Z",
+      "monotonic_ns": 1234567890123,
+      "vitals": {
+        "heart_rate_bpm": 72.5,
+        "spo2_percent": 98.0,
+        "systolic_mmhg": 128.0
+      },
+      "events": [
+        {
+          "name": "manual_bp_cuff_inflate",
+          "at_monotonic_ns": 1234567890500,
+          "data": {
+            "operator": "rn-077"
+          }
+        }
+      ]
+    }
+  ]
+}
