@@ -1,0 +1,46 @@
+{
+  "schema_version": "0.1.0",
+  "root": {
+    "kind": "scope",
+    "id": "contradictory-bound",
+    "scope_kind": "guideline",
+    "children": [
+      {
+        "kind": "relation",
+        "op": "greater_than",
+        "args": [
+          {
+            "kind": "atom",
+            "predicate": "spo2",
+            "terms": [],
+            "source_span": {"start": 0, "end": 4, "doc_id": "contradictory-bound"}
+          },
+          {
+            "kind": "atom",
+            "predicate": "literal",
+            "terms": [{"kind": "constant", "value": "95.0"}],
+            "source_span": {"start": 11, "end": 13, "doc_id": "contradictory-bound"}
+          }
+        ]
+      },
+      {
+        "kind": "relation",
+        "op": "less_than",
+        "args": [
+          {
+            "kind": "atom",
+            "predicate": "spo2",
+            "terms": [],
+            "source_span": {"start": 15, "end": 19, "doc_id": "contradictory-bound"}
+          },
+          {
+            "kind": "atom",
+            "predicate": "literal",
+            "terms": [{"kind": "constant", "value": "90.0"}],
+            "source_span": {"start": 26, "end": 28, "doc_id": "contradictory-bound"}
+          }
+        ]
+      }
+    ]
+  }
+}

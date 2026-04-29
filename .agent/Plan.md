@@ -71,7 +71,7 @@ C6. All inter-process comms = JSON-over-TCP/IP and/or MCP.
 | 1  | Foundational repo scaffolding + env provisioning + memory init                        | **DONE**   | git commit `chore: initial project scaffolding`                                            |
 | 2  | Core conceptual schemas — Rust structs + Pydantic v2 models for the 4 schemas         | **DONE**   | git commit `feat: complete Core Conceptual Schemas`                                        |
 | 3  | Live genuine data ingestion — local CSV/JSON parser → Python harness                  | **DONE**   | git commit `feat: complete Live Genuine Data Ingestion`                                    |
-| 4  | Python neurosymbolic translators — CLOVER text→AST→SMT-LIB                            | pending    | Sample guideline → OnionL JSON → SMT-LIB string; sanity SMT check.                         |
+| 4  | Python neurosymbolic translators — CLOVER text→AST→SMT-LIB                            | **DONE**   | git commit `feat: complete Python neurosymbolic translators`                               |
 | 5  | Rust deductive engine — Nemo Datalog + Octagon state vectors                          | pending    | Datalog rules evaluate; Octagon bounds tighten correctly on sample telemetry.              |
 | 6  | Mathematical solver integration — Z3/cvc5, MUC extraction, Alethe proof emission      | pending    | Contradictory guideline → MUC → Alethe `.proof` artifact.                                  |
 | 7  | Headless Lean 4 interop — Kimina JSON-RPC bridge                                      | pending    | Alethe cert mechanically re-checked by Lean 4; produces `Formal_Verification_Trace`.       |

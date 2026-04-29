@@ -8,6 +8,7 @@ license         = { text = "Apache-2.0 WITH LLVM-exception" }
 authors         = [{ name = "Emir Turkes" }]
 dependencies = [
     "pydantic>=2.9",
+    "z3-solver>=4.13",
 ]
 
 [project.optional-dependencies]

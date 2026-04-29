@@ -182,6 +182,13 @@ DATA_PATH := env_var_or_default('DATA_PATH', 'data/sample')
 py-ingest:
     uv run python -m cds_harness.ingest {{DATA_PATH}} --pretty
 
+# Translate clinical guidelines under data/guidelines → OnionL IR + SMT-LIBv2 matrix.
+# Always runs the SMT sanity check (Task 4 gate). Override GUIDELINE_PATH to retarget.
+GUIDELINE_PATH := env_var_or_default('GUIDELINE_PATH', 'data/guidelines')
+
+py-translate:
+    uv run python -m cds_harness.translate {{GUIDELINE_PATH}} --smt-check --pretty
+
 # =============================================================================
 # Rust (cargo + clippy + rustfmt + cargo-test)
 # =============================================================================

@@ -222,3 +222,127 @@
 - **Manifest file (`data/manifest.toml`)** to enumerate ingestible files. Adds a second source of truth that drifts; directory walk is simpler and Phase 0 ships only a handful of samples.
 - **Auto-coerce unknown vitals into a `data` blob** on a `DiscreteEvent`. Hides namespace drift from authors and pollutes the event stream; we want the loud failure instead.
 - **Permissive timestamp parsing** (e.g. dateutil). Pulls a heavyweight dep for a contract that is already strict on paper; stdlib `datetime.fromisoformat` (Python 3.11+) handles the canonical form natively.
+
+---
+
+## ADR-012 — Phase 0 autoformalization-translator contract
+
+**Status:** Accepted
+**Date:** 2026-04-29
+
+**Context.** Task 4 lands the autoformalization translator: clinical
+guideline natural-language text → `OnionLIRTree` → `SmtConstraintMatrix`
+ready for Z3 (`check-sat`) and (from Task 6) for cvc5 + MARCO MUC
+extraction. Constraint **C2** binds: all unstructured text **must** flow
+through `OnionLIRTree` before any solver touches it. Constraint **C4**
+binds: every contradiction must be projectable back to its offending
+textual node. ADR-005 already commits the pipeline (CLOVER + NL2LOGIC),
+the AST shape (OnionL), and the source-span trace; this ADR pins the
+*Phase 0 implementation contract* — the boundary every later phase
+inherits.
+
+**Decision.**
+
+1. **Adapter seam for the LLM-touched stage.** The translator package
+   exposes an `AutoformalAdapter` Protocol (single method:
+   `formalize(*, doc_id, text) -> OnionLNode`). Phase 0 ships
+   `RecordedAdapter` (deterministic, fixture-driven, **the only adapter
+   exercised by the gate**) and `LiveAdapter` (placeholder that raises
+   `NotImplementedError`). Real LLM wiring is a future ADR — until then,
+   no network calls run as part of `just py-translate`, `just ci`, or any
+   test.
+
+2. **Recorded fixtures are full `OnionLIRTree` envelopes.** Each guideline
+   `<doc>.txt` lives next to a sibling `<doc>.recorded.json` whose top-level
+   shape validates against the Task 2 schema. The adapter returns
+   `tree.root`. This keeps the file independently inspectable and makes
+   schema drift loud.
+
+3. **Two recognised file shapes**, dispatched by extension. `*.txt` is the
+   ingestible guideline; `*.recorded.json` is its sidecar; anything else
+   under `data/guidelines/` (e.g. `README.md`) is silently skipped by the
+   directory walker. Mirrors the ingestion convention of ADR-011.
+
+4. **Source-span byte-offset validation at the boundary.** Every
+   `Atom.source_span` carried by the recorded fixture must satisfy
+   `0 <= start <= end <= len(text.encode("utf-8"))` and
+   `span.doc_id == <file stem>`. Violations raise `InvalidGuidelineError`.
+   This is the boundary check that protects MUC reverse-projection (C4)
+   from drift between fixture authoring and source revisions.
+
+5. **SMT lowering contract (Phase 0).**
+   - The root `Scope`'s direct children are the *clause set*. Each
+     becomes one `LabelledAssertion`. Label format: `clause_NNN`
+     (zero-padded ord). `provenance` format:
+     `atom:<doc_id>:<start>-<end>` taken from the first `Atom`
+     reached by left-to-right walk. The pattern is verbatim from the
+     Task 2 golden fixture so MUC labels round-trip to source spans
+     mechanically.
+   - `Relation.op` lowers through a fixed `OP_MAP`
+     (`and`, `or`, `not`, `implies`, `equals`, `less_than`,
+     `less_or_equal`, `greater_than`, `greater_or_equal`, `plus`,
+     `minus`, `times`, `divide`). Unknown ops raise `UnsupportedOpError`.
+     A tripwire test pins this set; widening it is a coordinated edit.
+   - `IndicatorConstraint(guard, body)` lowers to `(=> guard body)`.
+   - `Atom` lowering: `predicate == "literal"` with one `Constant` term
+     emits the constant value verbatim (numeric literal). Otherwise the
+     predicate is treated as a 0-ary `Real` symbol. A *single*
+     `Variable` term is descriptive and elided (matches the Task 2
+     golden's `hba1c P` ⇒ `hba1c` pattern). Anything richer raises
+     `UnsupportedNodeError` until Tasks 5/6 widen the contract.
+   - Default logic is `QF_LRA`; `THEORIES_BY_LOGIC` maps the small
+     set of Phase 0 logics to their theory lists.
+
+6. **SMT smoke gate via in-process Z3 binding.** The Phase 0 sanity gate
+   (`smt_sanity_check`) parses the emitted SMT-LIBv2 script through
+   `z3-solver`'s `parse_smt2_string` and runs `Solver.check()`. This
+   intentionally side-steps the Rust subprocess warden (ADR-004) — that
+   warden lands with the binary cvc5 + Z3 wiring in Task 6, which is also
+   when MUC extraction begins to need a real subprocess. Until then, the
+   in-process binding is sufficient and avoids an out-of-order Task 5/6
+   dependency on `.bin/z3`.
+
+7. **Error hierarchy.** All translator errors derive from `TranslateError
+   (ValueError)`: `MissingFixtureError`, `InvalidGuidelineError`,
+   `UnsupportedNodeError`, `UnsupportedOpError`. CLI exits `1` for any
+   `TranslateError`, `2` for missing path, `0` on success. Mirrors the
+   ingestion exit-code semantics from ADR-011 so wrapper scripts can
+   handle both uniformly.
+
+8. **Discovery is a deterministic, sorted directory walk.** No manifest
+   file. Mirrors ADR-011 #8. Iteration order is `sorted(path.iterdir())`
+   so output is reproducible across runs and OSes.
+
+**Consequences.** A complete deterministic Phase 0 translator: no LLM in
+the gate, no network, byte-stable on the wire, MUC labels already
+threaded back to source spans. The `LiveAdapter` placeholder makes the
+seam for the LLM client obvious without committing to a specific SDK
+today; the next ADR can pick the client (likely `anthropic`) and pin
+prompt-cache strategy. The `OP_MAP` and atom-lowering rules form a small
+contract that the AST-authoring side (whether human-recorded or
+LLM-emitted) must respect — tripwire tests and explicit
+`UnsupportedNodeError` paths keep drift loud rather than silent.
+
+**Alternatives rejected.**
+- **Live LLM call in the Task 4 gate.** Pulls a network dependency into
+  `just ci`, which violates determinism and makes CI flaky. The
+  `RecordedAdapter`/`LiveAdapter` split keeps both possible without
+  forcing the trade-off now.
+- **Rust subprocess warden routing for the Phase 0 SMT smoke.** Couples
+  Task 4 to Task 5/6 binary plumbing without buying anything for the
+  smoke check (an in-process `(check-sat)` returns sat/unsat exactly the
+  same as the binary). Task 6 reinstates the warden discipline at the
+  point where MUC extraction and proof emission make the binary mode
+  necessary.
+- **Storing recorded fixtures as bare `OnionLNode` JSON** (without the
+  `OnionLIRTree` envelope). Loses the schema-version round-trip and
+  makes drift between Rust + Python schemas harder to detect at fixture
+  load time.
+- **Character-offset source spans.** ADR-005 / ADR-010 pin byte offsets;
+  byte semantics survive any future ingestion of multi-byte clinical
+  glyphs (e.g. `°C`, `µ`, `≥`) without an additional encoding hop.
+- **Per-atom `LabelledAssertion`s** (one per Atom rather than per
+  top-level clause). Bloats the matrix without buying MUC granularity
+  beyond what the source-span trace already provides. Phase 0 stays at
+  one assertion per clause; if the MUC-extraction quality in Task 6
+  needs finer granularity, that is a separate ADR.

@@ -6,88 +6,105 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 3 — Live genuine data ingestion (CSV+sidecar / JSON envelope → `ClinicalTelemetryPayload`) (2026-04-29).
-- **Next up:** Task 4 — Python neurosymbolic translators (CLOVER text → OnionL AST → SMT-LIB).
+- **Last completed:** Task 4 — Python neurosymbolic translators (CLOVER text → OnionL AST → SMT-LIB) (2026-04-29).
+- **Next up:** Task 5 — Rust deductive engine (Nemo Datalog + Octagon state vectors).
 
-## Session 2026-04-29 — Task 3 close-out
+## Session 2026-04-29 — Task 4 close-out
 
-Shipped a Python-only ingestion package that turns local files in `data/`
-into validated `ClinicalTelemetryPayload` envelopes. Constraint **C1** is
-honored: no HTTP, no FHIR streaming.
+Shipped a Python-only autoformalization translator that lifts local
+guideline `*.txt` files into validated `OnionLIRTree` envelopes and lowers
+each one to a Z3-checkable `SmtConstraintMatrix`. The LLM-touched
+formalization stage is hidden behind `AutoformalAdapter`; the Phase 0
+gate uses `RecordedAdapter` (deterministic fixtures), and `LiveAdapter`
+is a placeholder that raises `NotImplementedError` for late-binding the
+real client.
 
-**Module layout (`python/cds_harness/ingest/`):**
+**Module layout (`python/cds_harness/translate/`):**
 
-| File             | Role                                                                              |
-| ---------------- | --------------------------------------------------------------------------------- |
-| `__init__.py`    | Public re-exports (loaders, errors, helpers, `CANONICAL_VITALS`).                 |
-| `__main__.py`    | `python -m cds_harness.ingest` shim.                                              |
-| `canonical.py`   | `CANONICAL_VITALS` frozenset (6 lower-snake-case keys).                           |
-| `errors.py`      | `IngestError` hierarchy (Duplicate / Invalid / Malformed / Missing / Unknown).    |
-| `timestamps.py`  | Strict RFC-3339-Z parse + canonicalize-to-microsecond.                            |
-| `validation.py`  | `assert_unique_monotonic`, `assert_canonical_vitals`.                             |
-| `csv_loader.py`  | CSV (+ `<stem>.meta.json` sidecar) → payload; bisect-bucketed events.             |
-| `json_loader.py` | Whole-payload envelope → re-canonicalized payload; same boundary policies.        |
-| `loader.py`      | Directory walk dispatcher; skips sidecar `*.meta.json`.                           |
-| `cli.py`         | argparse CLI; emits JSON array, exits 0/1/2.                                      |
+| File             | Role                                                                                        |
+| ---------------- | ------------------------------------------------------------------------------------------- |
+| `__init__.py`    | Public re-exports.                                                                          |
+| `__main__.py`    | `python -m cds_harness.translate` shim.                                                     |
+| `errors.py`      | `TranslateError` hierarchy (Missing / Invalid / UnsupportedNode / UnsupportedOp).           |
+| `adapter.py`     | `AutoformalAdapter` Protocol + `RecordedAdapter` + `LiveAdapter` (stub).                    |
+| `clover.py`      | `translate_guideline`, `translate_path`, `discover_translations`; source-span byte validator. |
+| `smt_emitter.py` | `OP_MAP`, `emit_smt`, `serialize`, `smt_sanity_check` (Z3 binding).                          |
+| `cli.py`         | argparse CLI with `--smt-check`, `--logic`, `--pretty`, `--output`.                          |
 
-**Sample data (`data/sample/`):**
-- `icu-monitor-01.csv` (10 rows) + `icu-monitor-01.meta.json` (sidecar).
-- `icu-monitor-02.json` (whole envelope).
-- `data/sample/README.md` documents adding new samples.
+**Sample fixtures (`data/guidelines/`):**
+- `hypoxemia-trigger.txt` (31 bytes) + `hypoxemia-trigger.recorded.json` → `sat`.
+- `contradictory-bound.txt` (30 bytes) + `contradictory-bound.recorded.json` → `unsat`.
+- `data/guidelines/README.md` documents adding new fixtures.
 
-**Tests:** `python/tests/test_ingest.py` — 25 cases:
-canonical-namespace shape, timestamp validators (pad / preserve / reject
-offset / reject naive / non-string), CSV happy path + 8 boundary errors,
-JSON happy path + 3 boundary errors, dispatcher walk + missing-path, CLI
-write + missing-path exit code.
+**Tests:** `python/tests/test_translate.py` — 34 cases covering adapter
+lookup + error paths, source-span validation (doc_id, byte bounds, UTF-8),
+discovery walk semantics, OP_MAP coverage tripwire, IndicatorConstraint
+lowering, single-`Variable` term elision, literal handling, unknown-op
+and richer-atom rejection, the **sat / unsat smoke gate** for both
+fixtures, disabled-assumption drop, and CLI exit codes.
 
-**Justfile wiring:** `py-ingest` recipe (overridable `DATA_PATH`);
-`run-harness` now aliases to `py-ingest`.
+**Justfile wiring:** `py-translate` recipe (overridable `GUIDELINE_PATH`)
+runs the full translator + SMT smoke check end-to-end.
+
+**Dependency:** `z3-solver==4.16.0.0` added to `[project.dependencies]`
+(ADR-001 pre-authorized the Z3/cvc5 Python bindings; the warden
+subprocess wrapper still lands in Task 6 per ADR-004).
 
 Final gate (all green):
-- `uv run pytest` → **37 pass** (3 smoke + 9 schema + 25 ingest).
+- `uv run pytest` → **71 pass** (3 smoke + 9 schema + 25 ingest + 34 translate).
 - `uv run ruff check .` → clean.
-- `cargo test --workspace` → **18 pass** (no Rust changes — sanity).
+- `cargo test --workspace` → 18 pass (no Rust changes — sanity).
 - `cargo clippy --workspace --all-targets -- -D warnings` → clean.
-- `just py-ingest` → 2 payloads, lexicographic vital ordering verified.
+- `just py-translate` → 2 records, `hypoxemia-trigger=sat`, `contradictory-bound=unsat`.
 
-Decisions captured in **ADR-011**.
+Decisions captured in **ADR-012**.
 
-## Open notes for Task 4
+## Open notes for Task 5
 
-- Translator entrypoint: `cds_harness.translate.clover` (or similar). Read
-  `data/guidelines/*.md` (or `*.txt`) → CLOVER pipeline → `OnionLIRTree`
-  JSON → SMT-LIBv2 string. Must round-trip through Z3 `(check-sat)` for
-  the gate.
-- CLOVER + NL2LOGIC are **LLM-touched** stages — keep all LLM calls
-  behind a thin adapter so deterministic test fixtures can swap the
-  network call out for a recorded transcript.
-- Source-span fidelity: every `Atom` produced by the translator MUST
-  carry a `SourceSpan` referencing byte offsets into the original
-  guideline text. ADR-005 is the contract; the schema enforces it (no
-  `Atom` validates without a `SourceSpan`).
-- The translator is the first place we'll need an LLM client. Pick the
-  client library (e.g. `anthropic` SDK) at the start of Task 4 and pin
-  the version; budget for prompt-cache friendliness (long static
-  preamble + dynamic guideline tail).
-- Author 1-2 toy guideline fixtures under `data/guidelines/` so the
-  translator integration test has a real input — same C1 spirit as the
-  ingestion sample dataset.
-- Ship at least one negative-path SMT test (a guideline that intentionally
-  produces an `unsat`) to prepare the wiring for Task 6 (MUC extraction).
+- Rust deductive engine: `crates/kernel` already has the schema; Task 5
+  adds the *evaluation* layer. Wire `nemo` (Datalog) + an `Octagon`
+  abstract-domain implementation. Expected entrypoint:
+  `cds_kernel::deduce::evaluate(payload, rules) -> Verdict`.
+- Octagon state vectors derive from the canonical-vital namespace
+  (`heart_rate_bpm`, `spo2_percent`, ...). Bounds tighten as new
+  `TelemetrySample` rows arrive.
+- The deductive engine consumes `ClinicalTelemetryPayload` (Task 3) +
+  rule sets (TBD format — likely Datalog facts/rules in a `.dl` file
+  under `data/rules/`). Author 1-2 toy rule fixtures.
+- Output schema is internal to the kernel for now; it does **not** touch
+  the wire-format types until Task 6 wires SMT integration.
+- Subprocess hygiene: Task 5 may not yet need `Command::spawn` (Datalog
+  is in-process via `nemo`). The warden lands when Task 6 adds external
+  Z3 / cvc5 binaries.
+- Web-search `"State of the art Rust Datalog engine 2026"` if there's
+  any doubt about `nemo` being current; per Plan §10 #4.
 
 ## Open notes carried forward
 
+- **Translator boundaries (Task 4 contract).** Every guideline `*.txt`
+  needs a sibling `*.recorded.json`; the `RecordedAdapter` is the only
+  Phase 0 path. Switching to a live LLM is a `LiveAdapter`-class swap
+  (and a separate ADR — keep ADR-012 narrowly scoped to the recorded
+  contract).
+- **OP_MAP is the SMT-lowering contract.** Adding a relation op is a
+  coordinated edit across `OP_MAP`, the AST authors (Task 4 fixtures
+  today, future LLM tomorrow), and downstream SMT verification (Task 6).
+  The tripwire test `test_op_map_covers_phase0_operators` will surface
+  any drift.
+- **Source-span = byte offsets, not character offsets** (ADR-005, ADR-010).
+  The translator's UTF-8 byte-length validation is the boundary check
+  that protects Task 6's MUC reverse-projection.
+- **Single-`Variable`-term atom elision** mirrors the Task 2 golden's
+  `hba1c P` ⇒ `hba1c` pattern. Patient-scoped variables are descriptive,
+  not parameters of the lowered SMT formula. Anything richer raises
+  `UnsupportedNodeError` until Task 5/6 broadens the contract.
 - Source data format for ingestion: **CSV + sidecar JSON OR whole-envelope
   JSON.** Anything else is rejected. New canonical vital → coordinated edit
   of `CANONICAL_VITALS` + golden fixtures + downstream rules.
 - Vitals dict ordering on the wire is **lexicographic** (matches Rust
-  `BTreeMap`). The CSV loader sorts keys before constructing the sample;
-  any new ingestion path MUST do the same.
-- Wall-clock canonical form: `YYYY-MM-DDTHH:MM:SS.ffffffZ` (six microsecond
-  digits, literal `Z`). Inputs without fractional seconds are zero-padded.
-- Duplicate `monotonic_ns` is a hard ingestion error — surfaced as
-  `DuplicateMonotonicError` (subclass of `IngestError` → `ValueError`).
+  `BTreeMap`). Any new ingestion path MUST do the same.
+- Wall-clock canonical form: `YYYY-MM-DDTHH:MM:SS.ffffffZ`.
+- Duplicate `monotonic_ns` is a hard ingestion error.
 
 ## Open questions deferred
 
@@ -100,24 +117,31 @@ Decisions captured in **ADR-011**.
   Defer to Task 8.
 - `tool.uv.dev-dependencies` is deprecated in `pyproject.toml`; migrate to
   `dependency-groups.dev`. **Cosmetic only**, schedule as a tooling-cleanup
-  task once Task 4+ stabilizes — non-blocking warning today.
+  task once Task 5+ stabilizes — non-blocking warning today.
 - `schemars` JSON-Schema export for the SvelteKit frontend (Task 9). Not
   needed until then; revisit when wiring the BFF.
-- `cds-ingest` console script (`[project.scripts]`) — currently invoked via
-  `python -m cds_harness.ingest`. Add a thin `cds-ingest` entrypoint when a
-  packaged distribution is needed.
+- `cds-ingest` / `cds-translate` console scripts (`[project.scripts]`) —
+  currently invoked via `python -m cds_harness.<module>`. Add thin
+  entrypoints when a packaged distribution is needed.
+- Z3 access pattern. Task 4 uses the in-process `z3-solver` binding for
+  the smoke check. Task 6 introduces the Rust subprocess warden + the
+  `.bin/z3` binary; revisit at that boundary whether the Python harness
+  also routes through the warden for parity.
 
 ## Hazards / known caveats
 
 - **Wire format is load-bearing.** Any change to a schema field, the
-  `kind` discriminator, OR the ingestion canonical-vital allowlist MUST
-  bump `SCHEMA_VERSION` in both Rust and Python and update goldens.
+  `kind` discriminator, OR the canonical-vital allowlist OR the
+  `OP_MAP`/lowering contract MUST bump `SCHEMA_VERSION` in both Rust and
+  Python and update goldens.
 - **`CANONICAL_VITALS` is part of the boundary contract.** Adding a key
-  is a coordinated edit across translator (Task 4), deductive engine
-  (Task 5), and SMT integration (Task 6). Treat as ADR-grade.
+  is a coordinated edit across translator (Task 4 — `OP_MAP`/atom
+  predicates), deductive engine (Task 5), and SMT integration (Task 6).
+  Treat as ADR-grade.
 - **Subprocess hygiene** is non-negotiable (ADR-004). Any new
   `Command::spawn` site MUST go through the warden and carry
-  `.kill_on_drop(true)` + timeout. Reject PRs that bypass.
+  `.kill_on_drop(true)` + timeout. Task 4 sidesteps this only because
+  `z3-solver` is in-process; Task 6 must reinstate the discipline.
 - **C6 (JSON-over-TCP / MCP only)** — when adding any new IPC, double-check;
   gRPC / shared-mem / FFI across services are forbidden.
 - **C5 (one atomic task per session)** — under no circumstance pre-emptively

@@ -1,0 +1,2 @@
+SpO2 above 95.
+SpO2 below 90.

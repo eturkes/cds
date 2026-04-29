@@ -1,0 +1,46 @@
+{
+  "schema_version": "0.1.0",
+  "root": {
+    "kind": "scope",
+    "id": "hypoxemia-trigger",
+    "scope_kind": "guideline",
+    "children": [
+      {
+        "kind": "relation",
+        "op": "less_than",
+        "args": [
+          {
+            "kind": "atom",
+            "predicate": "spo2",
+            "terms": [],
+            "source_span": {"start": 0, "end": 4, "doc_id": "hypoxemia-trigger"}
+          },
+          {
+            "kind": "atom",
+            "predicate": "literal",
+            "terms": [{"kind": "constant", "value": "100.0"}],
+            "source_span": {"start": 11, "end": 14, "doc_id": "hypoxemia-trigger"}
+          }
+        ]
+      },
+      {
+        "kind": "relation",
+        "op": "greater_than",
+        "args": [
+          {
+            "kind": "atom",
+            "predicate": "spo2",
+            "terms": [],
+            "source_span": {"start": 16, "end": 20, "doc_id": "hypoxemia-trigger"}
+          },
+          {
+            "kind": "atom",
+            "predicate": "literal",
+            "terms": [{"kind": "constant", "value": "60.0"}],
+            "source_span": {"start": 27, "end": 29, "doc_id": "hypoxemia-trigger"}
+          }
+        ]
+      }
+    ]
+  }
+}
