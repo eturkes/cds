@@ -1,0 +1,35 @@
+# =============================================================================
+# Neurosymbolic CDS — Rust workspace (Edition 2024)
+# =============================================================================
+
+[workspace]
+resolver = "3"
+members = ["crates/kernel"]
+
+[workspace.package]
+version       = "0.0.0"
+edition       = "2024"
+rust-version  = "1.85"
+license       = "Apache-2.0 WITH LLVM-exception"
+authors       = ["Emir Turkes"]
+readme        = "README.md"
+description   = "Neurosymbolic Clinical Decision Support — Phase 0 deductive kernel"
+
+[workspace.dependencies]
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+tokio              = { version = "1", features = ["full"] }
+anyhow             = "1"
+thiserror          = "2"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+panic         = "abort"
+strip         = "debuginfo"
+
+[profile.dev]
+opt-level = 0
+debug     = true

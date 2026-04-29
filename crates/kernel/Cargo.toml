@@ -1,0 +1,29 @@
+[package]
+name         = "cds-kernel"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+readme.workspace       = true
+description  = "CDS deductive kernel: Nemo Datalog, Octagon abstract interpretation, subprocess warden."
+
+[lib]
+name = "cds_kernel"
+path = "src/lib.rs"
+
+[dependencies]
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+tokio              = { workspace = true }
+anyhow             = { workspace = true }
+thiserror          = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all      = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

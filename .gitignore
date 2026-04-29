@@ -1,0 +1,90 @@
+# ============================================================================
+# Neurosymbolic CDSS — Polyglot .gitignore (Phase 0)
+# Rust + Python (uv) + TypeScript (bun) + Lean 4 + SMT solver binaries
+# ============================================================================
+
+# -- Project-local prebuilt binaries (cvc5, z3, lean4 fetched by Justfile) ---
+.bin/*
+!.bin/.gitkeep
+
+# -- Local datasets, model caches, scratch outputs --------------------------
+data/raw/
+data/cache/
+data/derived/
+*.local.json
+*.local.csv
+.scratch/
+.cache/
+
+# -- Agent memory: DO commit Plan / ADR / Scratchpad. Block ephemeral logs --
+.agent/sessions/
+.agent/*.log
+.agent/*.tmp
+
+# -- Rust ----------------------------------------------------------------
+target/
+**/*.rs.bk
+Cargo.lock.bak
+.cargo/config.toml.local
+
+# -- Python --------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+.python-version
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+build/
+*.egg-info/
+.uv/
+
+# -- TypeScript / Bun / SvelteKit / Vite --------------------------------
+node_modules/
+.svelte-kit/
+.vite/
+.bun/
+bun.lock.local
+*.tsbuildinfo
+frontend/build/
+frontend/dist/
+frontend/.svelte-kit/
+
+# -- Lean 4 -------------------------------------------------------------
+**/build/
+**/lake-packages/
+.lake/
+*.olean
+*.ilean
+
+# -- SMT artifacts ------------------------------------------------------
+*.smt2.tmp
+proofs/*.alethe.tmp
+proofs/*.lfsc.tmp
+
+# -- Editors / OS -------------------------------------------------------
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.shared.json
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# -- Secrets ------------------------------------------------------------
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets/
+
+# -- Dapr local state ---------------------------------------------------
+.dapr/components/secrets.local.yaml
