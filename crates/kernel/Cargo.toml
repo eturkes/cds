@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace      = true
 authors.workspace      = true
 readme.workspace       = true
-description  = "CDS deductive kernel: Nemo Datalog, Octagon abstract interpretation, subprocess warden."
+description  = "CDS deductive kernel: ascent Datalog, Octagon abstract interpretation, subprocess warden + Z3/cvc5 drivers."
 
 [lib]
 name = "cds_kernel"

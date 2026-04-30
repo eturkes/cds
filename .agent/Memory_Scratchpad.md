@@ -6,8 +6,94 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 5 — Rust deductive engine (ascent Datalog + Octagon abstract domain over canonical vitals) (2026-04-30).
-- **Next up:** Task 6 — Mathematical solver integration (Z3/cvc5, MUC extraction, Alethe proof emission).
+- **Last completed:** Task 6 — Mathematical solver integration (Rust subprocess warden + Z3 unsat-core extraction + cvc5 Alethe proof emission + MUC ↔ source-span projection) (2026-04-30).
+- **Next up:** Task 7 — Headless Lean 4 interop (Kimina JSON-RPC bridge mechanically re-checks the Alethe certificate).
+
+## Session 2026-04-30 — Task 6 close-out
+
+Shipped the Rust solver layer under `crates/kernel/src/solver/`. Public
+entrypoint `cds_kernel::solver::verify(matrix, opts) ->
+FormalVerificationTrace` drives the warden + Z3 + cvc5 pipeline:
+Z3 returns `sat | unsat | unknown` plus the unsat-core label list;
+on `unsat`, cvc5 re-checks and emits an Alethe proof; the unsat-core
+labels are projected through `LabelledAssertion::provenance` into
+`atom:<doc>:<start>-<end>` source-spans (constraint **C4**).
+
+**Module layout (`crates/kernel/src/solver/`):**
+
+| File         | Role                                                                                          |
+| ------------ | --------------------------------------------------------------------------------------------- |
+| `warden.rs`  | tokio `Command::kill_on_drop(true)` + wall-clock `tokio::time::timeout`. ADR-004 honoured.    |
+| `script.rs`  | `SmtConstraintMatrix` → SMT-LIBv2 with named assertions. `RenderMode::{UnsatCore, Proof}`.    |
+| `z3.rs`      | `z3 -smt2 -in` driver. Parses `sat`/`unsat`/`unknown` + `(label …)` core list.                |
+| `cvc5.rs`    | `cvc5 --lang=smt2 --dump-proofs --proof-format-mode=alethe …` driver; captures Alethe text.   |
+| `mod.rs`     | `verify`, `VerifyOptions`, `SolverError`, `project_muc` helper.                               |
+
+**Tests (Rust workspace, all green):**
+
+| Suite                                  | Count | Coverage                                                                                |
+| -------------------------------------- | ----- | --------------------------------------------------------------------------------------- |
+| Existing schema + canonical + deduce   | 38    | (unchanged from Task 5).                                                                |
+| `solver::script` unit                  | 3     | UnsatCore mode adds option + `get-unsat-core`; Proof mode bare; disabled assertions skipped. |
+| `solver::warden` unit                  | 3     | `/bin/cat` echo; `/bin/sleep` timeout → `WardenError::Timeout`; missing binary → `Spawn`.|
+| `solver::z3` unit                      | 6     | sat / unsat+core / unknown / `(error …)` / whitespace tolerant label list / empty list. |
+| `solver::cvc5` unit                    | 4     | unsat+Alethe; sat-no-proof; `(error …)`; leading blank lines.                            |
+| `solver::*` (top-level) unit           | 4     | `project_muc`: provenance lift, fallback to label, unknown label passthrough, sort+dedup.|
+| `tests/solver_smoke.rs` integration    | 4     | **Gate:** consistent → sat-empty-MUC; contradictory → unsat + 2 source-span MUC + Alethe with `(assume clause_*` references; missing-provenance fallback; missing-binary → Warden::Spawn. |
+| Existing `tests/deduce_smoke.rs`       | 5     | (unchanged from Task 5).                                                                |
+| Existing `tests/golden_roundtrip.rs`   | 5     | (unchanged from Task 2).                                                                |
+
+Final gate (all green):
+- `cargo test --workspace` → **72 pass** (58 unit + 5 deduce_smoke + 5 golden_roundtrip + 4 solver_smoke).
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean.
+- `cargo fmt --all -- --check` → clean.
+- `uv run pytest` → 71 pass (no Python regressions).
+- `uv run ruff check .` → clean.
+- `just rs-solver` (new recipe) → 4/4 pass with `--nocapture`.
+
+**Dependencies added:** none (`tokio` and `thiserror` already in the
+kernel deps; warden uses only `tokio::process` + `tokio::time::timeout`).
+
+**Materialized artifact:** `proofs/contradictory-bound.alethe.proof`
+captures the cvc5 Alethe S-expression for the canonical Phase 0
+contradiction so the gate's "Contradictory guideline → MUC → Alethe
+`.proof` artifact" is reproducible by `git diff` against future runs.
+`proofs/README.md` documents the regeneration command.
+
+**Decisions captured in ADR-014** — the Phase 0 SMT/cvc5 contract:
+Z3 owns the unsat-core path, cvc5 owns the Alethe proof; both are
+spawned via the warden with `kill_on_drop(true)` + a wall-clock
+timeout; cvc5 flags pinned per the cvc5 1.3 documentation
+(`--simplification=none --dag-thresh=0
+--proof-granularity=theory-rewrite`); SIGTERM-first escalation
+deferred to Task 7 (Lean / Kimina) where shutdown grace materially
+differs.
+
+## Open notes for Task 7
+
+- Lean 4 / Kimina headless server should consume the
+  `FormalVerificationTrace.alethe_proof` payload that lands in
+  `crates/kernel/src/solver/mod.rs::verify`. The string is a verbatim
+  cvc5 Alethe S-expression. Carcara is the canonical 2026 re-checker
+  for Alethe proofs but is *not* the Lean target — Kimina's JSON-RPC
+  is. Confirm Kimina's payload schema before pinning the bridge.
+- The warden is solver-agnostic. Lean (Kimina) reuses
+  `solver::warden::run_with_input` directly. Task 7 should land a
+  thin `cds_kernel::lean::run` driver next to `solver::z3` /
+  `solver::cvc5` and *not* duplicate spawn / timeout plumbing.
+- ADR-014 deferred SIGTERM-first escalation. Task 7 is when this
+  comes due — Lean / Kimina is long-running and benefits from a
+  graceful-shutdown grace window. Either add `nix` for safe
+  `kill(SIGTERM)` delivery or accept SIGKILL-only and amend ADR-014.
+- Discovery convention: `.bin/lean` lands via `just fetch-lean`
+  (already wired); the `Justfile` PATH-prefixes `.bin/`. Default
+  `VerifyOptions::lean_path = PathBuf::from("lean")` will then
+  resolve correctly under `just`.
+- The Phase 0 marker (`PHASE = 0`) in `lib.rs` is unchanged. ADR-013
+  pre-noted that it bumps to 1 "when the SMT layer lands" — Task 6
+  has landed it but the marker is still read by tests as a phase
+  boundary, not an SMT-readiness gate. Leave as-is until Task 8/9
+  decides what `PHASE = 1` means.
 
 ## Session 2026-04-30 — Task 5 close-out
 

@@ -213,6 +213,12 @@ rs-test:
 rs-deduce:
     cargo test --package cds-kernel --test deduce_smoke -- --nocapture
 
+# Run the solver smoke gate (Task 6): warden + Z3 unsat-core + cvc5
+# Alethe proof emission, projecting MUC labels back to source spans.
+# Requires `.bin/z3` and `.bin/cvc5` (run `just fetch-bins` if missing).
+rs-solver:
+    cargo test --package cds-kernel --test solver_smoke -- --nocapture
+
 # =============================================================================
 # Frontend (bun + Vite + SvelteKit) — placeholder until Task 9
 # =============================================================================

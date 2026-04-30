@@ -455,3 +455,166 @@ cvc5 child.
 - **Per-clause Floyd-Warshall closure now.** Cubic in DBM size and
   unnecessary for the single-variable subset; revisit when relational
   constraints land.
+
+---
+
+## ADR-014 — Phase 0 SMT/cvc5 binary integration contract
+
+**Status:** Accepted
+**Date:** 2026-04-30
+
+**Context.** Task 6 lands the Rust solver layer: a subprocess warden
+that owns Z3 + cvc5 children plus thin drivers that turn an
+[`SmtConstraintMatrix`] into a [`FormalVerificationTrace`] (Z3 →
+sat/unsat + unsat core; cvc5 → Alethe proof). ADR-001 + ADR-006 fix
+the *what* (Z3 primary, cvc5 for Alethe, MARCO for MUC enumeration in a
+later phase). ADR-004 fixes the *defense-in-depth* for spawned
+children. This ADR pins the *Phase 0 implementation contract* — the
+solver-flag set, the script-rendering convention, the MUC ↔
+source-span projection, and the small Phase 0 deviation from ADR-004's
+SIGTERM→SIGKILL escalation.
+
+A 2026-04-30 web search (`"State of the art SMT proof emission Alethe
+LFSC 2026"`) confirmed the cvc5 1.3 Alethe-emission preconditions
+(`--proof-format-mode=alethe`, `--simplification=none`,
+`--dag-thresh=0`, `--proof-granularity=theory-rewrite`) and that Z3's
+`(get-unsat-core)` is unchanged from prior versions — both still
+require the corresponding `(set-option …)` directive ahead of the
+logic header.
+
+**Decision.**
+
+1. **Module layout.** All solver code lives under
+   `crates/kernel/src/solver/`. `mod.rs` exposes `verify`,
+   `VerifyOptions`, `SolverError`, and `project_muc`. Submodules:
+   `warden` (subprocess plumbing), `script` (SMT-LIB rendering),
+   `z3` (Z3 driver), `cvc5` (cvc5 driver). The warden is intentionally
+   solver-agnostic so Task 7's Lean / Kimina bridge can reuse it
+   verbatim.
+2. **Script rendering.**
+   `script::render(matrix, RenderMode)` is the single source of truth
+   for the SMT-LIBv2 text shipped to a solver. Every enabled
+   `LabelledAssertion` is wrapped as `(assert (! <formula> :named
+   <label>))` so:
+   - Z3 returns the unsat core via `(get-unsat-core)` as a parenthesised
+     list of those labels;
+   - cvc5 references them in its Alethe `(assume <label> …)` steps,
+     keeping the proof artifact and the MUC label set on a single
+     stable identifier scheme.
+   `RenderMode::UnsatCore` prepends `(set-option :produce-unsat-cores
+   true)` and appends `(get-unsat-core)`. `RenderMode::Proof` is the
+   bare `(check-sat)` script; cvc5's CLI flag handles proof emission.
+3. **Z3 invocation.** `z3 -smt2 -in` over stdin, parsing
+   `sat`/`unsat`/`unknown` + a single `(label …)` line on the unsat
+   path. `(error …)` is surfaced as `SolverError::Z3Error`.
+4. **cvc5 invocation.** `cvc5 --lang=smt2 --dump-proofs
+   --proof-format-mode=alethe --simplification=none --dag-thresh=0
+   --proof-granularity=theory-rewrite` over stdin. The verdict is the
+   first non-empty line; everything after it is the Alethe
+   S-expression and is captured verbatim into
+   `FormalVerificationTrace.alethe_proof`. Empty proof bodies are
+   coerced to `None` rather than `Some("")`.
+5. **MUC ↔ source-span projection.** `solver::project_muc` looks up
+   each unsat-core label in `matrix.assumptions[*].provenance`. When
+   present, the label is replaced by the provenance string
+   (`atom:<doc>:<start>-<end>`); when absent (e.g. a kernel-synthesised
+   domain bound), the bare label survives so the trace still surfaces
+   the offending assumption. Output is sorted + deduplicated for
+   byte-stable JSON.
+6. **Cross-solver agreement on `unsat`.** `verify` insists Z3 and cvc5
+   agree before accepting an Alethe certificate. Disagreement is a
+   hard `SolverError::SolverDisagreement` rather than a silent
+   verdict-pick. Phase 0 does *not* run cvc5 on `sat` — Z3 alone is
+   authoritative on consistency; cvc5 is only invoked when there is a
+   refutation to certify.
+7. **Z3 `unknown` is a hard error.** `SolverError::UnknownVerdict` is
+   returned rather than fabricating a verdict. Phase 0's QF_LRA
+   workload should never produce `unknown` for the canonical fixtures;
+   if it does, the guideline must be triaged manually.
+8. **Warden contract.** `warden::run_with_input(bin, args, stdin,
+   timeout) -> RunOutcome` is the only spawn site in Task 6. Every
+   `Command` carries `kill_on_drop(true)`. The wall-clock timeout is
+   enforced by wrapping `child.wait_with_output()` in
+   `tokio::time::timeout` — on expiry the future drops, which drops
+   the child handle, which delivers `SIGKILL`. No UNIX-signal
+   handlers are installed in any worker task. `SolverError::Warden`
+   wraps `WardenError::{Spawn, Timeout, Io}` so callers can branch on
+   the failure mode.
+9. **Phase 0 deviation from ADR-004 §2.** ADR-004 specifies a
+   SIGTERM-first escalation with SIGKILL on second expiry. Phase 0
+   collapses this into a single SIGKILL via `kill_on_drop`. Z3 + cvc5
+   are batch-style children with no shutdown hooks — a SIGTERM grace
+   window buys nothing, and the Rust ecosystem's lints
+   (`#![forbid(unsafe_code)]`) preclude `libc::kill(SIGTERM)` without
+   pulling in a `nix`-style dependency. The two-stage escalation is
+   reinstated in **Task 7** when the Lean / Kimina child lands, where
+   shutdown grace materially differs (Lean keeps caches warm and is
+   long-running). At that point either add a `nix` dep for safe
+   SIGTERM delivery or amend this ADR if Phase 0 SIGKILL-only proves
+   sufficient in practice.
+10. **Binary discovery.** `VerifyOptions::{z3_path, cvc5_path}`
+    default to bare command names (`z3`, `cvc5`) resolved via `$PATH`
+    — Phase 0 convention is that the `Justfile` PATH-prefixes
+    `.bin/` (ADR-008). The `solver_smoke` integration tests resolve
+    `<repo>/.bin/{z3,cvc5}` explicitly via `env!("CARGO_MANIFEST_DIR")`
+    so `cargo test --workspace` works outside `just`. Tests print a
+    skip notice when the binaries are absent rather than failing
+    (run `just fetch-bins`).
+11. **Materialized proof artifact.** `proofs/contradictory-bound.alethe.proof`
+    holds the cvc5 Alethe certificate for the canonical Phase 0
+    contradiction. Checked-in for human inspection / snapshot diffing;
+    the authoritative emitter is `solver::verify`. `proofs/README.md`
+    documents the regeneration command.
+
+**Consequences.**
+
+- The Phase 0 SMT layer is now the deductive boundary required by
+  hard-constraint **C3** (`SMT solver evaluates the entire constraint
+  matrix before yielding the validity flag`). `verify` consumes the
+  full matrix, runs `(check-sat)`, and only then emits a
+  `FormalVerificationTrace`.
+- Constraint **C4** (MUC → offending textual node) is honoured by
+  `project_muc`: every unsat-core label round-trips to its
+  `atom:<doc>:<start>-<end>` source-span via the provenance string the
+  Python translator wrote in Task 4. The translator's UTF-8
+  byte-offset validation (ADR-012 §4) is the boundary check that
+  protects this round-trip from drift.
+- The warden is solver-agnostic, so Task 7's Lean / Kimina bridge can
+  reuse `warden::run_with_input` verbatim. Task 7 should add a
+  `cds_kernel::lean` driver next to `solver::{z3, cvc5}` — not a
+  parallel spawn site.
+- The Phase 0 SIGKILL-only escalation is documented but not amended
+  into ADR-004; Task 7 closes the loop.
+- `tracing::debug!` from `solver::{z3, cvc5}` surfaces solver stderr
+  for diagnostics without pollutiting the wire-format trace.
+
+**Alternatives rejected.**
+
+- **One driver for both Z3 and cvc5.** Diverging flag sets and parsing
+  rules (Z3's `(label …)` core list vs. cvc5's S-expression Alethe
+  body) bloat the abstraction without gaining anything; the two
+  drivers are <120 LOC each.
+- **Run cvc5 on `sat` payloads too.** No artifact to certify, doubles
+  the wall-clock for the common case. Z3 alone is authoritative on
+  consistency.
+- **Run MARCO MUC enumeration in Task 6.** ADR-006 lists MARCO + HNN +
+  CASHWMaxSAT for full MUC enumeration; that is a *post-Phase-0*
+  refinement. Z3's single-pass `(get-unsat-core)` produces *a* core
+  (not necessarily minimal in the formal MUC sense), which is
+  sufficient for the Phase 0 gate and the source-span trace. The
+  schema field is named `muc` for forward-compat; replacing the
+  enumerator is a downstream swap behind the same `verify` API.
+- **Carcara for in-process Alethe re-checking.** Carcara is the
+  canonical 2026 Alethe checker, but ADR-006 routes the foundational
+  re-check through Lean 4 / Kimina (Task 7), not Carcara. Re-evaluating
+  this when Task 7 lands is allowed; for now, the `alethe_proof` field
+  is treated as opaque text.
+- **Implement `nix`-backed SIGTERM in Task 6.** `nix` (or any unsafe
+  libc shim) is a dep we don't otherwise need today; the kernel
+  forbids `unsafe_code`. Phase 0 SIGKILL-only is the simpler
+  trade-off; reinstate at Task 7 when Lean process management
+  benefits from a grace window.
+- **Ship the Alethe proof inline as the gate artifact only.** Checking
+  the proof file under `proofs/` keeps it inspectable in `git diff`
+  and gives Task 7 a stable target for Kimina re-check experiments
+  ahead of full pipeline wiring. Cost: one tracked file (~3.5 KB).

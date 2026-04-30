@@ -7,9 +7,13 @@
 //!   Python `cds_harness.ingest.canonical.CANONICAL_VITALS` constant.
 //! - The deductive evaluator ([`deduce`], Task 5): in-process Datalog
 //!   (`ascent`) + Octagon abstract domain over canonical vitals.
+//! - The mathematical-solver layer ([`solver`], Task 6): subprocess
+//!   warden + Z3 unsat-core extraction + cvc5 Alethe proof emission +
+//!   MUC ↔ source-span projection — produces a
+//!   [`schema::FormalVerificationTrace`] from an
+//!   [`schema::SmtConstraintMatrix`].
 //!
-//! The subprocess warden lands with the SMT/cvc5/Lean integrations in
-//! Tasks 6 / 7 (per ADR-004 + ADR-013).
+//! Lean 4 / Kimina re-checking lands in Task 7.
 
 #![forbid(unsafe_code)]
 #![deny(clippy::all)]
@@ -17,6 +21,7 @@
 pub mod canonical;
 pub mod deduce;
 pub mod schema;
+pub mod solver;
 
 /// Stable identifier for this crate. Consumed by smoke tests + future trace logs.
 pub const KERNEL_ID: &str = "cds-kernel";

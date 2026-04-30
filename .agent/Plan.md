@@ -73,7 +73,7 @@ C6. All inter-process comms = JSON-over-TCP/IP and/or MCP.
 | 3  | Live genuine data ingestion — local CSV/JSON parser → Python harness                  | **DONE**   | git commit `feat: complete Live Genuine Data Ingestion`                                    |
 | 4  | Python neurosymbolic translators — CLOVER text→AST→SMT-LIB                            | **DONE**   | git commit `feat: complete Python neurosymbolic translators`                               |
 | 5  | Rust deductive engine — Nemo Datalog + Octagon state vectors                          | **DONE**   | git commit `feat: complete Rust deductive engine`                                          |
-| 6  | Mathematical solver integration — Z3/cvc5, MUC extraction, Alethe proof emission      | pending    | Contradictory guideline → MUC → Alethe `.proof` artifact.                                  |
+| 6  | Mathematical solver integration — Z3/cvc5, MUC extraction, Alethe proof emission      | **DONE**   | git commit `feat: complete Mathematical solver integration`                                |
 | 7  | Headless Lean 4 interop — Kimina JSON-RPC bridge                                      | pending    | Alethe cert mechanically re-checked by Lean 4; produces `Formal_Verification_Trace`.       |
 | 8  | Dapr workflow orchestration — sidecar boundaries Rust↔Python↔solvers                  | pending    | End-to-end pipeline runs under Dapr; logs traceable per stage.                             |
 | 9  | SvelteKit frontend — wire to live backend; render AST, Octagon, MUCs                  | pending    | UI shows live trace from real dataset; verification flag round-trips.                      |
