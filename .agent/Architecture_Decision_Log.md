@@ -1469,3 +1469,243 @@ same per-stage tracing convention.
 - **Daprd-driven integration test in 8.3b1.** That is exactly the
   scope cut — fitting it back in is what blew the original 8.3b
   context budget. 8.3b2 owns it.
+
+## ADR-020 — Phase 0 Rust kernel pipeline Dapr smoke split (Task 8.3b2 → 8.3b2a + 8.3b2b)
+
+**Status:** Accepted
+**Date:** 2026-05-01
+
+**Context.** Task 8.3b2 inherited from ADR-019 §10 + the
+Memory_Scratchpad open-notes block a four-fold scope: (a) introduce
+`KernelServiceState { verify_options: VerifyOptions, lean_options:
+LeanOptions }` resolved at boot from `CDS_Z3_PATH` / `CDS_CVC5_PATH`
+/ `CDS_KIMINA_URL` / `CDS_SOLVER_TIMEOUT_MS` / `CDS_LEAN_TIMEOUT_MS`;
+(b) refactor the three pipeline handlers from stateless to
+`axum::extract::State<KernelServiceState>` consumers, with
+per-request `options` retaining replace-the-floor semantics; (c)
+lift the existing smoke helpers (`pick_free_port`,
+`wait_until_ready`, SIGTERM-cleanup teardown) from
+`tests/service_smoke.rs` into a shared `tests/common.rs` module; and
+(d) ship three daprd-driven cargo integration tests, one per
+pipeline endpoint, hitting `/v1.0/invoke/cds-kernel/method/v1/{deduce,solve,recheck}`
+against canonical fixtures. That bundle again exceeded a single
+context window — the same context-overflow pattern that already
+forced Task 8 → 8.1–8.4 (ADR-016), Task 8.3 → 8.3a + 8.3b
+(ADR-018), and Task 8.3b → 8.3b1 + 8.3b2 (ADR-019). Plan §8 §nb on
+2026-05-01 split 8.3b2 along the natural external-dependency
+boundary into **8.3b2a (this ADR — foundation refactor + the
+dependency-free `/v1/deduce` Dapr smoke)** and **8.3b2b (close-out:
+`/v1/solve` + `/v1/recheck` Dapr smokes gated on `.bin/z3` +
+`.bin/cvc5` and `CDS_KIMINA_URL` respectively)**.
+
+**Decision.**
+
+### 1. Split rationale — external-dependency boundary
+
+8.3b2's three integration tests fall cleanly into two cohorts:
+
+- **`/v1/deduce`** — drives `cds_kernel::deduce::evaluate` against
+  a synthetic `ClinicalTelemetryPayload`. Pure Rust + ascent Datalog
+  (ADR-013). No subprocess, no external solver, no Kimina daemon. The
+  only runtime dependency is daprd itself, which the existing
+  `service_smoke.rs` foundation gate already wires up.
+- **`/v1/solve`** — depends on `.bin/z3` + `.bin/cvc5` binaries
+  staged by `just fetch-z3` / `just fetch-cvc5` (ADR-008). On a
+  fresh checkout `.bin/` is empty until `just fetch-bins` runs. The
+  fixtures (`data/guidelines/contradictory-bound.recorded.json`)
+  carry the canonical unsat trace.
+- **`/v1/recheck`** — depends on a running Kimina daemon
+  (operator-managed per ADR-015 §3); the test must skip with a
+  loud notice when `CDS_KIMINA_URL` is unset, mirroring
+  `tests/lean_smoke.rs`.
+
+Splitting along this boundary keeps 8.3b2a's gate self-contained
+(no `.bin/` provisioning required at session-time, no Kimina
+dependency) while 8.3b2b inherits a stable foundation and adds the
+two gated tests as a focused close-out. The foundation refactor
+(`KernelServiceState`, handler `State` extraction, `tests/common.rs`
+lift) is the prerequisite for both gated tests but is large enough
+on its own to warrant its own session.
+
+### 2. 8.3b2a contract — foundation + deduce smoke
+
+- **State type.** `KernelServiceState { verify_options:
+  VerifyOptions, lean_options: LeanOptions }` lives in
+  `cds_kernel::service::state` (new module) or folds into `app.rs`
+  if compact. `Clone` + `Send + Sync` (axum `State` requires
+  `Clone`).
+- **Constructor `from_env()`.** Reads the five env vars in §1's
+  context. Defaults match the existing `VerifyOptions::default()`
+  / `LeanOptions::default()` shapes: bare `z3` / `cvc5` from
+  `$PATH`, `http://127.0.0.1:8000`, 30 s solver timeout, 60 s lean
+  timeout. Invalid values (non-utf8, non-numeric ms, overflowing
+  u64) **panic at boot**; same fail-loud discipline as
+  `service::config::parse_port_raw` (ADR-018 §1).
+- **Handler refactor.** Three handlers gain `State(state):
+  State<KernelServiceState>` as a leading argument. Per-request
+  `options` retains replace-the-floor semantics: present fields
+  win; absent fields fall back to `state.verify_options` /
+  `state.lean_options`. `/healthz` stays stateless via either a
+  separate stateless sub-router merged in via `Router::merge`, or
+  a healthz-router-then-pipeline-router composition. The choice is
+  a session-time implementation detail; the constraint is "no
+  state plumbed through `/healthz`".
+- **`build_router(state: KernelServiceState) -> Router<()>`.**
+  The factory signature changes; tests must construct a
+  state instance (cheap — `KernelServiceState::default()` provided
+  for tests). The `bin/cds_kernel_service.rs` entrypoint
+  constructs state via `KernelServiceState::from_env()` before
+  serving.
+- **`tests/common.rs`.** New module-shared file collecting the
+  three helpers (`pick_free_port`, `wait_until_ready`, SIGTERM
+  cleanup wrapper) that 8.3a originally inlined into
+  `service_smoke.rs`. Each integration test file declares
+  `mod common;` and uses `#[allow(dead_code)]` on items the file
+  doesn't exercise. This was forecast in 8.3b1's open notes
+  ("lift them to a shared `tests/common.rs` module if a second
+  integration test grows") — 8.3b2a is exactly that growth point.
+- **Deduce Dapr smoke.** Single new test in
+  `tests/service_smoke.rs`. Synthetic `ClinicalTelemetryPayload`
+  with samples spanning the canonical-vital allowlist; one
+  out-of-band reading (e.g., `heart_rate = 30 bpm`); asserts
+  non-empty `breach_summary`. Runs through
+  `/v1.0/invoke/cds-kernel-deduce-smoke/method/v1/deduce` (distinct
+  app-id from the foundation healthz smoke).
+- **Justfile.** No recipe rename. `rs-service-smoke` continues to
+  run the whole `tests/service_smoke.rs` suite; the new test joins
+  the existing two cases for a 3-test gate. `--test-threads=1`
+  carried unchanged.
+- **Gate.** `cargo test --workspace` green (target ~143 pass:
+  137 baseline + ~5 state unit + 1 deduce-Dapr smoke); clippy
+  clean; fmt clean; pytest 95/95 untouched; `just rs-service-smoke`
+  3/3.
+
+### 3. 8.3b2b contract — solve + recheck smokes (close-out)
+
+- **`/v1/solve` Dapr smoke.** Drives
+  `data/guidelines/contradictory-bound.recorded.json` through
+  `/v1.0/invoke/cds-kernel-solve-smoke/method/v1/solve`. Asserts
+  `verdict == Unsat` + Alethe proof present. Gated on `.bin/z3` +
+  `.bin/cvc5` presence with loud SKIP when absent.
+- **`/v1/recheck` Dapr smoke.** Re-derives or re-uses the trace
+  from the solve smoke and POSTs to
+  `/v1.0/invoke/cds-kernel-recheck-smoke/method/v1/recheck`.
+  Asserts `severity == Info` + recheck succeeded. Gated on
+  `CDS_KIMINA_URL` presence with loud SKIP when absent
+  (matches `tests/lean_smoke.rs` discipline).
+- **Per-request `options` pin the binaries.** Both smokes set
+  `options.z3_path` / `options.cvc5_path` to absolute `.bin/z3` /
+  `.bin/cvc5` paths so the test does not rely on `$PATH`
+  resolution inside daprd's environment. This also serves as the
+  on-the-wire validation that 8.3b2a's per-request override
+  semantics work end-to-end.
+- **Test-file decision (deferred to 8.3b2b session-time).** If
+  `tests/service_smoke.rs` grew long enough during 8.3b2a (>~500
+  lines or >~7 tests), 8.3b2b splits solve+recheck into
+  `tests/service_pipeline_smoke.rs` and adds a new
+  `just rs-service-pipeline-smoke` recipe; otherwise both cases
+  stay in `service_smoke.rs` and `rs-service-smoke` covers them.
+  The decision is made at 8.3b2b session-time based on actual
+  file shape; this ADR doesn't pre-commit.
+- **Gate.** `cargo test --workspace` green (target ~143 + 2 gated
+  smokes when binaries + Kimina present, else ~143 + 2 SKIPs);
+  clippy/fmt/pytest unchanged; `just rs-service-smoke` (or paired
+  `just rs-service-pipeline-smoke`) covers solve + recheck cases;
+  manual six-endpoint round-trip check (kernel: `/healthz`,
+  `/v1/{deduce,solve,recheck}`; harness: `/healthz`,
+  `/v1/{ingest,translate}`) against their respective daprd
+  sidecars. **This is the close-out of 8.3b** — 8.4 composes
+  these endpoints via Dapr Workflow.
+
+### 4. Env mutation hazard — pick `serial_test` or sub-process
+
+`from_env()` reads process-global state; cargo's parallel test
+runner can race two `from_env_panics_on_non_numeric_timeout`-style
+tests if they each set and unset the same variable. 8.3b2a picks
+**one** of: (a) `serial_test = "3"` as a `[dev-dependencies]`
+addition with `#[serial_test::serial]` on the env-mutating
+unit tests; or (b) drive the env-mutation tests via a sub
+`std::process::Command` so each owns its environment. Pick the
+shorter dep delta at session-time; both are defensible. The
+constraint this ADR pins is: **do not** rely on cargo's
+single-thread-default-for-integration-tests as the env isolation
+mechanism, because integration-test serialization is enforced via
+the Justfile `--test-threads=1`, not via cargo defaults, and that
+discipline must not bleed into unit tests.
+
+### 5. Per-request override semantics — replace, not cap
+
+Per-request `options.timeout_ms`, when present, **replaces** the
+env-resolved timeout; it does not add or cap. Same for
+`z3_path` / `cvc5_path` / `kimina_url`. This matches the 8.3b1
+contract where `Option<…OptionsWire>` already had per-field
+replace semantics; 8.3b2a is changing the floor from
+`::default()` to `state.…`. The replace rule is documented in
+handler-side comments and in the 8.3b2a open-notes block in
+`Memory_Scratchpad.md`.
+
+### 6. SIGTERM-first warden escalation — still deferred
+
+ADR-014 §9 → ADR-015 §8 → ADR-016 §7 → ADR-018 §6 → ADR-019 §11
+each rolled the production solver-warden's SIGTERM-first escalation
+forward. Neither 8.3b2a nor 8.3b2b changes that contract: the
+warden still uses tokio `Child::kill()` (SIGKILL on the immediate
+child) for production timeouts. ADR-018 §6's narrow authorization
+for SIGTERM in *test cleanup* of the dapr CLI is unchanged; the
+helper that lives in `tests/common.rs` after 8.3b2a continues to
+own that narrowly-authorized SIGTERM path. Production SIGTERM-first
+remains scheduled for Task 8.4 alongside the Workflow-driven
+end-to-end gate.
+
+**Consequences.** Task 8.3b2a is sized to fit a single context
+window: a focused refactor (state introduction + handler `State`
+extraction + helper lift) plus one dependency-free integration
+test plus ~5 state unit tests. Task 8.3b2b inherits a stable
+foundation and adds the two gated integration tests as a
+close-out — both are conceptually small once `tests/common.rs` is
+in place. Workflow (Task 8.4) gets a polyglot pipeline where every
+kernel-side handler reads its option floor from env, every
+per-request override has well-defined replace semantics, and every
+sidecar has been validated through a daprd-driven cargo
+integration test (kernel `deduce`/`solve`/`recheck` + harness
+`ingest`/`translate`).
+
+**Alternatives rejected.**
+
+- **Single `8.3b2` session, accept the context overflow.** Has
+  failed twice for the surrounding tasks (ADR-018, ADR-019). The
+  cost of another mid-session context exhaustion is far higher
+  than the cost of one ADR + plan-row split.
+- **Split along the per-endpoint axis (8.3b2a = deduce; 8.3b2b =
+  solve; 8.3b2c = recheck).** Three sub-tasks instead of two.
+  The foundation refactor (`KernelServiceState` + handler
+  `State` extraction + `tests/common.rs`) cuts cleanly with deduce
+  but doesn't decompose further. solve + recheck are each small
+  enough that splitting them adds session overhead without
+  reducing per-session scope. Two sub-tasks is the right
+  granularity.
+- **Defer `tests/common.rs` lift to 8.3b2b.** Would force 8.3b2a
+  to inline its helpers (`pick_free_port`, `wait_until_ready`,
+  SIGTERM cleanup) directly in `service_smoke.rs` alongside
+  the existing 8.3a helpers, then deduplicate in 8.3b2b. The
+  duplication-then-lift path is more total work than the
+  lift-once-up-front path, and 8.3b1 already forecast the lift.
+- **Defer `KernelServiceState` introduction to Task 8.4.** Would
+  leave 8.3b2 owning only the daprd integration tests and 8.4
+  inheriting both the state refactor and the Workflow scope. 8.4
+  is already large (Workflow harness + placement bring-up + per-
+  stage tracing + SIGTERM-first warden decision); folding the
+  state refactor in would push *that* session over the budget.
+  The state refactor lives where it provides immediate value:
+  the test that exercises per-request override semantics
+  end-to-end through daprd.
+- **Eliminate `KernelServiceState` and read env vars per-request.**
+  Pushes env parsing onto every request's hot path; loses the
+  fail-loud-at-boot semantics that catch typos in operator
+  configuration before the first request. Boot-time resolution +
+  one-shot state is the standard axum pattern.
+- **Permit silent fallback on invalid env values.** Masks
+  operator typos (`CDS_SOLVER_TIMEOUT_MS=30s` parses as a panic
+  rather than as 30000 ms — fail-loud is the right call). The
+  fail-loud rule lifts directly from `service::config::parse_port_raw`
+  (ADR-018 §1) and the same arguments apply.

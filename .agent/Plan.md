@@ -81,6 +81,16 @@ C6. All inter-process comms = JSON-over-TCP/IP and/or MCP.
 > `AppState` wiring + a Dapr-driven cargo integration test driving all
 > three endpoints through daprd) again exceeded a single context
 > window. ADR-019 captures the rationale and the per-sub-task gates.
+> **Task 8.3b2 was further split into 8.3b2a + 8.3b2b on 2026-05-01**
+> for the same reason: the original 8.3b2 scope bundled `AppState`
+> introduction + env-driven `VerifyOptions` / `LeanOptions` resolution
+> + handler refactor onto `axum::extract::State` + lifting shared
+> smoke helpers into `tests/common.rs` + three daprd-driven cargo
+> integration tests (one per pipeline) — and the
+> external-dependency gate of the solve / recheck tests
+> (`.bin/z3`, `.bin/cvc5`, `CDS_KIMINA_URL`) cleanly separates from
+> the dependency-free `/v1/deduce` smoke + the foundation refactor.
+> ADR-020 captures the rationale and the per-sub-task gates.
 
 | #     | Task                                                                                                          | Status   | Session output gate                                                                                                                  |
 | ----- | ------------------------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -95,13 +105,14 @@ C6. All inter-process comms = JSON-over-TCP/IP and/or MCP.
 | 8.2   | Python harness Dapr service — FastAPI app exposing `/v1/ingest` + `/v1/translate`                             | **DONE** | git commit `feat: complete Task 8.2 Python harness Dapr service`                                                                     |
 | 8.3a  | Rust kernel service foundation — axum app skeleton + `/healthz` + `[[bin]]` + Justfile recipes                | **DONE** | git commit `feat: complete Task 8.3a Rust kernel service foundation`                                                                 |
 | 8.3b1 | Rust kernel pipeline handlers — `/v1/deduce` + `/v1/solve` + `/v1/recheck` + `IntoResponse` lifts + unit tests | **DONE** | git commit `feat: complete Task 8.3b1 Rust kernel pipeline handlers`                                                                 |
-| 8.3b2 | Rust kernel pipeline Dapr smoke — daprd-driven cargo integration test for all three endpoints                 | pending  | Cargo integration test drives `/v1/deduce` + `/v1/solve` + `/v1/recheck` through daprd's `/v1.0/invoke/cds-kernel/method/v1/...` against canonical fixtures (`data/guidelines/contradictory-bound.recorded.json` for solve+recheck, telemetry payload for deduce); `AppState` wires env-driven `VerifyOptions` / `LeanOptions` overrides (`CDS_KIMINA_URL`, `CDS_Z3_PATH`, `CDS_CVC5_PATH`); `just rs-service-smoke` covers the new pipeline cases with the existing `--test-threads=1` discipline. |
-| 8.4   | End-to-end Dapr Workflow — `ingest → translate → deduce → solve → recheck`                                    | pending  | End-to-end pipeline runs under Dapr against a canonical guideline; placement + scheduler up; per-stage tracing; flag round-trips.    |
-| 9     | SvelteKit frontend — wire to live backend; render AST, Octagon, MUCs                                          | pending  | UI shows live trace from real dataset; verification flag round-trips.                                                                |
+| 8.3b2a | Rust kernel `AppState` + `/v1/deduce` Dapr smoke — env-driven option resolution + dependency-free pipeline smoke | pending  | `KernelServiceState { verify_options, lean_options }` resolved from `CDS_Z3_PATH` / `CDS_CVC5_PATH` / `CDS_KIMINA_URL` / `CDS_SOLVER_TIMEOUT_MS` / `CDS_LEAN_TIMEOUT_MS` at boot; three handlers refactored onto `axum::extract::State`; per-request `options` still override env defaults; `/healthz` stays stateless; shared smoke helpers (`pick_free_port`, `wait_until_ready`, SIGTERM cleanup) lifted into `tests/common.rs`; daprd-driven cargo integration test drives `/v1/deduce` through `/v1.0/invoke/cds-kernel/method/v1/deduce` with a synthetic telemetry payload spanning the canonical-vital allowlist (no external solver / Kimina deps); `just rs-service-smoke` extended to cover the new deduce sidecar case with the existing `--test-threads=1` discipline. |
+| 8.3b2b | Rust kernel `/v1/solve` + `/v1/recheck` Dapr smokes — gated on `.bin/z3`+`.bin/cvc5` and `CDS_KIMINA_URL`        | pending  | Cargo integration tests drive `/v1/solve` and `/v1/recheck` through daprd against `data/guidelines/contradictory-bound.recorded.json`: solve test gated on `.bin/z3` + `.bin/cvc5` presence (loud SKIP when absent — same pattern as `tests/solver_smoke.rs`); recheck test gated on `CDS_KIMINA_URL` (loud SKIP when absent — same pattern as `tests/lean_smoke.rs`) and chains the trace from the solve test forward; lift solve+recheck cases into `tests/service_pipeline_smoke.rs` if `service_smoke.rs` grows long, paired with a `just rs-service-pipeline-smoke` recipe; `--test-threads=1` discipline carried throughout. Final 8.3b close-out — six Phase 0 endpoints (kernel + harness) round-trip through daprd. |
+| 8.4    | End-to-end Dapr Workflow — `ingest → translate → deduce → solve → recheck`                                     | pending  | End-to-end pipeline runs under Dapr against a canonical guideline; placement + scheduler up; per-stage tracing; flag round-trips.    |
+| 9      | SvelteKit frontend — wire to live backend; render AST, Octagon, MUCs                                           | pending  | UI shows live trace from real dataset; verification flag round-trips.                                                                |
 
 **At any session:** select STRICTLY the lowest-numbered uncompleted
 task. No leapfrogging. Sub-tasks follow the same discipline —
-`8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2 < 8.4 < 9`.
+`8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4 < 9`.
 
 ## 9. Context-Governed Re-Entry Prompt (verbatim)
 
