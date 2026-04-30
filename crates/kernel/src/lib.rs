@@ -1,19 +1,27 @@
 //! `cds-kernel` — neurosymbolic CDS deductive kernel.
 //!
-//! Phase 0 home of (a) the four conceptual schema types (`schema` module,
-//! Task 2) that form the wire format between every pipeline stage, and
-//! (b) — landing in Task 5 — the Nemo Datalog evaluator, Octagon
-//! abstract-interpretation domain, and subprocess warden.
+//! Phase 0 home of:
+//! - The four conceptual schema types ([`schema`], Task 2) that form the
+//!   wire format between every pipeline stage.
+//! - The canonical-vital allowlist ([`canonical`]) — Rust mirror of the
+//!   Python `cds_harness.ingest.canonical.CANONICAL_VITALS` constant.
+//! - The deductive evaluator ([`deduce`], Task 5): in-process Datalog
+//!   (`ascent`) + Octagon abstract domain over canonical vitals.
+//!
+//! The subprocess warden lands with the SMT/cvc5/Lean integrations in
+//! Tasks 6 / 7 (per ADR-004 + ADR-013).
 
 #![forbid(unsafe_code)]
 #![deny(clippy::all)]
 
+pub mod canonical;
+pub mod deduce;
 pub mod schema;
 
 /// Stable identifier for this crate. Consumed by smoke tests + future trace logs.
 pub const KERNEL_ID: &str = "cds-kernel";
 
-/// Phase 0 marker. Bumped to 1 when Task 5 lands real kernel logic.
+/// Phase 0 marker. Bumped to 1 when the SMT layer lands.
 pub const PHASE: u8 = 0;
 
 /// Returns whether the kernel identifier is well-formed (ASCII, kebab-case).
@@ -41,6 +49,6 @@ mod tests {
 
     #[test]
     fn phase_zero_is_active() {
-        assert_eq!(PHASE, 0, "phase marker must be 0 until Task 5 lands");
+        assert_eq!(PHASE, 0, "phase marker must be 0 until SMT integration");
     }
 }

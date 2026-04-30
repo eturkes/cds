@@ -346,3 +346,112 @@ LLM-emitted) must respect — tripwire tests and explicit
   beyond what the source-span trace already provides. Phase 0 stays at
   one assertion per clause; if the MUC-extraction quality in Task 6
   needs finer granularity, that is a separate ADR.
+
+---
+
+## ADR-013 — Phase 0 deductive-engine substitution: Nemo → `ascent`
+
+**Status:** Accepted (Phase 0 narrow-scope substitution)
+**Date:** 2026-04-30
+
+**Context.** Task 5 lands the Rust deductive kernel. ADR-001 + Plan §6
+lock `Nemo Datalog` as the rule engine, with the Memory Scratchpad
+expectation that "Task 5 may not yet need `Command::spawn` (Datalog is
+in-process via `nemo`)." A `cargo search nemo` (verified 2026-04-30
+against crates.io) returns no Nemo Rust *library* crate — only the
+`nmo` CLI, a browser/WASM frontend, and Python bindings published by
+the upstream knowsys/nemo team. The only in-process option that
+honours the scratchpad's expectation is to substitute another active
+Rust Datalog engine; the only out-of-process options are the `nmo`
+CLI subprocess (which would force the warden discipline of ADR-004
+into Task 5, ahead of the Z3/cvc5 binary integration in Task 6) or a
+network-bound Nemo server (no upstream artefact exists). The
+single-process substitution preserves both the scratchpad's
+in-process invariant and ADR-004's intent that the warden lands with
+the *first* external solver/Lean child (Z3 in Task 6).
+
+In parallel, the *Octagon* abstract domain has a textbook
+implementation (Miné 2006) that requires either a from-scratch DBM or
+a third-party numerical-domain crate. No mature 2026 Rust crate ships
+the relational octagonal domain off the shelf (Apron has C bindings
+but is heavyweight and not a clean build dep for the kernel). Phase 0
+needs only a *streaming hull* over canonical vital scalars to
+demonstrate "Octagon bounds tighten correctly on sample telemetry";
+the relational `+x +y ≤ c` machinery and Floyd-Warshall closure are
+not on the critical path until rules grow beyond per-vital bands.
+
+**Decision.**
+
+1. **Datalog engine (in-process, sequential).** Replace Nemo with
+   `ascent` (`crates.io/crates/ascent`, v0.8, MIT, `default-features
+   = false`). `ascent` is a procedural-macro Datalog DSL with seminaive
+   evaluation, mature relation algebra, and active 2024-2026
+   maintenance; the macro generates a plain `Default + Send + Sync`
+   struct so it cleanly composes with the rest of the kernel. The
+   `par` default feature (rayon + dashmap + once_cell) is disabled so
+   the kernel stays single-threaded and deterministic at this stage;
+   re-enabling it is a future micro-decision tied to throughput need.
+2. **Datalog program shape.** All numeric reasoning happens *outside*
+   `ascent` (in the evaluator + Octagon). The Datalog input schema is
+   exclusively threshold-breach facts keyed by `monotonic_ns` (`u64`);
+   columns are `Eq + Hash` by construction, sidestepping the
+   `f64`/Datalog impedance mismatch. Derived predicates split into
+   named clinical conditions (`tachycardia`, `desaturation`, ...) and
+   roll-up alarms (`early_warning`, `compound_alarm`).
+3. **Octagon scope.** Phase 0 emits only single-variable bound
+   constraints (`+x ≤ c`, `-x ≤ c`); the DBM is full-shape (`2n × 2n`
+   over the canonical-vital arity) so future relational tightening
+   does not require a struct refactor. Floyd-Warshall closure is
+   *not* run in Phase 0 — for the single-variable subset of the
+   octagonal lattice the cell-wise lattice operations (`update_min`
+   on `tighten`; cell-wise `max` on `join`) already produce closed
+   forms. Streaming semantics: `tighten_*` is *meet* (intersection),
+   per-sample point octagons are *joined* (LUB) to recover the
+   convex hull across the sample stream.
+4. **Verdict surface is internal to the kernel.** The four wire-format
+   schemas (Task 2) are unchanged; Task 6 introduces the SMT-backed
+   `FormalVerificationTrace` populated from the Verdict + the SMT
+   solver. The Verdict struct does derive `Serialize/Deserialize` so
+   workflow plumbing in Task 8 can hand it across a Dapr/MCP boundary
+   without re-encoding.
+5. **Threshold rule fixtures are advisory.** `Phase0Thresholds` lives
+   in the kernel for ergonomics today; the *authoritative* arithmetic
+   claims are encoded as `OnionLIRTree → SmtConstraintMatrix` (Tasks
+   4 + 6). The deductive engine is a downstream consumer — the SMT
+   layer must NOT cross-import threshold bands.
+
+**Consequences.** Phase 0 has a working deductive layer today without
+inflating the warden roadmap. The Nemo substitution is narrow:
+re-evaluating once the upstream Nemo project ships a Rust library
+crate (or once we want the existential-rule chase that `ascent`
+doesn't natively expose) is a single-decision swap behind the same
+`evaluate(payload, rules) -> Verdict` API. Octagon scope is a Phase 0
+conservative approximation; widening to relational octagonal
+constraints is additive — the DBM shape and the meet/join scaffolding
+are ready, only the Floyd-Warshall closure + relational `tighten_*`
+methods need to be added. No subprocesses are spawned, so ADR-004's
+warden discipline lands cleanly in Task 6 alongside the first Z3 /
+cvc5 child.
+
+**Alternatives rejected.**
+- **`nmo` CLI subprocess from Task 5.** Forces warden boilerplate
+  ahead of Task 6 (which must build it anyway for Z3/cvc5) and
+  introduces an OS dependency for a pipeline stage that has a clean
+  in-process option.
+- **`crepe` (Datalog-as-procedural-macro).** Less actively maintained
+  than `ascent`; lacks BYODS (Bring-Your-Own-Data-Structures), which
+  we may want for indexed relations once the rule base grows.
+- **`datafrog`.** Used by rustc/polonius; lower-level (manual
+  iteration loops) than `ascent`, and doesn't generate a struct/run
+  abstraction. Net: more boilerplate, less ergonomic for the rule
+  set we expect to author by hand.
+- **From-scratch Datalog in `cds_kernel`.** NIH violates ADR-007's
+  "use the modern ecosystem" stance, and seminaive correctness is
+  load-bearing for Phase 1+ rule scale.
+- **Apron via FFI for the Octagon.** Heavyweight C dep; ADR-002
+  forbids cross-language FFI for service boundaries (allowed inside
+  the kernel process, but the build-system cost is disproportionate
+  for Phase 0 single-variable bounds).
+- **Per-clause Floyd-Warshall closure now.** Cubic in DBM size and
+  unnecessary for the single-variable subset; revisit when relational
+  constraints land.

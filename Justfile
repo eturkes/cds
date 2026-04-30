@@ -208,6 +208,11 @@ rs-format:
 rs-test:
     cargo test --workspace
 
+# Run the deductive engine smoke gate (Task 5): Datalog rule firing +
+# Octagon hull tightening across the kernel test fixtures.
+rs-deduce:
+    cargo test --package cds-kernel --test deduce_smoke -- --nocapture
+
 # =============================================================================
 # Frontend (bun + Vite + SvelteKit) — placeholder until Task 9
 # =============================================================================

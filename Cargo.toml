@@ -23,6 +23,7 @@ anyhow             = "1"
 thiserror          = "2"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ascent             = { version = "0.8", default-features = false }
 
 [profile.release]
 lto           = "thin"
