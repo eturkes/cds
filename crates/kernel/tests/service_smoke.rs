@@ -1,69 +1,50 @@
-//! Integration smoke for the Phase 0 kernel service (Task 8.3a).
+//! Integration smoke for the Phase 0 kernel service.
 //!
-//! Two suites:
+//! Three suites:
 //!
-//! 1. **Standalone HTTP** — bind the axum router on an ephemeral port,
-//!    issue an actual TCP request to `/healthz`, decode the body, and
-//!    assert the response shape pinning the kernel invariants.
+//! 1. **Standalone HTTP** (Task 8.3a) — bind the axum router on an
+//!    ephemeral port, issue an actual TCP request to `/healthz`, decode
+//!    the body, and assert the response shape pinning the kernel
+//!    invariants.
 //!
-//! 2. **Gated Dapr sidecar** — when `.bin/dapr` and the slim
-//!    `.bin/.dapr/.dapr/bin/daprd` are staged, spawn `dapr run -- <bin>`
-//!    around the just-built `cds-kernel-service`, wait for the
-//!    `/v1.0/healthz/outbound` readiness probe, then drive
+//! 2. **Gated Dapr healthz sidecar** (Task 8.3a) — when `.bin/dapr`
+//!    and the slim `.bin/.dapr/.dapr/bin/daprd` are staged, spawn
+//!    `dapr run -- <bin>` around the just-built `cds-kernel-service`,
+//!    wait for the `/v1.0/healthz/outbound` readiness probe, then drive
 //!    `/v1.0/invoke/cds-kernel-smoke/method/healthz` through the
 //!    sidecar and assert the same invariants. Skipped (loud notice)
-//!    when Dapr is not staged. Mirrors the rs-lean gating pattern.
+//!    when Dapr is not staged.
 //!
-//! ADR-018 documents the contract this smoke gates.
+//! 3. **Gated Dapr deduce sidecar** (Task 8.3b2a — new) — same
+//!    sidecar shape as suite 2, but driving
+//!    `/v1.0/invoke/cds-kernel-deduce-smoke/method/v1/deduce` with a
+//!    synthetic `ClinicalTelemetryPayload` whose readings span the
+//!    canonical-vital allowlist. The payload includes one out-of-band
+//!    reading (`heart_rate_bpm = 30`, below the default
+//!    `Phase0Thresholds.heart_rate_bpm.low = 50`) so the
+//!    `breach_summary.bradycardia` list comes back populated. No
+//!    external solver / Kimina dependency is exercised — the deduce
+//!    pipeline is pure Rust + ascent (ADR-013); this is the
+//!    dependency-free half of the 8.3b2 daprd close-out (ADR-020 §1).
+//!
+//! ADR-018 / ADR-020 document the contracts these smokes gate.
 
-use std::net::TcpListener as StdTcpListener;
-use std::path::{Path, PathBuf};
+mod common;
+
 use std::time::{Duration, Instant};
 
 use cds_kernel::KERNEL_ID;
+use cds_kernel::deduce::Verdict;
 use cds_kernel::schema::SCHEMA_VERSION;
 use cds_kernel::service::{
-    HEALTHZ_PATH, HOST_ENV, KernelHealthz, PORT_ENV, SERVICE_APP_ID, build_router,
+    HEALTHZ_PATH, KernelHealthz, KernelServiceState, SERVICE_APP_ID, build_router,
+    handlers::DEDUCE_PATH,
 };
-use nix::sys::signal::{Signal, kill};
-use nix::unistd::Pid;
-use serde_json::Value;
-use tokio::process::{Child, Command};
+use serde_json::{Value, json};
 
-/// Bind ephemeral, capture port, drop socket — single-use TCP port lease
-/// for tests. Race window with another binder is theoretical at the
-/// timescale of a test pass.
-fn pick_free_port() -> u16 {
-    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    listener.local_addr().expect("local_addr").port()
-}
-
-/// Wait until `url` responds with one of `accept_status`, or the deadline
-/// expires. Returns the final HTTP status on success.
-async fn wait_until_ready(
-    client: &reqwest::Client,
-    url: &str,
-    accept_status: &[u16],
-    deadline: Instant,
-) -> Result<reqwest::StatusCode, String> {
-    let mut last_status: Option<reqwest::StatusCode> = None;
-    let mut last_err: Option<String> = None;
-    while Instant::now() < deadline {
-        match client.get(url).send().await {
-            Ok(resp) => {
-                last_status = Some(resp.status());
-                if accept_status.contains(&resp.status().as_u16()) {
-                    return Ok(resp.status());
-                }
-            }
-            Err(err) => last_err = Some(err.to_string()),
-        }
-        tokio::time::sleep(Duration::from_millis(150)).await;
-    }
-    Err(format!(
-        "readiness wait timed out for {url}: status={last_status:?} err={last_err:?}"
-    ))
-}
+use crate::common::{
+    DaprPorts, build_dapr_command, dapr_paths, sigterm_then_kill, wait_until_ready,
+};
 
 #[tokio::test]
 async fn standalone_axum_serves_healthz() {
@@ -72,7 +53,7 @@ async fn standalone_axum_serves_healthz() {
         .expect("bind");
     let addr = listener.local_addr().expect("local_addr");
     let server = tokio::spawn(async move {
-        let _ = axum::serve(listener, build_router()).await;
+        let _ = axum::serve(listener, build_router(KernelServiceState::default())).await;
     });
 
     let client = reqwest::Client::new();
@@ -95,80 +76,6 @@ async fn standalone_axum_serves_healthz() {
     let _ = server.await;
 }
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .expect("kernel crate is two levels under repo root")
-}
-
-fn dapr_paths() -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
-    let root = repo_root();
-    let cli = root.join(".bin").join("dapr");
-    let install = root.join(".bin").join(".dapr");
-    let daprd = install.join(".dapr").join("bin").join("daprd");
-    let resources = root.join("dapr").join("components");
-    let config = root.join("dapr").join("config.yaml");
-    (cli, daprd, install, resources, config)
-}
-
-/// Bundle the four ports the sidecar needs so the helper signature stays
-/// readable.
-struct DaprPorts {
-    app: u16,
-    http: u16,
-    grpc: u16,
-    metrics: u16,
-}
-
-/// Build the `dapr run -- <bin>` command. Extracted from the test body so
-/// `clippy::too_many_lines` doesn't flag the (legitimately long) test driver.
-/// `kill_on_drop` is the ADR-004 §7 hammer; the test additionally sends
-/// SIGTERM-first via `sigterm_then_kill` so the dapr CLI's signal handler
-/// has a chance to forward termination to its grandchildren before SIGKILL
-/// orphans them to PID 1 (ADR-018 §6).
-fn build_dapr_command(
-    cli: &Path,
-    smoke_app_id: &str,
-    ports: &DaprPorts,
-    install: &Path,
-    resources: &Path,
-    config: &Path,
-    service_bin: &str,
-) -> Command {
-    let mut cmd = Command::new(cli);
-    cmd.arg("run")
-        .arg("--app-id")
-        .arg(smoke_app_id)
-        .arg("--app-port")
-        .arg(ports.app.to_string())
-        .arg("--app-protocol")
-        .arg("http")
-        .arg("--dapr-http-port")
-        .arg(ports.http.to_string())
-        .arg("--dapr-grpc-port")
-        .arg(ports.grpc.to_string())
-        .arg("--metrics-port")
-        .arg(ports.metrics.to_string())
-        .arg("--runtime-path")
-        .arg(install)
-        .arg("--resources-path")
-        .arg(resources)
-        .arg("--config")
-        .arg(config)
-        .arg("--log-level")
-        .arg("info")
-        .arg("--")
-        .arg(service_bin);
-    cmd.env(HOST_ENV, "127.0.0.1")
-        .env(PORT_ENV, ports.app.to_string())
-        .kill_on_drop(true)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    cmd
-}
-
 #[tokio::test]
 async fn dapr_sidecar_drives_healthz_through_service_invocation() {
     // Path to the just-built service binary, set by cargo at compile time.
@@ -177,23 +84,18 @@ async fn dapr_sidecar_drives_healthz_through_service_invocation() {
     let (cli, daprd, install, resources, config) = dapr_paths();
     if !cli.is_file() || !daprd.is_file() {
         eprintln!(
-            "==> SKIP: dapr CLI / slim runtime not staged (run `just fetch-dapr`); skipping kernel sidecar smoke"
+            "==> SKIP: dapr CLI / slim runtime not staged (run `just fetch-dapr`); skipping kernel sidecar healthz smoke"
         );
         return;
     }
     if !resources.is_dir() || !config.is_file() {
         eprintln!(
-            "==> SKIP: dapr/components or dapr/config.yaml missing; skipping kernel sidecar smoke"
+            "==> SKIP: dapr/components or dapr/config.yaml missing; skipping kernel sidecar healthz smoke"
         );
         return;
     }
 
-    let ports = DaprPorts {
-        app: pick_free_port(),
-        http: pick_free_port(),
-        grpc: pick_free_port(),
-        metrics: pick_free_port(),
-    };
+    let ports = DaprPorts::allocate();
 
     // Use a smoke-specific app-id so a parallel `cds-kernel` (e.g. a
     // long-running developer sidecar) does not collide.
@@ -285,18 +187,205 @@ async fn dapr_sidecar_drives_healthz_through_service_invocation() {
     sigterm_then_kill(&mut child, Duration::from_secs(5)).await;
 
     if let Err(err) = result {
-        panic!("kernel sidecar smoke failed: {err}");
+        panic!("kernel sidecar healthz smoke failed: {err}");
     }
 }
 
-async fn sigterm_then_kill(child: &mut Child, grace: Duration) {
-    if let Some(pid_u32) = child.id() {
-        if let Ok(pid_i32) = i32::try_from(pid_u32) {
-            let _ = kill(Pid::from_raw(pid_i32), Signal::SIGTERM);
+/// Canonical vitals expected on every deduce verdict's `octagon_bounds`
+/// envelope. Matches `crate::canonical::CANONICAL_VITALS` and the
+/// payload sample shape below.
+const EXPECTED_CANONICAL_VITALS: &[&str] = &[
+    "diastolic_mmhg",
+    "heart_rate_bpm",
+    "respiratory_rate_bpm",
+    "spo2_percent",
+    "systolic_mmhg",
+    "temp_celsius",
+];
+
+/// Decode the deduce response body and assert the verdict shape this
+/// smoke pins: 3 samples processed, `bradycardia == [1]` (sample 1's
+/// `heart_rate_bpm = 30` trips the default low-bound), and the octagon
+/// hull names every canonical vital. Extracted from the test body so
+/// `clippy::too_many_lines` stays satisfied.
+fn assert_expected_deduce_verdict(body_bytes: &[u8]) -> Result<(), String> {
+    let verdict: Verdict = serde_json::from_slice(body_bytes)
+        .map_err(|e| format!("decode Verdict: {e}; body={body_bytes:?}"))?;
+    if verdict.samples_processed != 3 {
+        return Err(format!(
+            "samples_processed mismatch: got {} (expected 3)",
+            verdict.samples_processed
+        ));
+    }
+    if verdict.breach_summary.bradycardia != vec![1u64] {
+        return Err(format!(
+            "bradycardia breach list mismatch: got {:?} (expected [1])",
+            verdict.breach_summary.bradycardia
+        ));
+    }
+    for name in EXPECTED_CANONICAL_VITALS {
+        if !verdict.octagon_bounds.contains_key(*name) {
+            return Err(format!(
+                "octagon_bounds missing canonical vital `{name}`; keys={:?}",
+                verdict.octagon_bounds.keys().collect::<Vec<_>>()
+            ));
         }
     }
-    if tokio::time::timeout(grace, child.wait()).await.is_err() {
-        let _ = child.kill().await;
-        let _ = child.wait().await;
+    Ok(())
+}
+
+/// Synthetic telemetry payload used by the daprd `/v1/deduce` smoke.
+///
+/// Three samples spanning the canonical-vital allowlist
+/// (`crate::canonical::CANONICAL_VITALS`); sample 1 includes
+/// `heart_rate_bpm = 30` which is below the default
+/// `Phase0Thresholds.heart_rate_bpm.low = 50`, so the bradycardia
+/// breach list comes back non-empty. The other readings stay in-band so
+/// the verdict's other lists are deliberately empty.
+fn deduce_payload() -> Value {
+    json!({
+        "payload": {
+            "schema_version": SCHEMA_VERSION,
+            "source": {
+                "device_id": "cds-deduce-smoke-dev",
+                "patient_pseudo_id": "cds-deduce-smoke-pseudo",
+            },
+            "samples": [
+                {
+                    "wall_clock_utc": "2026-04-29T12:55:00.000000Z",
+                    "monotonic_ns": 1u64,
+                    "vitals": {
+                        "diastolic_mmhg": 70.0,
+                        "heart_rate_bpm": 30.0,            // out of band — bradycardia.
+                        "respiratory_rate_bpm": 16.0,
+                        "spo2_percent": 97.0,
+                        "systolic_mmhg": 118.0,
+                        "temp_celsius": 37.0,
+                    },
+                    "events": [],
+                },
+                {
+                    "wall_clock_utc": "2026-04-29T12:55:01.000000Z",
+                    "monotonic_ns": 2u64,
+                    "vitals": {
+                        "diastolic_mmhg": 72.0,
+                        "heart_rate_bpm": 60.0,
+                        "respiratory_rate_bpm": 18.0,
+                        "spo2_percent": 96.0,
+                        "systolic_mmhg": 120.0,
+                        "temp_celsius": 36.9,
+                    },
+                    "events": [],
+                },
+                {
+                    "wall_clock_utc": "2026-04-29T12:55:02.000000Z",
+                    "monotonic_ns": 3u64,
+                    "vitals": {
+                        "diastolic_mmhg": 71.0,
+                        "heart_rate_bpm": 65.0,
+                        "respiratory_rate_bpm": 17.0,
+                        "spo2_percent": 97.0,
+                        "systolic_mmhg": 119.0,
+                        "temp_celsius": 37.1,
+                    },
+                    "events": [],
+                },
+            ],
+        },
+    })
+}
+
+#[tokio::test]
+async fn dapr_sidecar_drives_deduce_through_service_invocation() {
+    let service_bin = env!("CARGO_BIN_EXE_cds-kernel-service");
+
+    let (cli, daprd, install, resources, config) = dapr_paths();
+    if !cli.is_file() || !daprd.is_file() {
+        eprintln!(
+            "==> SKIP: dapr CLI / slim runtime not staged (run `just fetch-dapr`); skipping kernel sidecar deduce smoke"
+        );
+        return;
+    }
+    if !resources.is_dir() || !config.is_file() {
+        eprintln!(
+            "==> SKIP: dapr/components or dapr/config.yaml missing; skipping kernel sidecar deduce smoke"
+        );
+        return;
+    }
+
+    let ports = DaprPorts::allocate();
+    // Distinct app-id so this sidecar coexists with the healthz smoke
+    // (and any developer sidecar) without colliding.
+    let smoke_app_id = "cds-kernel-deduce-smoke";
+
+    let mut cmd = build_dapr_command(
+        &cli,
+        smoke_app_id,
+        &ports,
+        &install,
+        &resources,
+        &config,
+        service_bin,
+    );
+    let mut child = cmd
+        .spawn()
+        .expect("dapr run --app-id cds-kernel-deduce-smoke");
+
+    let result = async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("reqwest client");
+        let deadline = Instant::now() + Duration::from_secs(25);
+
+        wait_until_ready(
+            &client,
+            &format!("http://127.0.0.1:{}{HEALTHZ_PATH}", ports.app),
+            &[200],
+            deadline,
+        )
+        .await
+        .map_err(|e| format!("app readiness: {e}"))?;
+
+        wait_until_ready(
+            &client,
+            &format!("http://127.0.0.1:{}/v1.0/healthz/outbound", ports.http),
+            &[200, 204],
+            deadline,
+        )
+        .await
+        .map_err(|e| format!("sidecar readiness: {e}"))?;
+
+        let invoke_url = format!(
+            "http://127.0.0.1:{}/v1.0/invoke/{smoke_app_id}/method{DEDUCE_PATH}",
+            ports.http
+        );
+        let resp = client
+            .post(&invoke_url)
+            .json(&deduce_payload())
+            .send()
+            .await
+            .map_err(|e| format!("invoke: {e}"))?;
+        let status = resp.status();
+        let body_bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("invoke read: {e}"))?;
+        if status != reqwest::StatusCode::OK {
+            return Err(format!(
+                "invoke status: {status}; body={}",
+                String::from_utf8_lossy(&body_bytes)
+            ));
+        }
+
+        assert_expected_deduce_verdict(&body_bytes)?;
+        Ok::<(), String>(())
+    }
+    .await;
+
+    sigterm_then_kill(&mut child, Duration::from_secs(5)).await;
+
+    if let Err(err) = result {
+        panic!("kernel sidecar deduce smoke failed: {err}");
     }
 }

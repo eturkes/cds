@@ -6,11 +6,106 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 8.3b1 — Rust kernel pipeline handlers (axum handlers under `cds_kernel::service::handlers` for `/v1/deduce`, `/v1/solve`, `/v1/recheck` wired to `deduce::evaluate` / `solver::verify` / `lean::recheck`; `IntoResponse` impls for `DeduceError` / `SolverError` / `LeanError` lift every variant to the `{error, detail}` HTTP 422 envelope; comprehensive unit + `tower::oneshot` runtime tests; `cargo test --workspace` → **137 pass** + clippy clean + fmt clean + pytest 95/95 untouched + `just rs-service-smoke` 2/2) (2026-05-01).
-- **Plan restructure (2026-05-01, planning-only session):** Task 8.3b2 split into **8.3b2a** (foundation: `AppState` + env-driven option resolution + handler refactor onto `axum::extract::State` + shared smoke helpers in `tests/common.rs` + dependency-free `/v1/deduce` Dapr smoke) and **8.3b2b** (close-out: `/v1/solve` + `/v1/recheck` Dapr smokes gated on `.bin/z3`+`.bin/cvc5` and `CDS_KIMINA_URL`). ADR-020 captures the rationale and per-sub-task gates. No code changed this session.
-- **Next up:** Task 8.3b2a — Rust kernel `AppState` + `/v1/deduce` Dapr smoke (env-driven `VerifyOptions` / `LeanOptions` resolution from `CDS_Z3_PATH` / `CDS_CVC5_PATH` / `CDS_KIMINA_URL` / `CDS_SOLVER_TIMEOUT_MS` / `CDS_LEAN_TIMEOUT_MS`; three handlers move to `axum::extract::State`; `/healthz` stays stateless; shared smoke helpers lifted into `tests/common.rs`; one daprd-driven `/v1/deduce` integration test against a synthetic telemetry payload).
+- **Last completed:** Task 8.3b2a — Rust kernel `AppState` + `/v1/deduce` Dapr smoke (`KernelServiceState { verify_options, lean_options }` resolved at boot from `CDS_Z3_PATH` / `CDS_CVC5_PATH` / `CDS_KIMINA_URL` / `CDS_SOLVER_TIMEOUT_MS` / `CDS_LEAN_TIMEOUT_MS`; three pipeline handlers refactored onto `axum::extract::State<KernelServiceState>` with per-request `options` retaining replace-the-floor semantics; `/healthz` stays stateless on a stateful router via not extracting `State<_>`; shared smoke helpers (`pick_free_port`, `wait_until_ready`, `repo_root`, `dapr_paths`, `DaprPorts`, `build_dapr_command`, `sigterm_then_kill`) lifted into `tests/common/mod.rs`; one daprd-driven cargo integration test (`dapr_sidecar_drives_deduce_through_service_invocation`, app-id `cds-kernel-deduce-smoke`) drives `/v1/deduce` with a 3-sample synthetic `ClinicalTelemetryPayload` (sample 1 carries `heart_rate_bpm = 30` to trigger bradycardia) and asserts `samples_processed == 3`, `breach_summary.bradycardia == [1]`, all 6 canonical vitals present in `octagon_bounds`; `cargo test --workspace` → **149 pass** + clippy clean + fmt clean + `just rs-service-smoke` 3/3 + pytest 95/95 + ruff clean + env-verify ✓) (2026-05-01).
+- **Next up:** Task 8.3b2b — Rust kernel `/v1/solve` + `/v1/recheck` Dapr smokes (gated on `.bin/z3`+`.bin/cvc5` and `CDS_KIMINA_URL`; final 8.3b close-out — six Phase 0 endpoints round-trip through daprd).
 
 > **Task 8 was split** into 8.1–8.4 on 2026-04-30 (ADR-016) because a monolithic Dapr-orchestration task repeatedly exhausted a single context window. **Task 8.3 was further split** into 8.3a / 8.3b on 2026-04-30 (ADR-018) because the kernel service binds three subprocess pipelines (`deduce`, `solve`, `recheck`) behind one axum app and the foundation + endpoint plumbing each warrant their own session. **Task 8.3b was further split** into 8.3b1 / 8.3b2 on 2026-05-01 (ADR-019) because the original 8.3b scope (three handlers + their `IntoResponse` impls + comprehensive unit tests + `AppState` wiring + a Dapr-driven cargo integration test driving all three endpoints through daprd) again exceeded a single context window. **Task 8.3b2 was further split** into 8.3b2a / 8.3b2b on 2026-05-01 (ADR-020) because the original 8.3b2 scope (`AppState` introduction + env-driven option resolution + handler refactor onto `axum::extract::State` + shared smoke helpers + three daprd-driven cargo integration tests) again exceeded a single context window — and the external-dependency gate of solve/recheck (`.bin/z3`, `.bin/cvc5`, `CDS_KIMINA_URL`) cleanly separates from the dependency-free `/v1/deduce` smoke + the foundation refactor. Sub-task progression is strict: `8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4 < 9`.
+
+## Session 2026-05-01 — Task 8.3b2a close-out
+
+Shipped the Phase 0 Rust kernel `KernelServiceState` foundation + the
+dependency-free `/v1/deduce` daprd smoke. The router is now stateful;
+the three pipeline handlers extract their options floor from
+`axum::extract::State<KernelServiceState>` while `/healthz` stays
+stateless by simply not extracting `State<_>`. ADR-020 §2 codified the
+contract; this session implemented it as designed.
+
+**Module additions / edits (`crates/kernel/src/service/`):**
+
+| File          | Role                                                                                                                                                 |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `state.rs`    | New: `KernelServiceState { verify_options, lean_options }`; `from_env()` (panics on `VarError::NotUnicode` per ADR-018 §1 / ADR-020 §2 fail-loud-at-boot discipline); pure `from_lookup<F: Fn(&str) -> Option<String>>` helper enables closure-injection unit tests with **zero env mutation** (cleaner than the two `serial_test` / sub-process options ADR-020 §4 listed); private helpers `lookup_string`, `lookup_path`, `lookup_duration`; latter panics on non-numeric / negative ms. |
+| `mod.rs`      | Added `pub mod state;` + re-exports of `KernelServiceState` and the 5 env constants (`Z3_PATH_ENV`, `CVC5_PATH_ENV`, `SOLVER_TIMEOUT_MS_ENV`, `KIMINA_URL_ENV`, `LEAN_TIMEOUT_MS_ENV`).                                                                          |
+| `app.rs`      | `build_router` now takes `state: KernelServiceState` and ends with `.with_state(state)`; removed the (now-redundant) `#[must_use]` since `Router` already carries it.                                                                                              |
+| `handlers.rs` | Three handlers gain `State(state): State<KernelServiceState>`; `SolveOptionsWire::into_verify_options` / `RecheckOptionsWire::into_lean_options` now take a `floor:` arg so per-request fields independently override env defaults (ADR-020 §5 replace-the-floor). |
+| `bin/cds_kernel_service.rs` | `serve()` calls `KernelServiceState::from_env()` and passes it to `build_router`; the boot `tracing::info!` line now reports `z3_path` / `cvc5_path` / `solver_timeout_ms` / `kimina_url` / `lean_timeout_ms` so an operator typo + a fresh sidecar boot together surface the resolved floors.            |
+
+**Test additions / lifts:**
+
+| File                                  | Role                                                                                                                                                              |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/common/mod.rs`                 | New (directory form so cargo doesn't compile it as its own test binary): `pick_free_port`, `wait_until_ready`, `repo_root`, `dapr_paths`, `DaprPorts { app, http, grpc, metrics }` with `allocate()`, `build_dapr_command`, `sigterm_then_kill`. Top-level `#![allow(dead_code)]` because cargo's per-crate dead-code analysis can't see cross-test-file usage. |
+| `tests/service_smoke.rs`              | Rewritten to `mod common;` and import shared helpers; new third test `dapr_sidecar_drives_deduce_through_service_invocation` drives the deduce endpoint via daprd (app-id `cds-kernel-deduce-smoke`); assertion logic extracted into `assert_expected_deduce_verdict` to keep the test under `clippy::too_many_lines`. |
+| `service::state` unit tests           | 9 new: defaults-when-unset, default-equals-empty-lookup, z3 + cvc5 path overrides, kimina_url override, solver/lean timeout parsing, empty-or-whitespace-treated-as-unset, panic on non-numeric solver timeout, panic on negative lean timeout. |
+| `service::handlers` unit tests        | 2 new partial-override cases: solve `timeout_ms`-only with non-default floor preserves z3/cvc5; recheck `kimina_url`-only with non-default floor preserves timeout/custom_id/extra_headers. |
+
+**Closure-injection design note.** ADR-020 §4 listed two options for
+isolating env-touching tests (`serial_test` dep or sub-`std::process::Command`).
+Neither was needed: the pure `from_lookup<F: Fn(&str) -> Option<String>>(f)`
+helper takes the env oracle as an argument; `from_env()` is a
+one-liner that delegates with the obvious closure
+(`from_lookup(|key| std::env::var(key).ok())`). Tests pass
+hand-built `HashMap`-style closures and never touch process env. The
+constraint pinned by ADR-020 §4 (don't mutate process env in tests)
+is satisfied by construction. No new ADR was opened — this is a
+micro-decision that fits inside the existing ADR-020 contract.
+
+**Deduce smoke shape.** App-id `cds-kernel-deduce-smoke` (distinct
+from the existing `cds-kernel-smoke` healthz sidecar so both can
+co-exist). 3-sample `ClinicalTelemetryPayload` spans the canonical
+vital allowlist; sample 1 has `heart_rate_bpm = 30` (below the default
+`Phase0Thresholds.heart_rate_bpm.low = 50`), so
+`breach_summary.bradycardia == [1]` is the smoke's primary assertion;
+the other 5 vitals stay in-band so other breach lists are deliberately
+empty. SIGTERM-first cleanup of the `dapr` CLI child via
+`sigterm_then_kill(&mut child, Duration::from_secs(5))` (ADR-018 §6
+narrow auth, unchanged from 8.3a). No `.bin/z3` / `.bin/cvc5` /
+Kimina dep — the deduce path is pure Rust + ascent (ADR-013).
+
+**Tests (Rust workspace, all green — 149 pass total):**
+
+| Suite                                              | Count | Delta vs 8.3b1 |
+| -------------------------------------------------- | ----- | -------------- |
+| Existing schema + canonical + deduce + solver + lean baseline | 116 | unchanged. |
+| `service::config` unit                              | 5     | unchanged.     |
+| `service::errors` unit                              | 9     | unchanged.     |
+| `service::app` unit                                 | 6     | unchanged shape; bodies updated to pass `KernelServiceState::default()` to `build_router`. |
+| `service::handlers` unit                            | 13    | +2 (solve partial-override, recheck partial-override). |
+| `service::state` unit                               | 9     | new module.    |
+| `bin::cds_kernel_service` unit                      | 3     | unchanged.     |
+| `tests/service_smoke.rs` integration                | 3     | +1 (`dapr_sidecar_drives_deduce_through_service_invocation`). |
+| `tests/{deduce_smoke, golden_roundtrip, lean_smoke, solver_smoke}` integration | 15 | unchanged. |
+
+> Total: 116 + 5 + 9 + 6 + 13 + 9 + 3 + 3 + 15 = 149 (the cargo runner
+> reports the same 149 split across 8 binaries; the per-binary
+> breakdown above sums by category for future-session clarity).
+
+**Final regression gate (all green):**
+
+- `cargo test --workspace` → **149 pass** (+12 vs 8.3b1's 137).
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean
+  (initial run flagged `double_must_use` on `build_router` and
+  `manual_string_new` in the state tests + `too_many_lines` on the
+  new deduce smoke; all three fixed in-session).
+- `cargo fmt --all -- --check` → clean.
+- `uv run pytest` → 95 pass (Python tree untouched).
+- `uv run ruff check .` → clean.
+- `just rs-service-smoke` → 3/3.
+- `just env-verify` → ✓ (uv 0.11.8, cargo 1.95.0, rustc 1.95.0,
+  bun 1.3.13, just 1.50.0, git 2.47.3, curl 8.14.1; `.bin/` empty
+  as expected — solve/recheck deps land in 8.3b2b, not here).
+
+**Next session (Task 8.3b2b — final 8.3b close-out).** Add the two
+externally-gated daprd smokes: `/v1/solve` (gated on `.bin/z3` +
+`.bin/cvc5` with loud SKIP — same pattern as `tests/solver_smoke.rs`)
+and `/v1/recheck` (gated on `CDS_KIMINA_URL` with loud SKIP — same
+pattern as `tests/lean_smoke.rs`); chain the trace from solve →
+recheck. Optional: split into `tests/service_pipeline_smoke.rs` if
+`service_smoke.rs` keeps growing; pair with
+`just rs-service-pipeline-smoke`. Final close-out gate confirms all
+six Phase 0 endpoints (kernel `/healthz` + `/v1/{deduce,solve,recheck}`;
+harness `/healthz` + `/v1/{ingest,translate}`) round-trip through
+daprd.
 
 ## Session 2026-05-01 — Task 8.3b2 plan restructure (planning-only)
 

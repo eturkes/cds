@@ -1,8 +1,9 @@
 //! Phase 0 kernel-service axum application factory.
 //!
-//! Task 8.3a shipped the foundation; Task 8.3b1 (this module's
-//! current revision) wires the three pipeline endpoints onto the same
-//! [`Router`]:
+//! Task 8.3a shipped the foundation; Task 8.3b1 wired the three pipeline
+//! endpoints onto the same [`Router`]; Task 8.3b2a (this module's current
+//! revision) plumbs a [`KernelServiceState`] through the pipeline routes
+//! while keeping `/healthz` stateless.
 //!
 //! - [`SERVICE_APP_ID`] — Dapr `--app-id` for the kernel sidecar.
 //! - [`HEALTHZ_PATH`] — liveness probe.
@@ -10,14 +11,18 @@
 //!   response shape; `kernel_id` mirrors [`crate::KERNEL_ID`] and
 //!   `schema_version` mirrors [`crate::schema::SCHEMA_VERSION`] so
 //!   polyglot callers can pin both invariants in one round-trip.
-//! - [`build_router`] — assembles the axum [`Router`] with the
+//! - [`build_router`] — assembles the axum [`Router<()>`] with the
 //!   `tower_http::trace::TraceLayer` middleware so every endpoint
 //!   inherits per-request tracing spans (Task 8.4 trace plumbing).
+//!   Takes a [`KernelServiceState`] which is `.with_state(...)`-merged
+//!   into the pipeline routes; `/healthz` does not extract `State<_>`,
+//!   so it remains stateless even though the router carries the state
+//!   handle for axum's typestate machinery.
 //!
 //! The pipeline endpoints themselves live in
 //! [`crate::service::handlers`]: `/v1/deduce`, `/v1/solve`, `/v1/recheck`.
-//! The Dapr-driven sidecar smoke that drives all three through daprd
-//! lands in Task 8.3b2 (ADR-019).
+//! The deduce daprd smoke ships in Task 8.3b2a; the solve / recheck
+//! daprd smokes ship in Task 8.3b2b (ADR-020 §3).
 
 use axum::Json;
 use axum::Router;
@@ -27,6 +32,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::schema::SCHEMA_VERSION;
 use crate::service::handlers;
+use crate::service::state::KernelServiceState;
 use crate::{KERNEL_ID, PHASE};
 
 /// Dapr `--app-id` for the kernel sidecar. Matches the value advertised
@@ -65,17 +71,23 @@ impl Default for KernelHealthz {
 
 /// Construct the Phase 0 kernel-service [`Router`].
 ///
-/// One instance per process; no globals beyond environment-driven host
-/// / port (resolved by the binary, not this factory). The
-/// [`TraceLayer`] is wired here so the pipeline handlers and Task 8.4's
-/// Workflow events inherit a single tracing convention.
-pub fn build_router() -> Router {
+/// One instance per process; no globals beyond the
+/// environment-driven host / port (resolved by the binary, not this
+/// factory) and the [`KernelServiceState`] passed in. The [`TraceLayer`]
+/// is wired here so the pipeline handlers and Task 8.4's Workflow
+/// events inherit a single tracing convention.
+///
+/// The returned [`Router<()>`] has had its [`KernelServiceState`] floor
+/// merged in via `.with_state(...)`; the binary can call
+/// [`axum::serve`] on it directly without further state plumbing.
+pub fn build_router(state: KernelServiceState) -> Router {
     Router::new()
         .route(HEALTHZ_PATH, get(healthz))
         .route(handlers::DEDUCE_PATH, post(handlers::deduce))
         .route(handlers::SOLVE_PATH, post(handlers::solve))
         .route(handlers::RECHECK_PATH, post(handlers::recheck))
         .layer(TraceLayer::new_for_http())
+        .with_state(state)
 }
 
 #[allow(clippy::unused_async)] // axum handlers must be async even when pure.
@@ -88,6 +100,7 @@ mod tests {
     use super::{HEALTHZ_PATH, KernelHealthz, SERVICE_APP_ID, build_router};
     use crate::schema::SCHEMA_VERSION;
     use crate::service::handlers::{DEDUCE_PATH, RECHECK_PATH, SOLVE_PATH};
+    use crate::service::state::KernelServiceState;
     use crate::{KERNEL_ID, PHASE};
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, StatusCode};
@@ -121,7 +134,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_serves_healthz_with_default_body() {
-        let app = build_router();
+        let app = build_router(KernelServiceState::default());
         let response = app
             .oneshot(
                 Request::builder()
@@ -141,7 +154,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_returns_404_for_unknown_routes() {
-        let app = build_router();
+        let app = build_router(KernelServiceState::default());
         let response = app
             .oneshot(
                 Request::builder()
@@ -157,7 +170,7 @@ mod tests {
     #[tokio::test]
     async fn pipeline_routes_reject_get() {
         for path in [DEDUCE_PATH, SOLVE_PATH, RECHECK_PATH] {
-            let app = build_router();
+            let app = build_router(KernelServiceState::default());
             let response = app
                 .oneshot(
                     Request::builder()

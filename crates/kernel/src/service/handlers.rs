@@ -1,4 +1,5 @@
-//! Phase 0 kernel-service pipeline endpoint handlers (Task 8.3b1).
+//! Phase 0 kernel-service pipeline endpoint handlers (Tasks 8.3b1 +
+//! 8.3b2a).
 //!
 //! Three thin axum handlers that lift the kernel's existing in-process
 //! pipelines onto JSON-over-TCP routes (constraint **C6**):
@@ -9,12 +10,16 @@
 //! | POST   | `/v1/solve`    | [`crate::solver::verify`]            | [`crate::schema::FormalVerificationTrace`] |
 //! | POST   | `/v1/recheck`  | [`crate::lean::recheck`]             | [`LeanRecheckWire`]         |
 //!
-//! Each handler is **stateless** in 8.3b1: every invocation resolves its
-//! own [`crate::solver::VerifyOptions`] / [`crate::lean::LeanOptions`]
-//! from the request body, falling back to module-level defaults when the
-//! caller omits them. Task 8.3b2 will introduce an `AppState` if
-//! environment-driven overrides (`CDS_KIMINA_URL`, `CDS_Z3_PATH`,
-//! `CDS_CVC5_PATH`) materially benefit from one-shot resolution at boot.
+//! 8.3b1 shipped the handlers stateless. 8.3b2a (this revision) plumbs
+//! a [`KernelServiceState`] in via [`axum::extract::State`]: the state
+//! defines the **floor** for [`crate::solver::VerifyOptions`] /
+//! [`crate::lean::LeanOptions`] (resolved at boot from `CDS_Z3_PATH` /
+//! `CDS_CVC5_PATH` / `CDS_SOLVER_TIMEOUT_MS` / `CDS_KIMINA_URL` /
+//! `CDS_LEAN_TIMEOUT_MS`); per-request `options` envelopes still
+//! **replace** individual fields on top of that floor (ADR-020 §5).
+//! `/healthz` does not extract `State<_>` and therefore stays
+//! stateless even though the router carries the state for axum's
+//! typestate machinery.
 //!
 //! ## Error mapping
 //!
@@ -32,7 +37,8 @@
 //! axum cancellation drops the handler future, which drops the in-flight
 //! `Child` handles and kills any running Z3 / cvc5 / Lean child. SIGTERM-
 //! first escalation for the warden's children remains deferred to Task
-//! 8.4 (ADR-014 §9 → ADR-015 §8 → ADR-016 §7 → ADR-018 §6 → ADR-019 §5).
+//! 8.4 (ADR-014 §9 → ADR-015 §8 → ADR-016 §7 → ADR-018 §6 → ADR-019 §11
+//! → ADR-020 §6).
 //!
 //! ## Tracing
 //!
@@ -47,12 +53,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::Json;
+use axum::extract::State;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
 use crate::deduce::{Phase0Thresholds, Verdict, evaluate as deduce_evaluate};
 use crate::lean::{LeanMessage, LeanOptions, LeanRecheck, LeanSeverity, recheck as lean_recheck};
 use crate::schema::{ClinicalTelemetryPayload, FormalVerificationTrace, SmtConstraintMatrix};
+use crate::service::state::KernelServiceState;
 use crate::solver::{VerifyOptions, verify as solver_verify};
 
 /// HTTP path for the deductive endpoint.
@@ -102,17 +110,17 @@ pub struct SolveOptionsWire {
 }
 
 impl SolveOptionsWire {
-    /// Lower the wire knobs onto a [`VerifyOptions`], preserving any
-    /// caller-omitted field at its [`VerifyOptions::default`] value.
+    /// Lower the wire knobs onto a [`VerifyOptions`], replacing each
+    /// caller-supplied field on top of the `floor` (per-field replace
+    /// semantics — ADR-020 §5). `floor` is typically
+    /// [`KernelServiceState::verify_options`] but unit tests may pass
+    /// [`VerifyOptions::default`] directly.
     #[must_use]
-    pub fn into_verify_options(self) -> VerifyOptions {
-        let defaults = VerifyOptions::default();
+    pub fn into_verify_options(self, floor: VerifyOptions) -> VerifyOptions {
         VerifyOptions {
-            timeout: self
-                .timeout_ms
-                .map_or(defaults.timeout, Duration::from_millis),
-            z3_path: self.z3_path.unwrap_or(defaults.z3_path),
-            cvc5_path: self.cvc5_path.unwrap_or(defaults.cvc5_path),
+            timeout: self.timeout_ms.map_or(floor.timeout, Duration::from_millis),
+            z3_path: self.z3_path.unwrap_or(floor.z3_path),
+            cvc5_path: self.cvc5_path.unwrap_or(floor.cvc5_path),
         }
     }
 }
@@ -139,18 +147,18 @@ pub struct RecheckOptionsWire {
 }
 
 impl RecheckOptionsWire {
-    /// Lower the wire knobs onto a [`LeanOptions`], preserving any
-    /// caller-omitted field at its [`LeanOptions::default`] value.
+    /// Lower the wire knobs onto a [`LeanOptions`], replacing each
+    /// caller-supplied field on top of the `floor` (per-field replace
+    /// semantics — ADR-020 §5). `floor` is typically
+    /// [`KernelServiceState::lean_options`] but unit tests may pass
+    /// [`LeanOptions::default`] directly.
     #[must_use]
-    pub fn into_lean_options(self) -> LeanOptions {
-        let defaults = LeanOptions::default();
+    pub fn into_lean_options(self, floor: LeanOptions) -> LeanOptions {
         LeanOptions {
-            kimina_url: self.kimina_url.unwrap_or(defaults.kimina_url),
-            timeout: self
-                .timeout_ms
-                .map_or(defaults.timeout, Duration::from_millis),
-            custom_id: self.custom_id.unwrap_or(defaults.custom_id),
-            extra_headers: self.extra_headers.unwrap_or(defaults.extra_headers),
+            kimina_url: self.kimina_url.unwrap_or(floor.kimina_url),
+            timeout: self.timeout_ms.map_or(floor.timeout, Duration::from_millis),
+            custom_id: self.custom_id.unwrap_or(floor.custom_id),
+            extra_headers: self.extra_headers.unwrap_or(floor.extra_headers),
         }
     }
 }
@@ -232,11 +240,19 @@ impl From<LeanSeverity> for LeanSeverityWire {
 /// so a long-running payload cannot starve the async runtime that is
 /// also driving the warden + Lean network paths.
 ///
+/// `State<KernelServiceState>` is extracted to keep the handler
+/// signature uniform across the three pipeline endpoints; the deductive
+/// path itself does not consult any field on the state today (no env
+/// override applies to the pure-Rust `crate::deduce::evaluate`).
+///
 /// # Errors
 /// Lifts every [`crate::deduce::DeduceError`] variant to HTTP 422 with
 /// the standard `{error, detail}` envelope.
-#[tracing::instrument(skip(req), fields(stage = "deduce"))]
-pub async fn deduce(Json(req): Json<DeduceRequest>) -> Result<Json<Verdict>, Response> {
+#[tracing::instrument(skip(_state, req), fields(stage = "deduce"))]
+pub async fn deduce(
+    State(_state): State<KernelServiceState>,
+    Json(req): Json<DeduceRequest>,
+) -> Result<Json<Verdict>, Response> {
     let DeduceRequest { payload, rules } = req;
     let rules = rules.unwrap_or_default();
     let verdict = tokio::task::spawn_blocking(move || deduce_evaluate(&payload, &rules))
@@ -259,14 +275,23 @@ pub async fn deduce(Json(req): Json<DeduceRequest>) -> Result<Json<Verdict>, Res
 /// Cancelling the handler future drops the in-flight `Child` handles per
 /// ADR-004's `kill_on_drop` contract.
 ///
+/// Per-request `options` envelope replaces individual fields on top of
+/// the [`KernelServiceState::verify_options`] floor (ADR-020 §5):
+/// `timeout_ms` / `z3_path` / `cvc5_path` each independently override
+/// the env-resolved boot value.
+///
 /// # Errors
 /// Lifts every [`crate::solver::SolverError`] variant to HTTP 422 with
 /// the standard `{error, detail}` envelope.
-#[tracing::instrument(skip(req), fields(stage = "solve"))]
+#[tracing::instrument(skip(state, req), fields(stage = "solve"))]
 pub async fn solve(
+    State(state): State<KernelServiceState>,
     Json(req): Json<SolveRequest>,
 ) -> Result<Json<FormalVerificationTrace>, Response> {
-    let opts = req.options.unwrap_or_default().into_verify_options();
+    let opts = req
+        .options
+        .unwrap_or_default()
+        .into_verify_options(state.verify_options.clone());
     let trace = solver_verify(&req.matrix, &opts)
         .await
         .map_err(axum::response::IntoResponse::into_response)?;
@@ -279,12 +304,23 @@ pub async fn solve(
 /// response is rendered through [`LeanRecheckWire`] so the on-the-wire
 /// `severity` field is snake-case.
 ///
+/// Per-request `options` envelope replaces individual fields on top of
+/// the [`KernelServiceState::lean_options`] floor (ADR-020 §5):
+/// `kimina_url` / `timeout_ms` / `custom_id` / `extra_headers` each
+/// independently override the env-resolved boot value.
+///
 /// # Errors
 /// Lifts every [`crate::lean::LeanError`] variant to HTTP 422 with the
 /// standard `{error, detail}` envelope.
-#[tracing::instrument(skip(req), fields(stage = "recheck"))]
-pub async fn recheck(Json(req): Json<RecheckRequest>) -> Result<Json<LeanRecheckWire>, Response> {
-    let opts = req.options.unwrap_or_default().into_lean_options();
+#[tracing::instrument(skip(state, req), fields(stage = "recheck"))]
+pub async fn recheck(
+    State(state): State<KernelServiceState>,
+    Json(req): Json<RecheckRequest>,
+) -> Result<Json<LeanRecheckWire>, Response> {
+    let opts = req
+        .options
+        .unwrap_or_default()
+        .into_lean_options(state.lean_options.clone());
     let outcome = lean_recheck(&req.trace, &opts)
         .await
         .map_err(axum::response::IntoResponse::into_response)?;
@@ -406,25 +442,49 @@ mod tests {
     }
 
     #[test]
-    fn solve_options_wire_lowers_to_verify_options() {
+    fn solve_options_wire_lowers_to_verify_options_replacing_floor() {
         let wire = SolveOptionsWire {
             timeout_ms: Some(2_500),
             z3_path: Some(PathBuf::from("/usr/local/bin/z3")),
             cvc5_path: Some(PathBuf::from("/usr/local/bin/cvc5")),
         };
-        let opts = wire.into_verify_options();
+        let floor = VerifyOptions {
+            timeout: Duration::from_secs(99),
+            z3_path: PathBuf::from("/floor/z3"),
+            cvc5_path: PathBuf::from("/floor/cvc5"),
+        };
+        let opts = wire.into_verify_options(floor);
         assert_eq!(opts.timeout, Duration::from_millis(2_500));
         assert_eq!(opts.z3_path, PathBuf::from("/usr/local/bin/z3"));
         assert_eq!(opts.cvc5_path, PathBuf::from("/usr/local/bin/cvc5"));
     }
 
     #[test]
-    fn solve_options_wire_default_matches_verify_options_default() {
-        let lowered = SolveOptionsWire::default().into_verify_options();
+    fn solve_options_wire_default_preserves_floor_verbatim() {
         let baseline = VerifyOptions::default();
+        let lowered = SolveOptionsWire::default().into_verify_options(baseline.clone());
         assert_eq!(lowered.timeout, baseline.timeout);
         assert_eq!(lowered.z3_path, baseline.z3_path);
         assert_eq!(lowered.cvc5_path, baseline.cvc5_path);
+    }
+
+    #[test]
+    fn solve_options_wire_partial_override_keeps_other_fields_from_floor() {
+        let wire = SolveOptionsWire {
+            timeout_ms: Some(7_777),
+            z3_path: None,
+            cvc5_path: None,
+        };
+        let floor = VerifyOptions {
+            timeout: Duration::from_secs(42),
+            z3_path: PathBuf::from("/floor/z3"),
+            cvc5_path: PathBuf::from("/floor/cvc5"),
+        };
+        let opts = wire.into_verify_options(floor);
+        assert_eq!(opts.timeout, Duration::from_millis(7_777));
+        // Untouched fields fall back to the floor (per-field replace).
+        assert_eq!(opts.z3_path, PathBuf::from("/floor/z3"));
+        assert_eq!(opts.cvc5_path, PathBuf::from("/floor/cvc5"));
     }
 
     #[test]
@@ -445,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn recheck_options_wire_lowers_to_lean_options() {
+    fn recheck_options_wire_lowers_to_lean_options_replacing_floor() {
         let mut headers = BTreeMap::new();
         headers.insert("x-test".to_string(), "ok".to_string());
         let wire = RecheckOptionsWire {
@@ -454,7 +514,15 @@ mod tests {
             custom_id: Some("cid-42".to_string()),
             extra_headers: Some(headers.clone()),
         };
-        let opts = wire.into_lean_options();
+        let mut floor_headers = BTreeMap::new();
+        floor_headers.insert("x-floor".to_string(), "v".to_string());
+        let floor = LeanOptions {
+            kimina_url: "http://floor.local".to_string(),
+            timeout: Duration::from_secs(99),
+            custom_id: "floor-cid".to_string(),
+            extra_headers: floor_headers,
+        };
+        let opts = wire.into_lean_options(floor);
         assert_eq!(opts.kimina_url, "http://kimina.local:9000");
         assert_eq!(opts.timeout, Duration::from_millis(7_500));
         assert_eq!(opts.custom_id, "cid-42");
@@ -462,13 +530,36 @@ mod tests {
     }
 
     #[test]
-    fn recheck_options_wire_default_matches_lean_options_default() {
-        let lowered = RecheckOptionsWire::default().into_lean_options();
+    fn recheck_options_wire_default_preserves_floor_verbatim() {
         let baseline = LeanOptions::default();
+        let lowered = RecheckOptionsWire::default().into_lean_options(baseline.clone());
         assert_eq!(lowered.kimina_url, baseline.kimina_url);
         assert_eq!(lowered.timeout, baseline.timeout);
         assert_eq!(lowered.custom_id, baseline.custom_id);
         assert_eq!(lowered.extra_headers, baseline.extra_headers);
+    }
+
+    #[test]
+    fn recheck_options_wire_partial_override_keeps_other_fields_from_floor() {
+        let wire = RecheckOptionsWire {
+            kimina_url: Some("http://overridden:1234".to_string()),
+            timeout_ms: None,
+            custom_id: None,
+            extra_headers: None,
+        };
+        let mut headers = BTreeMap::new();
+        headers.insert("x-floor".to_string(), "v".to_string());
+        let floor = LeanOptions {
+            kimina_url: "http://floor.local".to_string(),
+            timeout: Duration::from_secs(42),
+            custom_id: "floor-cid".to_string(),
+            extra_headers: headers.clone(),
+        };
+        let opts = wire.into_lean_options(floor);
+        assert_eq!(opts.kimina_url, "http://overridden:1234");
+        assert_eq!(opts.timeout, Duration::from_secs(42));
+        assert_eq!(opts.custom_id, "floor-cid");
+        assert_eq!(opts.extra_headers, headers);
     }
 
     #[test]
@@ -561,6 +652,7 @@ mod runtime_tests {
     };
     use crate::service::app::build_router;
     use crate::service::handlers::{DEDUCE_PATH, RECHECK_PATH, SOLVE_PATH};
+    use crate::service::state::KernelServiceState;
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, StatusCode, header};
     use tower::util::ServiceExt;
@@ -611,7 +703,7 @@ mod runtime_tests {
                 sample(2, &[("heart_rate_bpm", 82.0), ("spo2_percent", 96.0)]),
             ]),
         });
-        let response = build_router()
+        let response = build_router(KernelServiceState::default())
             .oneshot(json_post(DEDUCE_PATH, &request_body))
             .await
             .expect("router response");
@@ -633,7 +725,7 @@ mod runtime_tests {
         let request_body = serde_json::json!({
             "payload": payload(vec![sample(1, &[("glucose_mgdl", 5.5)])]),
         });
-        let response = build_router()
+        let response = build_router(KernelServiceState::default())
             .oneshot(json_post(DEDUCE_PATH, &request_body))
             .await
             .expect("router response");
@@ -692,7 +784,7 @@ mod runtime_tests {
                 "cvc5_path": "/nonexistent/path/to/cvc5",
             },
         });
-        let response = build_router()
+        let response = build_router(KernelServiceState::default())
             .oneshot(json_post(SOLVE_PATH, &request_body))
             .await
             .expect("router response");
@@ -715,7 +807,7 @@ mod runtime_tests {
             alethe_proof: None,
         };
         let request_body = serde_json::json!({"trace": trace});
-        let response = build_router()
+        let response = build_router(KernelServiceState::default())
             .oneshot(json_post(RECHECK_PATH, &request_body))
             .await
             .expect("router response");
@@ -743,7 +835,7 @@ mod runtime_tests {
                 "timeout_ms": 500,
             },
         });
-        let response = build_router()
+        let response = build_router(KernelServiceState::default())
             .oneshot(json_post(RECHECK_PATH, &request_body))
             .await
             .expect("router response");

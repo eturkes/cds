@@ -29,7 +29,8 @@ use std::env;
 use std::process::ExitCode;
 
 use cds_kernel::service::{
-    DEFAULT_HOST, DEFAULT_PORT, HOST_ENV, PORT_ENV, build_router, resolve_host, resolve_port,
+    DEFAULT_HOST, DEFAULT_PORT, HOST_ENV, KernelServiceState, PORT_ENV, build_router, resolve_host,
+    resolve_port,
 };
 
 const USAGE: &str = "\
@@ -37,18 +38,26 @@ Usage: cds-kernel-service [--help]
 
 Boot the CDS Phase 0 Rust kernel HTTP service.
 
-Environment:
-  CDS_KERNEL_HOST  Bind address (default 127.0.0.1)
-  CDS_KERNEL_PORT  Bind port    (default 8082)
+Environment (bind address):
+  CDS_KERNEL_HOST          Bind address (default 127.0.0.1)
+  CDS_KERNEL_PORT          Bind port    (default 8082)
 
-Endpoints (Phase 0 / Task 8.3b1):
+Environment (option floors — per-request `options` envelopes still
+override individual fields; see ADR-020 §5):
+  CDS_Z3_PATH              Path to the Z3 binary (default: bare `z3` from $PATH).
+  CDS_CVC5_PATH            Path to the cvc5 binary (default: bare `cvc5` from $PATH).
+  CDS_SOLVER_TIMEOUT_MS    SMT solver wall-clock timeout, milliseconds (default: 30000).
+  CDS_KIMINA_URL           Kimina REST endpoint (default: http://127.0.0.1:8000).
+  CDS_LEAN_TIMEOUT_MS      Lean re-check wall-clock timeout, milliseconds (default: 60000).
+
+Endpoints (Phase 0 / Task 8.3b1 + 8.3b2a):
   GET  /healthz     Liveness probe → {status, kernel_id, phase, schema_version}.
   POST /v1/deduce   {payload, rules?}  → Verdict (deductive evaluator).
   POST /v1/solve    {matrix, options?} → FormalVerificationTrace (Z3 + cvc5).
   POST /v1/recheck  {trace, options?}  → LeanRecheck (Kimina REST).
 
-The Dapr-driven sidecar smoke that exercises all three pipeline endpoints
-through daprd lands in Task 8.3b2 (ADR-019).
+The deduce daprd smoke ships in Task 8.3b2a; the solve / recheck daprd
+smokes ship in Task 8.3b2b (ADR-020 §3).
 ";
 
 fn main() -> ExitCode {
@@ -118,16 +127,25 @@ async fn serve(addr_string: String) -> Result<(), BinError> {
         addr: addr_string.clone(),
         source,
     })?;
+    // Resolve the per-handler option floors at boot — fail-loud on bad
+    // env values so an operator typo surfaces here rather than at first
+    // request (ADR-020 §2).
+    let state = KernelServiceState::from_env();
     tracing::info!(
         addr = %bound,
         host_env = HOST_ENV,
         port_env = PORT_ENV,
         default_host = DEFAULT_HOST,
         default_port = DEFAULT_PORT,
+        z3_path = %state.verify_options.z3_path.display(),
+        cvc5_path = %state.verify_options.cvc5_path.display(),
+        solver_timeout_ms = state.verify_options.timeout.as_millis(),
+        kimina_url = %state.lean_options.kimina_url,
+        lean_timeout_ms = state.lean_options.timeout.as_millis(),
         "cds-kernel-service listening"
     );
 
-    axum::serve(listener, build_router())
+    axum::serve(listener, build_router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(BinError::Serve)?;
