@@ -1,6 +1,8 @@
 //! Phase 0 kernel-service axum application factory.
 //!
-//! Task 8.3a (this layer) ships only the foundation:
+//! Task 8.3a shipped the foundation; Task 8.3b1 (this module's
+//! current revision) wires the three pipeline endpoints onto the same
+//! [`Router`]:
 //!
 //! - [`SERVICE_APP_ID`] — Dapr `--app-id` for the kernel sidecar.
 //! - [`HEALTHZ_PATH`] — liveness probe.
@@ -9,20 +11,22 @@
 //!   `schema_version` mirrors [`crate::schema::SCHEMA_VERSION`] so
 //!   polyglot callers can pin both invariants in one round-trip.
 //! - [`build_router`] — assembles the axum [`Router`] with the
-//!   `tower_http::trace::TraceLayer` middleware so future endpoints
-//!   inherit per-request tracing spans (Task 8.4 trace plumbing).
+//!   `tower_http::trace::TraceLayer` middleware so every endpoint
+//!   inherits per-request tracing spans (Task 8.4 trace plumbing).
 //!
-//! Task 8.3b will extend [`build_router`] with the `/v1/deduce`,
-//! `/v1/solve`, `/v1/recheck` handlers, each lifting domain errors to
-//! the [`crate::service::errors::ErrorBody`] envelope.
+//! The pipeline endpoints themselves live in
+//! [`crate::service::handlers`]: `/v1/deduce`, `/v1/solve`, `/v1/recheck`.
+//! The Dapr-driven sidecar smoke that drives all three through daprd
+//! lands in Task 8.3b2 (ADR-019).
 
 use axum::Json;
 use axum::Router;
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
 
 use crate::schema::SCHEMA_VERSION;
+use crate::service::handlers;
 use crate::{KERNEL_ID, PHASE};
 
 /// Dapr `--app-id` for the kernel sidecar. Matches the value advertised
@@ -63,11 +67,14 @@ impl Default for KernelHealthz {
 ///
 /// One instance per process; no globals beyond environment-driven host
 /// / port (resolved by the binary, not this factory). The
-/// [`TraceLayer`] is wired here so Task 8.3b's `/v1/*` handlers and
-/// Task 8.4's Workflow events inherit a single tracing convention.
+/// [`TraceLayer`] is wired here so the pipeline handlers and Task 8.4's
+/// Workflow events inherit a single tracing convention.
 pub fn build_router() -> Router {
     Router::new()
         .route(HEALTHZ_PATH, get(healthz))
+        .route(handlers::DEDUCE_PATH, post(handlers::deduce))
+        .route(handlers::SOLVE_PATH, post(handlers::solve))
+        .route(handlers::RECHECK_PATH, post(handlers::recheck))
         .layer(TraceLayer::new_for_http())
 }
 
@@ -80,9 +87,10 @@ async fn healthz() -> Json<KernelHealthz> {
 mod tests {
     use super::{HEALTHZ_PATH, KernelHealthz, SERVICE_APP_ID, build_router};
     use crate::schema::SCHEMA_VERSION;
+    use crate::service::handlers::{DEDUCE_PATH, RECHECK_PATH, SOLVE_PATH};
     use crate::{KERNEL_ID, PHASE};
     use axum::body::{Body, to_bytes};
-    use axum::http::{Request, StatusCode};
+    use axum::http::{Method, Request, StatusCode};
     use tower::util::ServiceExt;
 
     #[test]
@@ -144,5 +152,28 @@ mod tests {
             .await
             .expect("router response");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn pipeline_routes_reject_get() {
+        for path in [DEDUCE_PATH, SOLVE_PATH, RECHECK_PATH] {
+            let app = build_router();
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("router response");
+            assert_eq!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "path {path} returned {}",
+                response.status()
+            );
+        }
     }
 }

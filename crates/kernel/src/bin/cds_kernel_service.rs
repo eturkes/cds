@@ -41,10 +41,14 @@ Environment:
   CDS_KERNEL_HOST  Bind address (default 127.0.0.1)
   CDS_KERNEL_PORT  Bind port    (default 8082)
 
-Endpoints (Phase 0 / Task 8.3a):
-  GET  /healthz   Liveness probe → {status, kernel_id, phase, schema_version}.
+Endpoints (Phase 0 / Task 8.3b1):
+  GET  /healthz     Liveness probe → {status, kernel_id, phase, schema_version}.
+  POST /v1/deduce   {payload, rules?}  → Verdict (deductive evaluator).
+  POST /v1/solve    {matrix, options?} → FormalVerificationTrace (Z3 + cvc5).
+  POST /v1/recheck  {trace, options?}  → LeanRecheck (Kimina REST).
 
-Pipeline endpoints (/v1/deduce, /v1/solve, /v1/recheck) land in Task 8.3b.
+The Dapr-driven sidecar smoke that exercises all three pipeline endpoints
+through daprd lands in Task 8.3b2 (ADR-019).
 ";
 
 fn main() -> ExitCode {

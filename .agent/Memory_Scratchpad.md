@@ -6,10 +6,179 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 8.3a — Rust kernel service foundation (axum app under `cds_kernel::service`; `/healthz` + `[[bin]] cds-kernel-service` + tower-http TraceLayer + `CDS_KERNEL_HOST/PORT` env resolution; sidecar smoke drives `/healthz` through `dapr run --app-id cds-kernel-smoke …` and the `:dapr-http-port/v1.0/invoke/cds-kernel-smoke/method/healthz` route; cargo workspace 113/113 + clippy clean + pytest 95/95 untouched) (2026-04-30).
-- **Next up:** Task 8.3b — Rust kernel pipeline endpoints (`/v1/deduce` + `/v1/solve` + `/v1/recheck` wired to `cds_kernel::deduce::evaluate` / `cds_kernel::solver::verify` / `cds_kernel::lean::recheck` + their domain-error `IntoResponse` impls + cargo integration test driving all three through daprd's `:dapr-http-port/v1.0/invoke/cds-kernel/method/v1/...`).
+- **Last completed:** Task 8.3b1 — Rust kernel pipeline handlers (axum handlers under `cds_kernel::service::handlers` for `/v1/deduce`, `/v1/solve`, `/v1/recheck` wired to `deduce::evaluate` / `solver::verify` / `lean::recheck`; `IntoResponse` impls for `DeduceError` / `SolverError` / `LeanError` lift every variant to the `{error, detail}` HTTP 422 envelope; comprehensive unit + `tower::oneshot` runtime tests; `cargo test --workspace` → **137 pass** + clippy clean + fmt clean + pytest 95/95 untouched + `just rs-service-smoke` 2/2) (2026-05-01).
+- **Next up:** Task 8.3b2 — Rust kernel pipeline Dapr smoke (cargo integration test drives `/v1/deduce` + `/v1/solve` + `/v1/recheck` through daprd's `/v1.0/invoke/cds-kernel/method/v1/...` against canonical fixtures; `AppState` introduces env-driven `VerifyOptions` / `LeanOptions` overrides — `CDS_KIMINA_URL`, `CDS_Z3_PATH`, `CDS_CVC5_PATH`).
 
-> **Task 8 was split** into 8.1–8.4 on 2026-04-30 (ADR-016) because a monolithic Dapr-orchestration task repeatedly exhausted a single context window. Sub-task progression is strict: `8.1 < 8.2 < 8.3a < 8.3b < 8.4 < 9`. **Task 8.3 was further split** into 8.3a / 8.3b on 2026-04-30 (ADR-018) because the kernel service binds three subprocess pipelines (`deduce`, `solve`, `recheck`) behind one axum app and the foundation + endpoint plumbing each warrant their own session.
+> **Task 8 was split** into 8.1–8.4 on 2026-04-30 (ADR-016) because a monolithic Dapr-orchestration task repeatedly exhausted a single context window. **Task 8.3 was further split** into 8.3a / 8.3b on 2026-04-30 (ADR-018) because the kernel service binds three subprocess pipelines (`deduce`, `solve`, `recheck`) behind one axum app and the foundation + endpoint plumbing each warrant their own session. **Task 8.3b was further split** into 8.3b1 / 8.3b2 on 2026-05-01 (ADR-019) because the original 8.3b scope (three handlers + their `IntoResponse` impls + comprehensive unit tests + `AppState` wiring + a Dapr-driven cargo integration test driving all three endpoints through daprd) again exceeded a single context window. Sub-task progression is strict: `8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2 < 8.4 < 9`.
+
+## Session 2026-05-01 — Task 8.3b1 close-out
+
+Shipped the Phase 0 kernel pipeline handlers + their `IntoResponse`
+impls. The axum router built by `cds_kernel::service::build_router`
+now serves `POST /v1/deduce`, `POST /v1/solve`, `POST /v1/recheck`
+alongside the `/healthz` route from 8.3a. Each handler is stateless:
+the request body carries optional knobs that lower onto
+`solver::VerifyOptions` / `lean::LeanOptions` with `::default()` as the
+fallback. ADR-019 codifies the 8.3b → 8.3b1 + 8.3b2 split rationale
+and the 8.3b1 contract.
+
+**Module additions (`crates/kernel/src/service/`):**
+
+| File          | Role                                                                                                                                                |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `handlers.rs` | New module: three handler `async fn`s + `DeduceRequest` / `SolveRequest` / `RecheckRequest` envelopes + `SolveOptionsWire` / `RecheckOptionsWire` lowerings + `LeanRecheckWire` / `LeanMessageWire` / `LeanSeverityWire` (snake-case wire mirror of `LeanRecheck`). |
+| `errors.rs`   | Extended: `IntoResponse` impls for `DeduceError`, `SolverError`, `LeanError` — every variant lifts to HTTP 422 with stable `error` kind tags (`non_canonical_vital`, `non_finite_reading`, `domain_error`, `warden`, `solver_unparseable_output`, `z3_error`, `cvc5_error`, `solver_unknown_verdict`, `solver_disagreement`, `lean_no_proof`, `lean_transport`, `lean_server_error`, `lean_decode_failed`). |
+| `app.rs`      | `build_router()` mounts the three new `POST` routes alongside `GET /healthz`; the existing `TraceLayer` covers them all. New unit test asserts `GET` against any pipeline path returns 405. |
+| `mod.rs`      | Re-exports `handlers::*` (paths, request envelopes, wire-DTOs).                                                                                     |
+
+**Endpoint contract (constraint C6 — JSON-over-TCP):**
+
+| Method | Path           | Request body                                            | Response body                                            | Error envelope (HTTP 422)                       |
+| ------ | -------------- | ------------------------------------------------------- | -------------------------------------------------------- | ----------------------------------------------- |
+| GET    | `/healthz`     | —                                                       | `{status, kernel_id, phase, schema_version}` (8.3a)      | —                                               |
+| POST   | `/v1/deduce`   | `{payload, rules?}`                                     | `Verdict`                                                | `{error: <DeduceError kind>, detail}`           |
+| POST   | `/v1/solve`    | `{matrix, options?: {timeout_ms, z3_path, cvc5_path}}`  | `FormalVerificationTrace`                                | `{error: <SolverError kind>, detail}`           |
+| POST   | `/v1/recheck`  | `{trace, options?: {kimina_url, timeout_ms, custom_id, extra_headers}}` | `LeanRecheckWire` (snake-case `severity`)         | `{error: <LeanError kind>, detail}`             |
+
+Each request envelope is `#[serde(deny_unknown_fields)]` so
+silently-typo'd keys fail at extraction time (axum's `Json<T>` rejection
+returns HTTP 422 by default). `Option<…OptionsWire>` is itself
+`#[serde(default)]` so callers may omit `options` entirely.
+
+**Subprocess hygiene (ADR-004):** the warden's
+`Command::kill_on_drop(true)` contract survives the HTTP path because
+each handler awaits `solver::verify` / `lean::recheck` directly. axum
+handler-future cancellation drops the in-flight `Child` handles, which
+kills any running Z3 / cvc5 / Lean child. SIGTERM-first escalation for
+the warden's children remains deferred to Task 8.4 (rolled forward
+ADR-014 §9 → ADR-015 §8 → ADR-016 §7 → ADR-018 §6 → ADR-019 §5).
+
+**Per-stage tracing.** Each handler is annotated with
+`#[tracing::instrument(skip(req), fields(stage = "<deduce|solve|recheck>"))]`
+so the Workflow harness (Task 8.4) can correlate stage events without
+parsing free-form messages. The router-level `TraceLayer` from 8.3a
+remains the per-HTTP-request span source.
+
+**Tests (Rust workspace, all green — 137 pass total):**
+
+| Suite                                              | Count | Coverage                                                                                                                                                                                             |
+| -------------------------------------------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Existing schema + canonical + deduce + solver + lean + service::config + bin::cds_kernel_service | 88 | unchanged from 8.3a baseline (was 93 incl. service::*) — the breakdown shifts because new tests are added and existing service::* tests re-classify. |
+| `service::config` unit                              | 5     | unchanged (parse_port_raw paths).                                                                                                                                                                    |
+| `service::errors` unit                              | 9     | error_body serde + 422 lift + explicit-status helper (3 prior); new: `deduce_error_kinds_are_stable`, `deduce_error_into_response_lifts_to_422_envelope`, `solver_error_kinds_cover_every_variant`, `solver_error_into_response_carries_warden_detail`, `lean_error_kinds_cover_every_variant`, `lean_error_into_response_lifts_no_proof_to_422`. |
+| `service::app` unit                                 | 6     | unchanged 5 (healthz invariants + JSON shape + 404 + APP_ID pin); new: `pipeline_routes_reject_get` asserts 405 on GET to `/v1/{deduce,solve,recheck}`.                                              |
+| `service::handlers` unit                            | 11    | `DeduceRequest` round-trip + `deny_unknown_fields`; `SolveOptionsWire`/`RecheckOptionsWire` lower-to-options identity; defaults match `VerifyOptions::default` / `LeanOptions::default`; `SolveRequest` accepts missing options + rejects unknown options field; `RecheckRequest` accepts minimal envelope; `LeanRecheckWire` serializes severity as snake-case; `LeanSeverityWire` round-trip per variant; `LeanMessageWire` lift verbatim.|
+| `service::handlers::runtime_tests` integration      | 4     | `tower::oneshot` end-to-end: deduce happy path returns typed `Verdict`; deduce non-canonical vital → 422 + `non_canonical_vital`; solve missing-z3 → 422 + `warden` (warden::Spawn surfaced); recheck sat-trace → 422 + `lean_no_proof`; recheck unbound-URL → 422 + `lean_transport` (port 1 connect refused). |
+| `bin::cds_kernel_service` unit                      | 3     | unchanged (parse_argv help + unknown + no-args).                                                                                                                                                     |
+| `tests/service_smoke.rs` integration                | 2     | unchanged: standalone axum + gated dapr sidecar `/healthz` smoke (8.3a foundation gate held).                                                                                                        |
+| `tests/{deduce_smoke, golden_roundtrip, lean_smoke, solver_smoke}` integration | 15 | unchanged.                                                                                                                                                                                          |
+
+> The non-finite-reading runtime test was deliberately *not* shipped
+> because `serde_json` strict-parses NaN/±∞ and refuses to round-trip
+> them; the variant remains covered by
+> `service::errors::tests::deduce_error_kinds_are_stable` (kind tag
+> stability) and the deduce-module unit
+> `nan_reading_is_rejected_at_boundary` (boundary check). 8.3b2 will
+> not revisit it — every payload that crosses the wire is finite by
+> construction.
+
+Final gate (all green):
+
+- `cargo test --workspace` → **137 pass** (117 unit + 3 bin + 2 service_smoke + 5 deduce_smoke + 5 golden_roundtrip + 1 lean_smoke + 4 solver_smoke).
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean.
+- `cargo fmt --all -- --check` → clean.
+- `uv run pytest` → 95 pass (no Python regressions).
+- `uv run ruff check .` → clean.
+- `just rs-service-smoke` → 2/2 with `--nocapture`; clean teardown (no daprd / cds-kernel-service orphans).
+
+**Dependencies added:** none. axum 0.8 / tower 0.5 / tower-http 0.6
+were already wired in 8.3a; the handlers and IntoResponse impls reuse
+them. No new `[dev-dependencies]`.
+
+**Decisions captured in ADR-019** — Phase 0 Rust kernel pipeline
+handlers contract: split-rationale (8.3b1 isolates handlers + error
+envelope + unit tests; 8.3b2 owns the daprd-driven integration test +
+`AppState`); request envelopes use `deny_unknown_fields`; option
+overrides use `timeout_ms` (u64) for unambiguous wire shape; response
+shapes are unwrapped (`Verdict` / `FormalVerificationTrace` /
+`LeanRecheckWire`) per the open notes from 8.3a; `LeanRecheckWire` is
+a wire-only DTO so `cds_kernel::lean::LeanRecheck` does not grow a
+`Serialize` derive (avoids cross-cutting snake-case rename gymnastics
+on a public internal type); SIGTERM-first warden escalation **remains
+deferred to Task 8.4**; `AppState` introduction **deferred to 8.3b2**
+because 8.3b1's handlers are stateless.
+
+## Open notes for Task 8.3b2 — Rust kernel pipeline Dapr smoke
+
+- **Scope:** extend `tests/service_smoke.rs` (or split into
+  `tests/service_pipeline_smoke.rs` if the file gets long) with one
+  happy-path sidecar test per pipeline endpoint, mirroring the harness
+  side's `test_dapr_sidecar_drives_ingest_and_translate`. Use the
+  canonical fixtures already on disk:
+  - `data/guidelines/contradictory-bound.recorded.json` carries an
+    `SmtConstraintMatrix` whose Z3+cvc5 verdict is `unsat` with the
+    Alethe proof — drives `/v1/solve` and then hands the resulting
+    `FormalVerificationTrace` to `/v1/recheck` (gated by
+    `CDS_KIMINA_URL`).
+  - For `/v1/deduce`, drive a synthetic telemetry payload (one or two
+    samples spanning the canonical-vital allowlist) and assert a
+    non-empty `breach_summary` for an out-of-band reading.
+  Use the existing `pick_free_port` + `wait_until_ready` helpers; lift
+  them to a shared `tests/common.rs` module if a second integration
+  test grows.
+- **AppState.** Introduce a `KernelServiceState { verify_options:
+  VerifyOptions, lean_options: LeanOptions }` resolved at boot from
+  env: `CDS_Z3_PATH` / `CDS_CVC5_PATH` (default to bare `z3` / `cvc5`
+  from `$PATH`); `CDS_KIMINA_URL` (default to
+  `http://127.0.0.1:8000`); `CDS_SOLVER_TIMEOUT_MS` /
+  `CDS_LEAN_TIMEOUT_MS` (defaults stay at the 30 s / 60 s baselines).
+  Per-request `options` fields in the JSON body **override** the env
+  defaults so the pipeline tests can pin their own knobs without
+  touching the runtime environment. Wire the state through
+  `axum::extract::State`. The `/healthz` handler should remain stateless.
+- **Justfile.** The existing `rs-service-smoke` recipe invokes the
+  whole `service_smoke` suite; if 8.3b2 splits the integration test
+  into its own file, the recipe should grow a sibling
+  `rs-service-pipeline-smoke` that runs `--test service_pipeline_smoke`
+  with the same `--test-threads=1` discipline.
+- **Solver/Kimina availability.** The solve test depends on `.bin/z3`
+  + `.bin/cvc5` (already provisioned by `just fetch-z3` / `just
+  fetch-cvc5`). The recheck test depends on a running Kimina
+  (operator-managed daemon, ADR-015); gate it on `CDS_KIMINA_URL` and
+  print a loud SKIP notice when absent — same pattern as
+  `tests/lean_smoke.rs`.
+- **SIGTERM-first warden escalation** is **still deferred** to Task
+  8.4 (ADR-014 §9 → ADR-015 §8 → ADR-016 §7 → ADR-018 §6 → ADR-019 §5).
+- **PHASE marker** still `0` on `lib.rs`. Decide what `PHASE = 1`
+  means in 8.4 (probably: end-to-end pipeline runs under Dapr).
+
+## Open notes for Task 8.4 — End-to-end Dapr Workflow
+
+- **Scope:** Python Dapr Workflow that chains `ingest → translate →
+  deduce → solve → recheck`. Each stage is a Workflow `activity` that
+  calls the appropriate sidecar via service-invocation. The Workflow
+  output is the aggregated envelope: `{ payload, ir, matrix, verdict,
+  trace, lean_recheck }`.
+- **Placement + scheduler bring-up.** Slim init *stages* the binaries
+  but doesn't start them. 8.4 owns `just placement-up` /
+  `just scheduler-up` (background processes via tokio
+  `Command::kill_on_drop(true)` per ADR-004), or rolls them into a
+  single `just dapr-pipeline` recipe that brings everything up,
+  drives the pipeline, then tears down. Once placement is up the
+  readiness gate flips from `/v1.0/healthz/outbound` (Phase 0
+  8.2/8.3a/8.3b1/8.3b2 shape) to `/v1.0/healthz`.
+- **SIGTERM-first warden escalation comes due here** (ADR-014 §9 →
+  ADR-015 §8 → ADR-016 §7 → ADR-018 §6 → ADR-019 §5 — still deferred).
+  Decide whether to amend ADR-014 to enable two-stage escalation for
+  kernel-spawned solver children, or accept Phase 0 SIGKILL-only and
+  amend ADR-014 to make that the permanent stance.
+- **Tracing.** Each stage emits a `tracing` span + a Dapr Workflow
+  event. Final aggregated trace rides on the Workflow output.
+- **Decide:** in-band JSON envelope vs. Dapr state-store handle for
+  the cross-stage payload. JSON envelope is simplest; state-store
+  handles cleaner if payloads grow.
+- **Gate:** `just dapr-pipeline` runs end-to-end against a canonical
+  guideline; verification flag round-trips.
 
 ## Session 2026-04-30 — Task 8.3a close-out
 

@@ -1236,3 +1236,236 @@ Workflow can chain them with one HTTP client.
   components/config-path resolution + automatic shutdown of the
   app; would force the test to manage daprd's flag surface
   manually. The CLI is the documented Phase 0 entrypoint.
+
+## ADR-019 — Phase 0 Rust kernel pipeline handlers contract (Task 8.3b → 8.3b1 + 8.3b2 split)
+
+**Status:** Accepted
+**Date:** 2026-05-01
+
+**Context.** Task 8.3b inherited the foundation that ADR-018 / Task
+8.3a shipped (router factory, `ErrorBody { error, detail }` envelope,
+`bin/cds_kernel_service.rs` entrypoint, sidecar Justfile recipes).
+Its original single-session scope bundled four work items: (a) three
+`POST /v1/{deduce,solve,recheck}` handlers wiring the existing
+in-process pipelines (`crate::deduce::evaluate`,
+`crate::solver::verify`, `crate::lean::recheck`); (b) per-pipeline
+`IntoResponse` impls so `DeduceError` / `SolverError` / `LeanError`
+lift transparently to HTTP 422 with the `{error, detail}` envelope;
+(c) comprehensive unit tests via `tower::ServiceExt::oneshot`; (d) a
+daprd-driven cargo integration test exercising all three endpoints
+through `/v1.0/invoke/cds-kernel/method/v1/...` plus an `AppState`
+materializing env-driven `VerifyOptions` / `LeanOptions` overrides
+(`CDS_KIMINA_URL`, `CDS_Z3_PATH`, `CDS_CVC5_PATH`). That bundle
+again exceeded a single context window — the same pattern that
+forced Task 8 → 8.1–8.4 (ADR-016) and 8.3 → 8.3a + 8.3b (ADR-018).
+Plan §8 §nb on 2026-05-01 split 8.3b along the natural
+foundation/integration boundary into **8.3b1 (this ADR — handlers +
+`IntoResponse` impls + unit tests, stateless)** and **8.3b2 (daprd
+integration test + `AppState` + env-driven option overrides)**.
+
+**Decision.**
+
+### 1. Module layout (additions to `crates/kernel/src/service/`)
+
+- `handlers.rs` (new) — three `async fn` handlers (`deduce`, `solve`,
+  `recheck`), three request envelopes (`DeduceRequest`,
+  `SolveRequest`, `RecheckRequest`) all carrying
+  `#[serde(deny_unknown_fields)]`, two option-wire structs
+  (`SolveOptionsWire`, `RecheckOptionsWire`) with
+  `into_verify_options()` / `into_lean_options()` lowerings, and
+  three Lean wire DTOs (`LeanRecheckWire`, `LeanMessageWire`,
+  `LeanSeverityWire`) that bridge from internal `lean::LeanRecheck`
+  to the JSON wire shape. Path constants
+  `DEDUCE_PATH = "/v1/deduce"`, `SOLVE_PATH = "/v1/solve"`,
+  `RECHECK_PATH = "/v1/recheck"` live alongside `HEALTHZ_PATH`.
+- `errors.rs` (extension) — three `IntoResponse` impls for
+  `DeduceError`, `SolverError`, `LeanError` plus three
+  stable-tag helpers (`deduce_error_kind`, `solver_error_kind`,
+  `lean_error_kind`). Every variant of every error lifts to HTTP
+  422 with `{"error": "<stable_tag>", "detail": "<Display>"}`.
+- `app.rs` (extension) — `build_router()` now mounts three
+  `post(...)` routes alongside the existing `get(healthz)`; routing
+  middleware (`TraceLayer`) is unchanged.
+- `mod.rs` (extension) — `pub mod handlers;` plus re-exports of
+  the wire types so external consumers (cargo integration tests in
+  8.3b2) can import directly from `cds_kernel::service::*`.
+
+### 2. Request envelope contract — strict by default
+
+All three request envelopes carry `#[serde(deny_unknown_fields)]`.
+This is intentionally conservative: silent drop of unknown fields
+would mask Workflow producer bugs (Task 8.4) and contradicts the
+strict-decode discipline that ADR-011 §3 / ADR-017 §2 already
+enforced on the Python harness side. The cost — clients must keep
+their schemas in sync — is the right cost for a Phase 0 polyglot
+contract where a typo in `optoins` is far more likely than a real
+forward-compat extension. Forward compatibility, when it matters,
+will be carried by an explicit `schema_version` field rather than
+permissive decoding.
+
+### 3. `timeout_ms` wire shape, not `timeout_seconds`
+
+`SolveOptionsWire.timeout_ms` and `RecheckOptionsWire.timeout_ms`
+are `Option<u64>` of milliseconds. Internal `VerifyOptions::timeout`
+and `LeanOptions::timeout` are `std::time::Duration`; the wire
+lowering uses `Duration::from_millis`. Reasons: (a) JSON has no
+`Duration` type and milliseconds are unambiguous on the wire;
+(b) the harness side already emits `timeout_ms` (ADR-017 §2 — the
+guideline-tuner trace records ms), so a single client decoder
+covers both backends; (c) `u64` gives ~584 million years of
+headroom which is fine for any timeout the warden will ever honour.
+If sub-millisecond precision becomes relevant it will be a new
+field, not a breaking change to this one.
+
+### 4. Unwrapped responses — pipeline results lower directly
+
+Handlers return `Result<Json<T>, E>` where `T` is the pipeline's
+own result type (`deduce::Verdict`, `solver::FormalVerificationTrace`,
+`LeanRecheckWire`) — no `{result: ..., warnings: ..., metadata: ...}`
+envelope. Reasons: (a) every pipeline result already carries its
+own structured detail (verdict + matched rules; trace + Alethe
+proof + MUC; recheck + diagnostics) and wrapping would duplicate
+nothing useful; (b) unwrapped success + enveloped error
+(`{error, detail}` 422) is the same shape the Python harness
+service uses (ADR-017 §2), so a single client decoder works across
+all six Phase 0 endpoints; (c) Workflow stages in 8.4 will pass
+results between sidecars by structured value, not by HTTP
+envelope, so the wire contract should map to the value shape.
+
+### 5. `LeanRecheckWire` DTO — break the Serialize coupling
+
+The internal `lean::LeanRecheck` does **not** derive `Serialize`,
+deliberately: deriving it would force `#[serde(rename_all =
+"snake_case")]` on `lean::LeanSeverity`, a public type with
+existing `Display` / `Debug` test assertions across the lean
+module. Adding a wire-only DTO (`LeanRecheckWire`,
+`LeanMessageWire`, `LeanSeverityWire`) with `From<&LeanRecheck>`
+lowering is the standard Rust workaround for this serde-vs-domain
+collision: the internal type stays free to evolve (it can grow
+non-`Serialize`-compatible fields later), and the wire shape is
+explicit at the boundary. The same pattern already exists in
+`crate::deduce` (no internal `Serialize`; the harness translator
+side speaks AST JSON via its own DTOs) and the cost — three small
+structs in `handlers.rs` — is well below the cost of forcing
+serde traits down through the lean module.
+
+### 6. Per-handler tracing spans
+
+Each handler is annotated with
+`#[tracing::instrument(skip(req), fields(stage = "<deduce|solve|recheck>"))]`.
+This gives the Workflow side (Task 8.4) per-stage spans that
+nest cleanly under the `tower_http::trace::TraceLayer` request
+span without leaking the request payload (which can carry
+clinical data) into trace fields. `skip(req)` is non-negotiable
+for any handler whose payload could be PHI; `fields(stage = ...)`
+gives operators a single search key to slice all traces by
+pipeline.
+
+### 7. CPU-bound deduce on `spawn_blocking`
+
+The deduce handler wraps `deduce::evaluate(&payload, &rules)` in
+`tokio::task::spawn_blocking`. Reason: the ascent Datalog seminaive
+pass (ADR-013) is fully synchronous CPU work; running it on the
+async runtime's scheduler thread would block the executor and
+starve concurrent solve/recheck calls under load. `solver::verify`
+and `lean::recheck` already drive subprocesses / HTTP via tokio
+async I/O so they stay on the runtime threads. The blocking task
+is owned by the handler `Future`; cancellation drops the
+`JoinHandle`, which causes the blocking pool to drop the closure
+once it next yields — acceptable for a Datalog evaluator that
+runs in tens of milliseconds for Phase 0 fixtures.
+
+### 8. Subprocess hygiene — preserved through the handler boundary
+
+`solver::verify` and `lean::recheck` keep their existing
+`.kill_on_drop(true)` semantics (ADR-004 §2). The handlers `await`
+them directly inside the request future, so a client cancellation
+or a tower timeout drops the future, which drops the `Child`
+handle, which sends SIGKILL to z3/cvc5/curl-equivalent on Unix.
+No new subprocess code is introduced in 8.3b1; the only addition
+is the HTTP boundary on top.
+
+### 9. Test discipline — `tower::oneshot` for handler unit tests
+
+All in-handler tests use `tower::ServiceExt::oneshot(req)` to drive
+the router without binding a TCP listener. Two reasons: (a) it
+matches the per-route discipline ADR-018 §6 already established
+for the foundation tests (no real port, no real sidecar); (b)
+spinning up a real listener in unit tests would conflict with the
+8.3b2 daprd integration test for port 8082 / 50001. The
+`runtime_tests` module covers: deduce-happy (verdict round-trip),
+deduce-non-canonical-vital (kind tag + 422), solve-warden (warden
+spawn failure → kind tag + 422), recheck-no-proof
+(`{sat: true}` → kind tag + 422), recheck-transport (URL
+unreachable → kind tag + 422). Solver z3/cvc5 happy paths and
+Lean Kimina happy paths are not exercised here because they need
+real subprocess / HTTP fixtures; those land in 8.3b2's daprd
+integration test where the sidecar plus existing
+`solver_smoke` / `lean_smoke` fixtures already cover them.
+
+### 10. AppState — deferred to 8.3b2
+
+8.3b1's handlers consume request-side options + `::default()`
+fallbacks (`VerifyOptions::default()`, `LeanOptions::default()`).
+No state is shared. Introducing an empty `AppState` now would be
+premature abstraction; introducing a populated one would conflate
+the env-override resolution (which 8.3b2 owns) with the handler
+plumbing. The router factory keeps its `Router::new()` shape and
+will gain `.with_state(AppState { … })` in 8.3b2.
+
+### 11. SIGTERM-first warden escalation — still deferred
+
+ADR-014 §9 → ADR-015 §8 → ADR-016 §7 → ADR-018 §6 each rolled the
+production solver-warden's SIGTERM-first escalation forward. 8.3b1
+**does not change that contract**: the warden still uses tokio
+`Child::kill()` (SIGKILL on the immediate child) for production
+timeouts. ADR-018 §6's narrow authorization for SIGTERM in *test
+cleanup* of the dapr CLI is unchanged. Production SIGTERM-first
+remains scheduled for Task 8.4 alongside the Workflow-driven
+end-to-end gate where graceful subprocess shutdown matters most.
+
+**Consequences.** Task 8.3b2 inherits a stable handler surface +
+error envelope + per-pipeline `IntoResponse` impls + a green
+`tower::oneshot` test suite, and only needs to add the daprd-driven
+cargo integration test, the `AppState` populated from env vars at
+boot, and the `just rs-service-smoke` extension that exercises the
+new pipeline cases. Workflow (Task 8.4) gets a polyglot pipeline
+where `ingest → translate` (harness) → `deduce → solve → recheck`
+(kernel) all share the same `{error, detail}` 422 envelope and the
+same per-stage tracing convention.
+
+**Alternatives rejected.**
+
+- **Single `/v1/pipeline` endpoint dispatching by `stage` field.**
+  Forces every caller through one handler with a giant enum
+  payload; loses URL-level routing and the per-handler tracing
+  spans; complicates the OpenAPI / type story Workflow will want
+  in 8.4. Three explicit endpoints map 1:1 to three pipelines.
+- **Permissive request decoding (no `deny_unknown_fields`).**
+  Saves a clippy gate but masks producer bugs. ADR-011 / ADR-017
+  already established strict decode on the harness side; matching
+  it on the kernel side keeps the polyglot story consistent.
+- **`timeout_seconds: f64` instead of `timeout_ms: u64`.** Floats
+  on JSON timeout fields invite NaN/Inf edge cases in serde and
+  mismatch the harness's existing `timeout_ms` wire convention.
+- **Forcing `Serialize` on `lean::LeanRecheck` instead of a wire
+  DTO.** Would propagate `#[serde(rename_all = "snake_case")]` to
+  `LeanSeverity` and force serde derives across the lean module,
+  coupling internal evolution to the wire format. The `From`
+  lowering is the standard fix.
+- **Synchronous deduce on the async runtime thread.** The ascent
+  pass is CPU-bound; running it on a runtime thread starves
+  concurrent async handlers. `spawn_blocking` keeps the executor
+  responsive at the cost of one thread-pool hop per call.
+- **Wrapping success responses in `{result, warnings}`.** Adds a
+  second envelope shape to the polyglot contract for no concrete
+  Phase 0 benefit. Errors are already enveloped; success flows
+  the pipeline value directly. Symmetric with the harness side.
+- **Introducing `AppState` in 8.3b1 as an empty placeholder.**
+  Empty state increases the router factory's signature, breaks
+  `Router::new()` typing in tests, and adds nothing the handlers
+  use. 8.3b2 owns `AppState` because it owns the env-override
+  resolution that gives it a reason to exist.
+- **Daprd-driven integration test in 8.3b1.** That is exactly the
+  scope cut — fitting it back in is what blew the original 8.3b
+  context budget. 8.3b2 owns it.

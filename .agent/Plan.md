@@ -75,27 +75,33 @@ C6. All inter-process comms = JSON-over-TCP/IP and/or MCP.
 > three distinct subprocess pipelines (`deduce`, `solve`, `recheck`)
 > behind one axum app, and the foundation + endpoint plumbing each
 > warrant their own session. ADR-018 captures the kernel-side
-> foundation contract.
+> foundation contract. **Task 8.3b was further split into 8.3b1 +
+> 8.3b2 on 2026-05-01** because the original 8.3b scope (three
+> handlers + their `IntoResponse` impls + comprehensive unit tests +
+> `AppState` wiring + a Dapr-driven cargo integration test driving all
+> three endpoints through daprd) again exceeded a single context
+> window. ADR-019 captures the rationale and the per-sub-task gates.
 
-| #    | Task                                                                                          | Status   | Session output gate                                                                                                                  |
-| ---- | --------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| 1    | Foundational repo scaffolding + env provisioning + memory init                                | **DONE** | git commit `chore: initial project scaffolding`                                                                                      |
-| 2    | Core conceptual schemas — Rust structs + Pydantic v2 models for the 4 schemas                 | **DONE** | git commit `feat: complete Core Conceptual Schemas`                                                                                  |
-| 3    | Live genuine data ingestion — local CSV/JSON parser → Python harness                          | **DONE** | git commit `feat: complete Live Genuine Data Ingestion`                                                                              |
-| 4    | Python neurosymbolic translators — CLOVER text→AST→SMT-LIB                                    | **DONE** | git commit `feat: complete Python neurosymbolic translators`                                                                         |
-| 5    | Rust deductive engine — Nemo Datalog + Octagon state vectors                                  | **DONE** | git commit `feat: complete Rust deductive engine`                                                                                    |
-| 6    | Mathematical solver integration — Z3/cvc5, MUC extraction, Alethe proof emission              | **DONE** | git commit `feat: complete Mathematical solver integration`                                                                          |
-| 7    | Headless Lean 4 interop — Kimina REST bridge                                                  | **DONE** | git commit `feat: complete Headless Lean 4 interop`                                                                                  |
-| 8.1  | Dapr foundation — slim init + components + Configuration + Justfile recipes + smoke gate      | **DONE** | git commit `feat: complete Task 8.1 Dapr foundation`                                                                                 |
-| 8.2  | Python harness Dapr service — FastAPI app exposing `/v1/ingest` + `/v1/translate`             | **DONE** | git commit `feat: complete Task 8.2 Python harness Dapr service`                                                                     |
-| 8.3a | Rust kernel service foundation — axum app skeleton + `/healthz` + `[[bin]]` + Justfile recipes | pending  | `cargo run --bin cds-kernel-service` boots the service; `/healthz` returns `{status, kernel_id, phase, schema_version}`; `dapr run --app-id cds-kernel …` reaches it through the sidecar at `/v1.0/invoke/cds-kernel/method/healthz`; all unit tests + the gated sidecar smoke pass. |
-| 8.3b | Rust kernel pipeline endpoints — `/v1/deduce` + `/v1/solve` + `/v1/recheck` + Dapr smoke      | pending  | All three endpoints wire the existing `deduce::evaluate` / `solver::verify` / `lean::recheck` modules; cargo integration test drives all three through daprd's `/v1.0/invoke/cds-kernel/method/v1/...`. |
-| 8.4  | End-to-end Dapr Workflow — `ingest → translate → deduce → solve → recheck`                    | pending  | End-to-end pipeline runs under Dapr against a canonical guideline; placement + scheduler up; per-stage tracing; flag round-trips.    |
-| 9    | SvelteKit frontend — wire to live backend; render AST, Octagon, MUCs                          | pending  | UI shows live trace from real dataset; verification flag round-trips.                                                                |
+| #     | Task                                                                                                          | Status   | Session output gate                                                                                                                  |
+| ----- | ------------------------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| 1     | Foundational repo scaffolding + env provisioning + memory init                                                | **DONE** | git commit `chore: initial project scaffolding`                                                                                      |
+| 2     | Core conceptual schemas — Rust structs + Pydantic v2 models for the 4 schemas                                 | **DONE** | git commit `feat: complete Core Conceptual Schemas`                                                                                  |
+| 3     | Live genuine data ingestion — local CSV/JSON parser → Python harness                                          | **DONE** | git commit `feat: complete Live Genuine Data Ingestion`                                                                              |
+| 4     | Python neurosymbolic translators — CLOVER text→AST→SMT-LIB                                                    | **DONE** | git commit `feat: complete Python neurosymbolic translators`                                                                         |
+| 5     | Rust deductive engine — Nemo Datalog + Octagon state vectors                                                  | **DONE** | git commit `feat: complete Rust deductive engine`                                                                                    |
+| 6     | Mathematical solver integration — Z3/cvc5, MUC extraction, Alethe proof emission                              | **DONE** | git commit `feat: complete Mathematical solver integration`                                                                          |
+| 7     | Headless Lean 4 interop — Kimina REST bridge                                                                  | **DONE** | git commit `feat: complete Headless Lean 4 interop`                                                                                  |
+| 8.1   | Dapr foundation — slim init + components + Configuration + Justfile recipes + smoke gate                      | **DONE** | git commit `feat: complete Task 8.1 Dapr foundation`                                                                                 |
+| 8.2   | Python harness Dapr service — FastAPI app exposing `/v1/ingest` + `/v1/translate`                             | **DONE** | git commit `feat: complete Task 8.2 Python harness Dapr service`                                                                     |
+| 8.3a  | Rust kernel service foundation — axum app skeleton + `/healthz` + `[[bin]]` + Justfile recipes                | **DONE** | git commit `feat: complete Task 8.3a Rust kernel service foundation`                                                                 |
+| 8.3b1 | Rust kernel pipeline handlers — `/v1/deduce` + `/v1/solve` + `/v1/recheck` + `IntoResponse` lifts + unit tests | **DONE** | git commit `feat: complete Task 8.3b1 Rust kernel pipeline handlers`                                                                 |
+| 8.3b2 | Rust kernel pipeline Dapr smoke — daprd-driven cargo integration test for all three endpoints                 | pending  | Cargo integration test drives `/v1/deduce` + `/v1/solve` + `/v1/recheck` through daprd's `/v1.0/invoke/cds-kernel/method/v1/...` against canonical fixtures (`data/guidelines/contradictory-bound.recorded.json` for solve+recheck, telemetry payload for deduce); `AppState` wires env-driven `VerifyOptions` / `LeanOptions` overrides (`CDS_KIMINA_URL`, `CDS_Z3_PATH`, `CDS_CVC5_PATH`); `just rs-service-smoke` covers the new pipeline cases with the existing `--test-threads=1` discipline. |
+| 8.4   | End-to-end Dapr Workflow — `ingest → translate → deduce → solve → recheck`                                    | pending  | End-to-end pipeline runs under Dapr against a canonical guideline; placement + scheduler up; per-stage tracing; flag round-trips.    |
+| 9     | SvelteKit frontend — wire to live backend; render AST, Octagon, MUCs                                          | pending  | UI shows live trace from real dataset; verification flag round-trips.                                                                |
 
 **At any session:** select STRICTLY the lowest-numbered uncompleted
-task. No leapfrogging. Sub-tasks (8.1, 8.2, 8.3a, 8.3b, 8.4) follow
-the same discipline — `8.1 < 8.2 < 8.3a < 8.3b < 8.4 < 9`.
+task. No leapfrogging. Sub-tasks follow the same discipline —
+`8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2 < 8.4 < 9`.
 
 ## 9. Context-Governed Re-Entry Prompt (verbatim)
 
