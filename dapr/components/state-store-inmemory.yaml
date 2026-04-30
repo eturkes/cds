@@ -1,0 +1,14 @@
+# Phase 0 ephemeral state store. Doubles as the workflow / actor state
+# store via the actorStateStore=true metadata flag (Dapr 1.17 workflow
+# requirement). Replaced by SQLite/Postgres in Phase 1+ to give the
+# workflow durable replay across daprd restarts.
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: cds-statestore
+spec:
+  type: state.in-memory
+  version: v1
+  metadata:
+    - name: actorStateStore
+      value: "true"

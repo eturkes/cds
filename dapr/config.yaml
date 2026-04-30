@@ -1,0 +1,15 @@
+# Phase 0 Dapr Configuration. mTLS off (single dev host); tracing on
+# stdout (Phase 0 has no OTLP collector — Phase 1+ swaps to OpenTelemetry
+# Collector / Jaeger). Workflow runs against `cds-statestore`.
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: cds-config
+spec:
+  tracing:
+    samplingRate: "1"
+    stdout: true
+  metric:
+    enabled: true
+  mtls:
+    enabled: false

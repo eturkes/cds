@@ -781,3 +781,170 @@ boundary:
   cost in exchange for ~150 LOC of body-shaping boilerplate;
   `reqwest` is the 2026 standard for async HTTP per the same web
   search referenced above.
+
+---
+
+## ADR-016 — Phase 0 Dapr 1.17 foundation contract (Task 8 split)
+
+**Status:** Accepted
+**Date:** 2026-04-30
+
+**Context.** Task 8 (Dapr workflow orchestration — sidecar boundaries
+Rust↔Python↔solvers) is too large for a single context-window session.
+Past sessions exhausted the budget on installer plumbing alone. This
+ADR splits Task 8 into four atomic sub-sessions and pins the **Phase 0
+foundation** that all of them depend on.
+
+A 2026-04-30 web search (`"State of the art Dapr workflow polyglot
+orchestration 2026 1.17 slim mode"`) confirms Dapr 1.17 (released
+2026-02-27) ships:
+
+- **Workflow versioning** for safe in-flight code evolution.
+- **41 % higher Workflow throughput.**
+- **End-to-end tracing** with caller-trace-linked workflow spans.
+- Polyglot Workflow SDKs (Python, .NET, Go, Java, JS).
+- First-party `pubsub.in-memory` and `state.in-memory` components for
+  zero-dependency dev/test.
+- **Slim self-hosted mode** (`dapr init -s`) that skips Docker and
+  stages `daprd`, `placement`, `scheduler`, `dashboard` as plain
+  binaries under a configurable runtime path.
+
+**Decision.**
+
+### 1. Sub-task split
+
+| Sub-task | Scope | Smoke gate |
+| -------- | ----- | ---------- |
+| **8.1 — Foundation** *(this ADR)* | Component manifests + Configuration + Justfile recipes (`fetch-dapr`, `dapr-init`, `dapr-status`, `dapr-clean`, `dapr-smoke`) + foundation pytest. | `just dapr-smoke` boots `daprd` ~3 s, both components load, Workflow engine starts, clean shutdown. |
+| **8.2 — Python harness service** | FastAPI/uvicorn app exposing `/v1/ingest` + `/v1/translate`; runs under `dapr run --app-id cds-harness …`. | Service-level pytest exercises both endpoints through the sidecar. |
+| **8.3 — Rust kernel service** | Axum service exposing `/v1/deduce`, `/v1/solve`, `/v1/recheck`; runs under `dapr run --app-id cds-kernel …`. | Cargo integration test exercises all three endpoints through the sidecar. |
+| **8.4 — End-to-end Workflow** | Python Dapr Workflow chaining `ingest → translate → deduce → solve → recheck`; placement + scheduler spawned at orchestration time; per-stage `tracing` spans + Workflow events. | End-to-end pipeline runs under Dapr against a canonical guideline; verification flag round-trips. |
+
+### 2. Slim self-hosted mode (Phase 0 lock)
+
+Phase 0 runs Dapr in **slim mode**. No Docker, no Redis, no Zipkin
+sidecar. The CLI + slim binaries (`daprd`, `placement`, `scheduler`,
+`dashboard`) are staged under `.bin/.dapr/.dapr/` by `just fetch-dapr`,
+keeping the install hermetic and project-local in line with ADR-008.
+Phase 1+ revisits the K8s deployment when it materially helps the
+research prototype (it does not in Phase 0).
+
+### 3. Component locked-in selections
+
+- `pubsub.in-memory v1` (`cds-pubsub`) — ephemeral broker; Phase 0 only.
+- `state.in-memory v1` (`cds-statestore`) with **`actorStateStore=true`**
+  — Dapr 1.17 Workflow runs on durable actors and *requires* a state
+  store flagged as the actor store. The in-memory backing means
+  Workflow state evaporates on `daprd` restart; Phase 0 accepts that
+  one pipeline run is one daprd lifecycle. Phase 1+ swaps to a durable
+  backend (SQLite first, Postgres second) once long-lived workflows
+  matter.
+
+### 4. Configuration locked-in
+
+`dapr/config.yaml` (`metadata.name: cds-config`):
+
+- `tracing.samplingRate: "1"` (sample everything) +
+  `tracing.stdout: true` (Phase 0 has no OTLP collector — Phase 1+
+  swaps to OpenTelemetry Collector / Jaeger).
+- `metric.enabled: true`.
+- `mtls.enabled: false` (single dev host; constraint **C6** still holds
+  because the wire is JSON-over-TCP and Dapr's API is local-only on
+  127.0.0.1 by default).
+
+### 5. Sidecar invocation contract
+
+Each Phase 0 service launches under
+
+```
+dapr run \
+  --runtime-path .bin/.dapr \
+  --app-id <cds-harness | cds-kernel> \
+  --resources-path dapr/components \
+  --config dapr/config.yaml \
+  --app-protocol http \
+  -- <command>
+```
+
+`--runtime-path .bin/.dapr` is the project-local override; `dapr run`
+appends `/.dapr/bin/daprd`. Constraint **C6** (JSON-over-TCP/IP and/or
+MCP) is satisfied — Dapr APIs are HTTP/JSON or gRPC/JSON and the
+component wire is itself JSON-over-TCP between sidecar and broker.
+
+### 6. Placement / scheduler bring-up — deferred to Task 8.4
+
+`dapr init -s` *stages* the `placement` and `scheduler` binaries but
+does **not** start them. A `dapr run` invocation today loads
+components and starts the Workflow engine, then logs `connection
+refused` on `:50005` (placement) and `:50006` (scheduler) every ~500 ms
+until shutdown. These warnings are expected in 8.1's foundation smoke
+because no actor / Workflow instance is being driven yet.
+
+Task 8.4 owns standing up placement + scheduler as background processes
+(via `just placement-up` / `just scheduler-up` recipes that route
+through tokio `Command::kill_on_drop(true)` + a shutdown trap in line
+with ADR-004). The same recipes can ship a `just dapr-pipeline` that
+drives the end-to-end Workflow.
+
+### 7. SIGTERM-first deferral (carried from ADR-014 §9 → ADR-015 §8)
+
+This ADR rolls the SIGTERM-first escalation forward to Task 8.4. The
+foundation smoke drives `daprd` only; clean shutdown is delivered by
+the Dapr CLI's own SIGTERM path (`Exited Dapr successfully` line in the
+log). Task 8.4 introduces kernel-managed `placement`/`scheduler`
+children, which is when the warden gains a graceful-shutdown grace
+window — either via the `nix` crate for safe `kill(SIGTERM, …)` or by
+amending ADR-014 to ratify Phase 0's SIGKILL-only stance permanently.
+
+### 8. Dapr install pinning
+
+`DAPR_VERSION` defaults to `1.17.0` in the Justfile; `DAPR_OS=linux`,
+`DAPR_ARCH=amd64`. Override via env (`DAPR_VERSION=1.17.1 just
+fetch-dapr`). `fetch-dapr` is idempotent — skips if both `.bin/dapr`
+and `.bin/.dapr/.dapr/bin/daprd` are already executable. `dapr-clean`
+removes `.bin/dapr` and `.bin/.dapr/`; `dapr-init` is the
+"force-re-init" alias.
+
+### 9. Foundation smoke gate
+
+The Task 8.1 smoke test (`just dapr-smoke` + the matching pytest
+`test_daprd_smoke_loads_components_and_starts_workflow` in
+`python/tests/test_dapr_foundation.py`) drives `dapr run --
+sleep 2` and asserts five log markers in the captured output:
+
+1. `Component loaded: cds-pubsub (pubsub.in-memory/v1)`
+2. `Component loaded: cds-statestore (state.in-memory/v1)`
+3. `Using 'cds-statestore' as actor state store`
+4. `Workflow engine started`
+5. `Exited Dapr successfully`
+
+Any missing marker → smoke fails loudly with the captured daprd log
+piped to stderr. The pytest variant gates skip-with-reason if the CLI
+or daprd binary is absent, mirroring `rs-lean`'s gate shape.
+
+**Consequences.** Future Claude sessions hand off a small, repeatable
+foundation that 8.2/8.3/8.4 can build on without re-deriving install
+plumbing or component selection. Each sub-session has its own clear
+gate; none has to ship "all of Task 8" inside one context window.
+The in-memory state store creates one operational hazard — Workflow
+state evaporates on daprd restart — but Phase 0 is a single-run
+research prototype and the trade is documented at the boundary.
+
+**Alternatives rejected.**
+
+- **Single Task-8 session.** Repeatedly tried; repeatedly truncated
+  by context-window pressure. C5 (one atomic task per session) holds
+  only if the atomic unit is small enough to ship.
+- **Docker-mode `dapr init` (no `-s`).** Pulls the placement + Redis
+  + Zipkin containers, requires Docker on the host, hostile to
+  hermetic provisioning under `.bin/`. Phase 0's research-prototype
+  scope makes the trade clearly net-negative.
+- **`pubsub.redis` / `state.sqlite` for Phase 0.** Adds a runtime
+  dependency for a single-run research prototype. Phase 1+ takes the
+  swap when durable Workflow replay actually matters.
+- **`actorStateStore=false` to silence placement noise.** Breaks the
+  Workflow engine — Dapr 1.17 Workflows ride on durable actors. The
+  warning noise is the right trade.
+- **Re-enabling mTLS now.** Single-host loopback traffic; mTLS adds
+  CA-rotation overhead with zero security benefit before Phase 1's
+  multi-host deployment.

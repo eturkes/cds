@@ -6,8 +6,141 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 7 — Headless Lean 4 interop (Kimina REST bridge: `cds_kernel::lean::recheck` ships a self-contained Lean snippet that probes the cvc5-emitted Alethe S-expression through `POST /verify`) (2026-04-30).
-- **Next up:** Task 8 — Dapr workflow orchestration (sidecar boundaries Rust↔Python↔solvers; end-to-end pipeline runs under Dapr; logs traceable per stage).
+- **Last completed:** Task 8.1 — Dapr foundation (slim self-hosted Dapr 1.17 staged under `.bin/.dapr/`; `pubsub.in-memory` + `state.in-memory` (with `actorStateStore=true`) component manifests under `dapr/components/`; `dapr/config.yaml` Configuration; Justfile recipes `fetch-dapr` / `dapr-init` / `dapr-status` / `dapr-clean` / `dapr-smoke`; pytest `test_dapr_foundation.py` 8/8 + `just dapr-smoke` green) (2026-04-30).
+- **Next up:** Task 8.2 — Python harness Dapr service (FastAPI app exposing `/v1/ingest` + `/v1/translate`, runs under `dapr run --app-id cds-harness …`).
+
+> **Task 8 was split** into 8.1–8.4 on 2026-04-30 (ADR-016) because a monolithic Dapr-orchestration task repeatedly exhausted a single context window. Sub-task progression is strict: `8.1 < 8.2 < 8.3 < 8.4 < 9`.
+
+## Session 2026-04-30 — Task 8.1 close-out
+
+Shipped the Phase 0 Dapr foundation. Slim self-hosted Dapr 1.17 was
+already staged under `.bin/.dapr/.dapr/` from a prior session; this
+session pinned and codified the install path, authored the locked
+component selections, and locked the smoke gate. `dapr/components/`
+materialises both Phase 0 components; `dapr/config.yaml` materialises
+the Phase 0 Configuration; the Justfile gains a `Dapr` block; pytest
+gains a foundation suite.
+
+**Module layout (`dapr/`):**
+
+| File                                       | Role                                                                                                      |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `components/pubsub-inmemory.yaml`          | `pubsub.in-memory` v1 — ephemeral broker, named `cds-pubsub`. Phase 0 only.                               |
+| `components/state-store-inmemory.yaml`     | `state.in-memory` v1 named `cds-statestore`, `actorStateStore=true` (Workflow requirement on Dapr 1.17).  |
+| `config.yaml`                              | Configuration `cds-config` — tracing on stdout (sample 1.0), metrics on, mTLS off (single dev host).      |
+| `README.md`                                | Phase 0 layout + Justfile recipe map + sidecar invocation contract.                                       |
+
+**Justfile additions:**
+
+| Recipe              | Behaviour                                                                                                                                                            |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fetch-dapr`        | Idempotent slim install. Fetches `dapr` CLI v`{{DAPR_VERSION}}` (default `1.17.0`) to `.bin/dapr` if missing; runs `dapr init -s --runtime-path .bin/.dapr` if `.bin/.dapr/.dapr/bin/daprd` missing. |
+| `dapr-init`         | Wipes `.bin/.dapr/` then re-runs `fetch-dapr`. Forces re-init.                                                                                                       |
+| `dapr-status`       | Prints CLI version, daprd version, slim binary inventory, components dir contents, config path.                                                                      |
+| `dapr-clean`        | Removes `.bin/.dapr/` and `.bin/dapr`. Source / manifests untouched.                                                                                                 |
+| `dapr-smoke`        | **Foundation gate.** Runs `dapr run --app-id cds-dapr-foundation-smoke … -- sleep 2`; greps the captured log for the five required markers (see ADR-016 §9).         |
+| `bootstrap`         | Now also depends on `fetch-dapr` so a fresh checkout has Dapr ready end-to-end.                                                                                      |
+
+**Tests (Python suite):**
+
+| Suite                                                      | Count | Coverage                                                                                                                                                                                                                                  |
+| ---------------------------------------------------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Existing schema + ingest + translate + smoke               | 71    | (unchanged — no regressions).                                                                                                                                                                                                             |
+| `python/tests/test_dapr_foundation.py` (new)               | 8     | components dir inventory; pubsub manifest schema; state-store manifest schema (incl. `actorStateStore=true` assertion); Configuration schema; component-name uniqueness; CLI version pin (`1.17.x`); daprd version pin; **end-to-end** `dapr run` smoke. |
+
+Final gate (all green):
+
+- `uv run pytest` → **79 pass** (71 prior + 8 new).
+- `uv run ruff check .` → clean.
+- `cargo test --workspace` → 95 pass (no Rust changes — sanity).
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean.
+- `cargo fmt --all -- --check` → clean.
+- `just dapr-smoke` → ✓ both components loaded; workflow engine started; clean shutdown.
+- `just dapr-status` → CLI 1.17.0 / daprd 1.17.0 / slim binary inventory + project components dir listed.
+
+**Dependencies added:**
+
+- `pyyaml>=6.0` (dev + uv dev-dependencies). Already present transitively
+  through `dapr` Python SDK install but pinned explicitly so the
+  foundation tests stay reproducible.
+
+**Decisions captured in ADR-016** — Phase 0 Dapr foundation contract:
+slim self-hosted mode locked (no Docker / Redis / Zipkin); in-memory
+pub/sub + state store (with `actorStateStore=true`) for Phase 0 with
+Phase 1+ swap to durable backends; mTLS off on single dev host;
+`tracing.samplingRate=1` + stdout exporter; sidecar invocation contract
+(`dapr run --runtime-path .bin/.dapr --resources-path dapr/components
+--config dapr/config.yaml …`); placement + scheduler bring-up
+**deferred to Task 8.4** (the streamed `:50005` / `:50006` connection
+warnings during 8.1's smoke are expected); SIGTERM-first warden
+escalation rolls forward from ADR-014 §9 → ADR-015 §8 → ADR-016 §7
+to Task 8.4.
+
+## Open notes for Task 8.2 — Python harness Dapr service
+
+- **Scope:** wrap `cds_harness.ingest` and `cds_harness.translate` in a
+  thin FastAPI app exposing `/v1/ingest` (multipart-or-JSON path → returns
+  `ClinicalTelemetryPayload` JSON) and `/v1/translate` (JSON path →
+  returns `OnionLIRTree` + `SmtConstraintMatrix` envelope). The app
+  must be importable as `python -m cds_harness.service` (or a
+  `cds-harness-service` console script) so `dapr run --app-id
+  cds-harness -- python -m cds_harness.service` boots cleanly.
+- **App-port wiring.** `dapr run` needs `--app-port <N>` so daprd can
+  forward inbound traffic. uvicorn binds the same port. Pick an
+  ephemeral default; let env override (`CDS_HARNESS_PORT`).
+- **Constraint C6 still binds.** All endpoints carry JSON
+  request/response bodies. No raw bytes / no shared memory. The Dapr
+  SDK in Python is acceptable (the SDK is JSON-over-TCP under the
+  hood); a plain `httpx` to the local daprd `:3500` is also acceptable.
+- **Console scripts.** `[project.scripts]` should grow `cds-harness-service`
+  for clean `dapr run` wiring (and incidentally `cds-ingest` / `cds-translate`
+  per the carry-forward note from Task 7).
+- **`tool.uv.dev-dependencies` deprecation.** Migrate to
+  `dependency-groups.dev` while wiring 8.2 — every `uv run` still
+  surfaces the warning.
+- **Smoke.** Pytest spawns `dapr run --app-id cds-harness -- python -m
+  cds_harness.service` in a subprocess (timeout-bounded), waits for
+  the sidecar `:3500/v1.0/healthz` to flip ready, then drives one
+  ingest + one translate call through `http://localhost:3500/v1.0/invoke/cds-harness/method/v1/...`.
+
+## Open notes for Task 8.3 — Rust kernel Dapr service
+
+- **Scope:** thin `axum` (or `hyper`) JSON-over-TCP service in
+  `crates/kernel/src/bin/cds_kernel_service.rs` exposing
+  `POST /v1/deduce` (`ClinicalTelemetryPayload` → `Verdict`),
+  `POST /v1/solve` (`SmtConstraintMatrix` → `FormalVerificationTrace`),
+  `POST /v1/recheck` (`FormalVerificationTrace` → `LeanRecheck`).
+- The warden + Z3/cvc5 + Lean clients already exist; the binary just
+  binds them behind HTTP routes.
+- `dapr run --app-id cds-kernel --app-port <N> --
+  cargo run --bin cds_kernel_service` boots the sidecar.
+- Smoke = cargo integration test driving all three endpoints through
+  daprd's `:3500/v1.0/invoke/cds-kernel/method/v1/...`.
+- **PHASE marker.** `lib.rs::PHASE = 0`. Decide what `PHASE = 1` means
+  in 8.3 / 8.4 (probably: end-to-end pipeline runs under Dapr).
+
+## Open notes for Task 8.4 — End-to-end Dapr Workflow
+
+- **Scope:** Python Dapr Workflow that chains
+  `ingest → translate → deduce → solve → recheck`. Each stage is a
+  Workflow `activity` that calls the appropriate sidecar via
+  service-invocation. The Workflow output is the aggregated envelope:
+  `{ payload, ir, matrix, verdict, trace, lean_recheck }`.
+- **Placement + scheduler bring-up.** Slim init *stages* the binaries
+  but doesn't start them. 8.4 owns `just placement-up` /
+  `just scheduler-up` (background processes via tokio
+  `Command::kill_on_drop(true)` per ADR-004), or rolls them into a
+  single `just dapr-pipeline` recipe that brings everything up,
+  drives the pipeline, then tears down.
+- **SIGTERM-first warden escalation comes due here** (ADR-014 §9 →
+  ADR-015 §8 → ADR-016 §7).
+- **Tracing.** Each stage emits a `tracing` span + a Dapr Workflow
+  event. Final aggregated trace rides on the Workflow output.
+- **Decide:** in-band JSON envelope vs. Dapr state-store handle for
+  the cross-stage payload. JSON envelope is simplest; state-store
+  handles cleaner if payloads grow.
+- **Gate:** `just dapr-pipeline` runs end-to-end against a canonical
+  guideline; verification flag round-trips.
 
 ## Session 2026-04-30 — Task 7 close-out
 

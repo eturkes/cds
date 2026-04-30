@@ -64,8 +64,8 @@ env-verify:
 # Bootstrap — full provisioning for a fresh checkout
 # =============================================================================
 
-# Verify env, sync Python venv, prefetch Rust deps, fetch external solver binaries.
-bootstrap: env-verify py-sync rs-fetch fetch-bins
+# Verify env, sync Python venv, prefetch Rust deps, fetch external solver binaries + Dapr.
+bootstrap: env-verify py-sync rs-fetch fetch-bins fetch-dapr
     @echo "✓ bootstrap complete"
 
 # =============================================================================
@@ -154,6 +154,109 @@ fetch-lean:
     ln -sf "$ELAN_HOME/bin/lean" "{{ justfile_directory() }}/.bin/lean"
     ln -sf "$ELAN_HOME/bin/lake" "{{ justfile_directory() }}/.bin/lake"
     "{{ justfile_directory() }}/.bin/lean" --version
+
+# =============================================================================
+# Dapr 1.17 — slim self-hosted polyglot orchestration (Phase 0, Task 8)
+# =============================================================================
+# Per ADR-016: Dapr CLI + slim daprd/placement/scheduler binaries staged
+# under .bin/.dapr/.dapr/. Phase 0 binds in-memory pub/sub + state store
+# (dapr/components/) — durable backends land in Phase 1+. End-to-end
+# Workflow lives in Task 8.4; foundation gate is `just dapr-smoke`.
+
+DAPR_VERSION         := env_var_or_default('DAPR_VERSION', '1.17.0')
+DAPR_OS              := env_var_or_default('DAPR_OS',      'linux')
+DAPR_ARCH            := env_var_or_default('DAPR_ARCH',    'amd64')
+DAPR_INSTALL_DIR     := justfile_directory() + "/.bin/.dapr"
+DAPR_RUNTIME_DIR     := DAPR_INSTALL_DIR + "/.dapr"
+DAPR_DAPRD           := DAPR_RUNTIME_DIR + "/bin/daprd"
+DAPR_RESOURCES_PATH  := justfile_directory() + "/dapr/components"
+DAPR_CONFIG_PATH     := justfile_directory() + "/dapr/config.yaml"
+
+# Idempotently stage Dapr CLI + slim runtime under .bin/. Skips populated tree.
+fetch-dapr:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ justfile_directory() }}/.bin"
+    if [ -x "{{ justfile_directory() }}/.bin/dapr" ] && [ -x "{{DAPR_DAPRD}}" ]; then
+        echo "dapr CLI + slim runtime already present"
+        "{{ justfile_directory() }}/.bin/dapr" --version | head -1
+        "{{DAPR_DAPRD}}" --version | sed 's/^/daprd /'
+        exit 0
+    fi
+    if [ ! -x "{{ justfile_directory() }}/.bin/dapr" ]; then
+        echo "→ fetching dapr CLI v{{DAPR_VERSION}} ({{DAPR_OS}}/{{DAPR_ARCH}})"
+        url="https://github.com/dapr/cli/releases/download/v{{DAPR_VERSION}}/dapr_{{DAPR_OS}}_{{DAPR_ARCH}}.tar.gz"
+        tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+        curl -fsSL "$url" -o "$tmp/dapr.tgz"
+        tar -xzf "$tmp/dapr.tgz" -C "$tmp"
+        install -m 0755 "$tmp/dapr" "{{ justfile_directory() }}/.bin/dapr"
+    fi
+    if [ ! -x "{{DAPR_DAPRD}}" ]; then
+        echo "→ initializing slim Dapr runtime under {{DAPR_INSTALL_DIR}}/"
+        rm -rf "{{DAPR_INSTALL_DIR}}"
+        mkdir -p "{{DAPR_INSTALL_DIR}}"
+        "{{ justfile_directory() }}/.bin/dapr" init -s \
+            --runtime-path "{{DAPR_INSTALL_DIR}}" \
+            --runtime-version {{DAPR_VERSION}}
+    fi
+    "{{ justfile_directory() }}/.bin/dapr" --version | head -1
+    "{{DAPR_DAPRD}}" --version | sed 's/^/daprd /'
+
+# Force re-init: wipe slim runtime and re-stage. Keeps the CLI binary.
+dapr-init:
+    rm -rf "{{DAPR_INSTALL_DIR}}"
+    just fetch-dapr
+
+# Print Dapr CLI/runtime versions + the slim binary inventory + components.
+dapr-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    "{{ justfile_directory() }}/.bin/dapr" --version
+    if [ -x "{{DAPR_DAPRD}}" ]; then
+        echo "daprd: $({{DAPR_DAPRD}} --version)"
+        echo "slim runtime: {{DAPR_RUNTIME_DIR}}"
+        ls -1 "{{DAPR_RUNTIME_DIR}}/bin/" | sed 's|^|  |'
+    else
+        echo "slim runtime missing — run \`just fetch-dapr\`"
+    fi
+    echo "components: {{DAPR_RESOURCES_PATH}}"
+    ls -1 "{{DAPR_RESOURCES_PATH}}" | sed 's|^|  |'
+    echo "config:     {{DAPR_CONFIG_PATH}}"
+
+# Wipe project-local Dapr install (CLI + slim runtime). Source/manifests untouched.
+dapr-clean:
+    rm -rf "{{DAPR_INSTALL_DIR}}" "{{ justfile_directory() }}/.bin/dapr"
+    @echo "✓ dapr clean (run \`just fetch-dapr\` to repopulate)"
+
+# Boot daprd briefly with the project component manifests; assert both
+# `cds-pubsub` and `cds-statestore` load and the Workflow engine starts.
+# Placement/scheduler ports stay quiet until Task 8.4 — the streamed
+# "connection refused" warnings on :50005 / :50006 are expected and ignored.
+# Foundation smoke gate (Task 8.1).
+dapr-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -x "{{DAPR_DAPRD}}" ] || { echo "daprd missing — run \`just fetch-dapr\`"; exit 1; }
+    log=$(mktemp); trap 'rm -f "$log"' EXIT
+    timeout 8 "{{ justfile_directory() }}/.bin/dapr" run \
+        --app-id cds-dapr-foundation-smoke \
+        --runtime-path "{{DAPR_INSTALL_DIR}}" \
+        --resources-path "{{DAPR_RESOURCES_PATH}}" \
+        --config "{{DAPR_CONFIG_PATH}}" \
+        --log-level info \
+        -- sleep 2 \
+        > "$log" 2>&1 || true
+    grep -q 'Component loaded: cds-pubsub (pubsub.in-memory/v1)' "$log" || \
+        { echo "smoke fail: cds-pubsub did not load"; cat "$log"; exit 1; }
+    grep -q 'Component loaded: cds-statestore (state.in-memory/v1)' "$log" || \
+        { echo "smoke fail: cds-statestore did not load"; cat "$log"; exit 1; }
+    grep -q "Using 'cds-statestore' as actor state store" "$log" || \
+        { echo "smoke fail: actorStateStore wiring not detected"; cat "$log"; exit 1; }
+    grep -q 'Workflow engine started' "$log" || \
+        { echo "smoke fail: workflow engine did not start"; cat "$log"; exit 1; }
+    grep -q 'Exited Dapr successfully' "$log" || \
+        { echo "smoke fail: dapr did not shut down cleanly"; cat "$log"; exit 1; }
+    echo "✓ dapr-smoke: cds-pubsub + cds-statestore loaded; workflow engine up; clean shutdown"
 
 # =============================================================================
 # Python (uv + ruff + pytest)

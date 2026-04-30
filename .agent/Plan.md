@@ -66,19 +66,30 @@ C6. All inter-process comms = JSON-over-TCP/IP and/or MCP.
 
 ## 8. Atomic-task checklist
 
-| #  | Task                                                                                  | Status     | Session output gate                                                                       |
-| -- | ------------------------------------------------------------------------------------- | ---------- | ----------------------------------------------------------------------------------------- |
-| 1  | Foundational repo scaffolding + env provisioning + memory init                        | **DONE**   | git commit `chore: initial project scaffolding`                                            |
-| 2  | Core conceptual schemas — Rust structs + Pydantic v2 models for the 4 schemas         | **DONE**   | git commit `feat: complete Core Conceptual Schemas`                                        |
-| 3  | Live genuine data ingestion — local CSV/JSON parser → Python harness                  | **DONE**   | git commit `feat: complete Live Genuine Data Ingestion`                                    |
-| 4  | Python neurosymbolic translators — CLOVER text→AST→SMT-LIB                            | **DONE**   | git commit `feat: complete Python neurosymbolic translators`                               |
-| 5  | Rust deductive engine — Nemo Datalog + Octagon state vectors                          | **DONE**   | git commit `feat: complete Rust deductive engine`                                          |
-| 6  | Mathematical solver integration — Z3/cvc5, MUC extraction, Alethe proof emission      | **DONE**   | git commit `feat: complete Mathematical solver integration`                                |
-| 7  | Headless Lean 4 interop — Kimina REST bridge                                          | **DONE**   | git commit `feat: complete Headless Lean 4 interop`                                        |
-| 8  | Dapr workflow orchestration — sidecar boundaries Rust↔Python↔solvers                  | pending    | End-to-end pipeline runs under Dapr; logs traceable per stage.                             |
-| 9  | SvelteKit frontend — wire to live backend; render AST, Octagon, MUCs                  | pending    | UI shows live trace from real dataset; verification flag round-trips.                      |
+> **Note.** Task 8 (originally a single line) was split into four atomic
+> sub-sessions on 2026-04-30 because a monolithic Dapr-orchestration
+> task repeatedly exhausted the context window. ADR-016 captures the
+> rationale, the locked component selections, and the per-sub-task
+> smoke gates.
 
-**At any session:** select STRICTLY the lowest-numbered uncompleted task. No leapfrogging.
+| #    | Task                                                                                          | Status   | Session output gate                                                                                                                  |
+| ---- | --------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| 1    | Foundational repo scaffolding + env provisioning + memory init                                | **DONE** | git commit `chore: initial project scaffolding`                                                                                      |
+| 2    | Core conceptual schemas — Rust structs + Pydantic v2 models for the 4 schemas                 | **DONE** | git commit `feat: complete Core Conceptual Schemas`                                                                                  |
+| 3    | Live genuine data ingestion — local CSV/JSON parser → Python harness                          | **DONE** | git commit `feat: complete Live Genuine Data Ingestion`                                                                              |
+| 4    | Python neurosymbolic translators — CLOVER text→AST→SMT-LIB                                    | **DONE** | git commit `feat: complete Python neurosymbolic translators`                                                                         |
+| 5    | Rust deductive engine — Nemo Datalog + Octagon state vectors                                  | **DONE** | git commit `feat: complete Rust deductive engine`                                                                                    |
+| 6    | Mathematical solver integration — Z3/cvc5, MUC extraction, Alethe proof emission              | **DONE** | git commit `feat: complete Mathematical solver integration`                                                                          |
+| 7    | Headless Lean 4 interop — Kimina REST bridge                                                  | **DONE** | git commit `feat: complete Headless Lean 4 interop`                                                                                  |
+| 8.1  | Dapr foundation — slim init + components + Configuration + Justfile recipes + smoke gate      | **DONE** | git commit `feat: complete Task 8.1 Dapr foundation`                                                                                 |
+| 8.2  | Python harness Dapr service — FastAPI app exposing `/v1/ingest` + `/v1/translate`             | pending  | `dapr run --app-id cds-harness …` brings up the harness; pytest exercises both endpoints through the sidecar.                        |
+| 8.3  | Rust kernel Dapr service — axum app exposing `/v1/deduce` + `/v1/solve` + `/v1/recheck`       | pending  | `dapr run --app-id cds-kernel …` brings up the kernel; cargo integration test exercises all three endpoints through the sidecar.     |
+| 8.4  | End-to-end Dapr Workflow — `ingest → translate → deduce → solve → recheck`                    | pending  | End-to-end pipeline runs under Dapr against a canonical guideline; placement + scheduler up; per-stage tracing; flag round-trips.    |
+| 9    | SvelteKit frontend — wire to live backend; render AST, Octagon, MUCs                          | pending  | UI shows live trace from real dataset; verification flag round-trips.                                                                |
+
+**At any session:** select STRICTLY the lowest-numbered uncompleted
+task. No leapfrogging. Sub-tasks (8.1, 8.2, 8.3, 8.4) follow the same
+discipline — `8.1 < 8.2 < 8.3 < 8.4 < 9`.
 
 ## 9. Context-Governed Re-Entry Prompt (verbatim)
 

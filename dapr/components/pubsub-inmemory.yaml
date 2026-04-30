@@ -1,0 +1,11 @@
+# Phase 0 ephemeral pub/sub. Built-in Dapr component, zero external
+# dependencies. Replaced by a durable broker (Redis Streams / NATS
+# JetStream) in Phase 1+. Topic schema and provenance still flow as
+# JSON-over-TCP per constraint C6.
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: cds-pubsub
+spec:
+  type: pubsub.in-memory
+  version: v1
