@@ -6,8 +6,102 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 6 — Mathematical solver integration (Rust subprocess warden + Z3 unsat-core extraction + cvc5 Alethe proof emission + MUC ↔ source-span projection) (2026-04-30).
-- **Next up:** Task 7 — Headless Lean 4 interop (Kimina JSON-RPC bridge mechanically re-checks the Alethe certificate).
+- **Last completed:** Task 7 — Headless Lean 4 interop (Kimina REST bridge: `cds_kernel::lean::recheck` ships a self-contained Lean snippet that probes the cvc5-emitted Alethe S-expression through `POST /verify`) (2026-04-30).
+- **Next up:** Task 8 — Dapr workflow orchestration (sidecar boundaries Rust↔Python↔solvers; end-to-end pipeline runs under Dapr; logs traceable per stage).
+
+## Session 2026-04-30 — Task 7 close-out
+
+Shipped the Lean 4 interop layer under `crates/kernel/src/lean/`. Public
+entrypoint `cds_kernel::lean::recheck(trace, opts) -> LeanRecheck` posts
+a self-contained Lean snippet (defining the Alethe proof as a
+`String` + four `#eval` `PROBE` lines) to a running Kimina headless
+server via `POST /verify`, then parses the returned info messages back
+into `LeanRecheck { ok, custom_id, env_id, elapsed_ms, messages, probes }`.
+
+**Module layout (`crates/kernel/src/lean/`):**
+
+| File         | Role                                                                                                  |
+| ------------ | ----------------------------------------------------------------------------------------------------- |
+| `mod.rs`     | `LeanOptions`, `LeanError`, `LeanRecheck`, `LeanMessage`, `LeanSeverity`, `recheck` entrypoint.       |
+| `client.rs`  | `reqwest` POST `/verify`; permissive response decoder for results-array / top-level-array / single.   |
+| `snippet.rs` | `render(alethe_proof) -> String` Lean-source generator + Lean-string escaper.                          |
+
+**Tests (Rust workspace, all green):**
+
+| Suite                                  | Count | Coverage                                                                                                               |
+| -------------------------------------- | ----- | ---------------------------------------------------------------------------------------------------------------------- |
+| Existing schema + canonical + deduce + solver | 70 | (unchanged from Task 6).                                                                                              |
+| `lean::snippet` unit                   | 6     | escape ASCII / quotes+backslash / `\n\t\r` / UTF-8 BMP; render embeds proof + four probes; render is import-free; empty-proof edge case. |
+| `lean::client` unit                    | 11    | endpoint builder; results-array / top-level-array / pick-by-custom-id envelopes; lean-error vetoes ok; missing-probe vetoes ok; invalid JSON; empty results array; severity aliases (`Info`/`warn`/`ERROR`/`level`/`text`); strip lean-eval quotes; `probes_satisfied` requires all four + positive `byte_len`. |
+| `lean` (top-level) unit                | 4     | default options sanity; `recheck` rejects sat / unsat-without-proof; `recheck` surfaces `Transport` for unbound port. |
+| `tests/lean_smoke.rs` integration      | 1     | **Gate (opt-in):** end-to-end `solver::verify(contradictory) → lean::recheck` against `$CDS_KIMINA_URL`; prints loud skip notice when env var absent.|
+
+Final gate (all green):
+- `cargo test --workspace` → **95 pass** (80 unit + 5 deduce_smoke + 5 golden_roundtrip + 1 lean_smoke + 4 solver_smoke).
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean.
+- `cargo fmt --all -- --check` → clean.
+- `uv run pytest` → 71 pass (no Python regressions).
+- `uv run ruff check .` → clean.
+- `just rs-lean` (new recipe) → 1/1 pass with `--nocapture` (skip notice when `CDS_KIMINA_URL` unset).
+
+**Dependencies added:**
+- `reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "webpki-roots"] }`
+  (workspace + kernel crate). `rustls` (the 2026 feature name; 0.13's
+  `rustls-tls` was renamed to `rustls`) avoids OpenSSL system deps;
+  `webpki-roots` ships built-in roots so no platform CA store is
+  needed.
+
+**Plan amendment:** `.agent/Plan.md §6` "Theorem subprocesses" line
+updated from "Kimina headless JSON-RPC" to "Kimina headless REST
+(POST /verify)" — Plan said JSON-RPC, Kimina ships REST. Constraint
+**C6** (JSON-over-TCP/IP and/or MCP) is satisfied because REST is
+JSON-over-TCP. ADR-015 captures the rationale and the plan-vs-reality
+clarification.
+
+**Decisions captured in ADR-015** — Phase 0 Lean / Kimina contract:
+operator-owned daemon lifecycle (kernel does not spawn Kimina);
+`reqwest` + `rustls` + `webpki-roots`; permissive response decoder for
+upstream Kimina / Lean-REPL field-name churn; *structural* re-check
+via four `#eval` `PROBE` lines (foundational re-check via `lean-smt`
+deferred to Phase 1); `FormalVerificationTrace` schema unchanged
+(Task 2 wire format preserved); ADR-014 §9 SIGTERM-first deferral
+rolls forward to Task 8 (Dapr sidecar lifecycle).
+
+## Open notes for Task 8
+
+- **Dapr orchestration topology.** Phase 0 services to bind into the
+  workflow: (a) Python harness (ingest + translate stages); (b) Rust
+  kernel (deduce + solver); (c) Lean re-check via Kimina (operator-
+  managed daemon, *not* a sidecar). Pub/sub vs. service-invocation
+  for the Rust↔Python boundary is the first decision — pub/sub fits
+  the streaming-telemetry model; service invocation fits the
+  one-payload-one-trace model. Web-search `"State of the art Dapr
+  workflow polyglot 2026"` per Plan §10 #4 before pinning.
+- **Per-stage trace plumbing.** Each stage emits a `tracing` span +
+  a Dapr workflow event. The final aggregated `FormalVerificationTrace`
+  + `LeanRecheck` envelope rides on the workflow output. Decide:
+  in-band JSON envelope vs. Dapr state-store handle?
+- **Kimina sidecar = operator-managed daemon, not a Dapr sidecar.**
+  Per ADR-015 the kernel does not spawn Kimina. Task 8 may add a
+  `just kimina-up` recipe (background `python -m server`) so a fresh
+  developer can run the full pipeline without external setup; the
+  recipe must `kill_on_drop` the process group on `just kimina-down`.
+- **ADR-014 §9 / ADR-015 §8 SIGTERM-first deferral comes due here.**
+  Task 8 is the place to either (a) add `nix` for safe `SIGTERM`
+  delivery to kernel-spawned solver children and amend ADR-014 to
+  enable the two-stage escalation, or (b) accept Phase 0 SIGKILL-only
+  and amend ADR-014 to make that the permanent Phase 0+ stance.
+- **`cds-ingest` / `cds-translate` console scripts** would simplify
+  Dapr build-time wiring (sidecars typically launch one binary
+  per service). Wire `[project.scripts]` when convenient.
+- **`tool.uv.dev-dependencies` deprecation warning** still surfaces
+  on every `uv run`. Migrate to `dependency-groups.dev` while
+  scaffolding the Dapr Compose/manifest files.
+- **PHASE marker in `lib.rs` is still `0`.** ADR-013 noted it bumps
+  to `1` "when the SMT layer lands" — Task 6 landed it but the
+  marker stayed at `0` per Memory_Scratchpad's Task 6 close-out.
+  Decide what `PHASE = 1` means in Task 8 (probably: end-to-end
+  pipeline runs under Dapr).
 
 ## Session 2026-04-30 — Task 6 close-out
 

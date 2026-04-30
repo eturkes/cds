@@ -12,14 +12,17 @@
 //!   MUC ↔ source-span projection — produces a
 //!   [`schema::FormalVerificationTrace`] from an
 //!   [`schema::SmtConstraintMatrix`].
-//!
-//! Lean 4 / Kimina re-checking lands in Task 7.
+//! - The Lean 4 re-check bridge ([`lean`], Task 7): wraps the cvc5
+//!   Alethe proof in a self-contained Lean snippet and POSTs it to a
+//!   running Kimina headless server (REST), surfacing a
+//!   [`lean::LeanRecheck`] outcome.
 
 #![forbid(unsafe_code)]
 #![deny(clippy::all)]
 
 pub mod canonical;
 pub mod deduce;
+pub mod lean;
 pub mod schema;
 pub mod solver;
 

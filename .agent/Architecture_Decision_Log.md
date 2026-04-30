@@ -618,3 +618,166 @@ logic header.
   the proof file under `proofs/` keeps it inspectable in `git diff`
   and gives Task 7 a stable target for Kimina re-check experiments
   ahead of full pipeline wiring. Cost: one tracked file (~3.5 KB).
+
+---
+
+## ADR-015 — Phase 0 Lean 4 / Kimina re-check contract
+
+**Status:** Accepted
+**Date:** 2026-04-30
+
+**Context.** Task 7 lands the Lean 4 interop. Plan §6 and ADR-006 fix
+the *what* (Lean 4 via Kimina headless server is the foundational
+re-checker for cvc5 Alethe certificates); ADR-014 §9 deferred the
+SIGTERM-first warden escalation to Task 7 with the expectation that
+Lean would land as a *kernel-spawned child*. Two surface-level
+realities forced refinement before this ADR could pin the Phase 0
+boundary:
+
+1. **Protocol.** Plan §6 said "JSON-RPC". A 2026-04-30 web search
+   (`"Kimina Lean headless server JSON-RPC schema 2026 Alethe re-check"`)
+   plus a direct fetch of
+   `github.com/project-numina/kimina-lean-server` and the technical
+   report (arXiv:2504.21230) confirmed the actual protocol is **REST**
+   over HTTP (FastAPI), single endpoint `POST /verify`, default
+   `0.0.0.0:8000`. Constraint **C6** (JSON-over-TCP/IP and/or MCP) is
+   satisfied — REST is JSON-over-TCP. Plan §6 has been amended to
+   reflect the truth.
+2. **Process model.** Kimina is an **operator-managed daemon**, not a
+   per-call child. It maintains an LRU header cache across requests and
+   parallel Lean REPL workers; killing it after each `recheck()` would
+   waste the cache and cripple throughput. The kernel therefore does
+   *not* spawn Kimina via the warden. Daemon lifecycle is the operator's
+   responsibility (`python -m server` from the upstream repo, or a
+   future `just kimina-up` recipe). The warden discipline still applies
+   to anything the kernel itself spawns (today: Z3 + cvc5).
+3. **Foundational vs. structural re-check.** A truly foundational
+   Alethe re-check inside Lean's kernel requires `lean-smt`'s Alethe
+   importer (or a Carcara-as-Lean tactic), both of which add Mathlib /
+   project scaffolding that would explode Kimina's LRU header cache
+   and make per-call elapsed time minutes-not-seconds. Phase 0 is a
+   research-prototype gate; the bridge surface must be small enough
+   that Phase 1 can swap in foundational re-checking without re-doing
+   the wire format.
+
+**Decision.**
+
+1. **Module layout.** All Lean code lives under
+   `crates/kernel/src/lean/`. `mod.rs` exposes `recheck`,
+   `LeanOptions`, `LeanError`, `LeanRecheck`, `LeanMessage`,
+   `LeanSeverity`. Submodules: `client` (HTTP — `POST /verify`,
+   response decoder), `snippet` (Lean-source generator). The bridge is
+   solver-agnostic-shaped: any future foundational re-check swaps
+   `snippet::render` (and the Phase 0 probe contract) without
+   touching the wire format or `LeanRecheck`.
+2. **Transport = `reqwest` 0.13 with `rustls` + `webpki-roots`.**
+   No native-TLS, no OpenSSL system dep. JSON body via the `json`
+   feature. `default-features = false` keeps the dep tree minimal
+   (no cookies, multipart, gzip/brotli).
+3. **Request shape.** `POST /verify` with body
+   `{ "codes": [{ "custom_id": "...", "proof": "<lean source>" }],
+   "infotree_type": "none" }`. `infotree_type=none` skips the proof
+   tree we don't consume in Phase 0, shaving response bytes.
+4. **Response decoder is permissive.** Accepts the named-array
+   envelope (`{ "results": [...] }`), the top-level array, and a
+   single-result object. Per-message severity decodes from
+   `severity` *or* `level` (both seen across Kimina releases) and
+   maps to `LeanSeverity::{Info, Warning, Error}`. Body decodes from
+   `data`, `text`, or `message`. Elapsed time decodes from
+   `elapsed_ms`, `time` (u64 or f64 seconds), or `elapsed`. The
+   permissive shape isolates the bridge from upstream Kimina /
+   Lean-REPL field-name churn.
+5. **Probe-based structural re-check (Phase 0).** The Lean snippet:
+   - is **self-contained** — no `import Mathlib`, no `open` —
+     so Kimina's LRU header cache stays cheap;
+   - defines `def alethe_proof : String := "<escaped bytes>"` with
+     standard Lean string escaping (`\\`, `\"`, `\n`, `\r`, `\t`);
+     no raw-string `r#"..."#` density counting, no hex decoder;
+   - emits four `#eval s!"PROBE name=value"` info messages:
+     `byte_len`, `starts_paren`, `has_assume`, `has_rule`.
+
+   The Rust client requires all four probes to land *and* every
+   `byte_len > 0`, `starts_paren=true`, `has_assume=true`,
+   `has_rule=true`, *and* zero error-severity messages, before
+   returning `LeanRecheck::ok = true`. This proves the cvc5
+   Alethe certificate has been ingested by Lean 4 across the
+   JSON-over-TCP boundary (constraint **C6**) and that it carries
+   the structural invariants every Alethe proof must.
+6. **`FormalVerificationTrace` is not extended.** Task 2's wire
+   format is unchanged. `LeanRecheck` is a kernel-internal wrapper
+   that the future Dapr/MCP plumbing (Task 8) will serialize
+   alongside the trace as a separate envelope. Bumping
+   `SCHEMA_VERSION` is deferred until the Phase 1 foundational
+   re-check decides what fields it actually needs.
+7. **Daemon lifecycle is operator-owned.** The kernel does not
+   spawn Kimina. `LeanOptions::kimina_url` defaults to
+   `http://127.0.0.1:8000`. Auth is deliberately omitted in Phase 0
+   (no `LEAN_SERVER_API_KEY` wiring); `LeanOptions::extra_headers`
+   is the escape hatch when a deployment needs it.
+8. **Warden SIGTERM amendment is rolled forward.** ADR-014 §9
+   deferred SIGTERM-first escalation to Task 7. Because Kimina is
+   not a kernel-spawned child, the deferral is *not* discharged
+   here — it rolls forward to **Task 8** (Dapr workflow), where
+   sidecar lifecycle owns daemon shutdown grace. The Z3 + cvc5
+   batch children still use the single-stage SIGKILL path documented
+   in ADR-014 §8–9; that is unchanged.
+9. **Integration smoke is opt-in.** `tests/lean_smoke.rs` runs the
+   full pipeline (`solver::verify` → `lean::recheck`) only when
+   `CDS_KIMINA_URL` is set *and* the binaries
+   (`.bin/{z3,cvc5}`) are present. Both gates print a loud skip
+   notice on absence rather than failing — `cargo test --workspace`
+   stays green on a fresh checkout. The `just rs-lean` recipe
+   forwards `CDS_KIMINA_URL` from the operator's env.
+
+**Consequences.**
+
+- The Phase 0 Lean re-check honours **C6** (JSON-over-TCP) and the
+  spirit of ADR-006 (Lean as the final foundational re-checker)
+  while explicitly bracketing what "foundational" means in Phase 0.
+  The Phase 1 swap to a `lean-smt`-style importer is a single
+  rewrite of `snippet::render` plus a richer probe set; the bridge
+  surface, response decoder, and `LeanRecheck` shape are
+  forward-compatible.
+- The kernel takes on `reqwest` (with `rustls` + `webpki-roots` +
+  `json`) plus its transitive `hyper` / `tower` / `tokio-rustls`
+  dep tree. Build-time cost ~30 s on a cold cache; binary-size
+  delta is acceptable for Phase 0.
+- The warden remains the single spawn site for kernel-owned
+  children. ADR-004's invariants are preserved, and the
+  SIGTERM-first deferral now rolls to Task 8 instead of Task 7.
+- Plan §6 has been amended from "Kimina headless JSON-RPC" to
+  "Kimina headless REST (POST /verify)" so future sessions read
+  ground truth.
+
+**Alternatives rejected.**
+
+- **Kimina-as-kernel-child.** Spawning the daemon per-call would
+  defeat the LRU header cache (which is half the point of Kimina)
+  and force the warden to baby-sit a long-running Python process.
+  Operator-owned lifecycle is the upstream-supported pattern.
+- **JSON-RPC bridge.** Plan §6 said JSON-RPC, but Kimina exposes
+  REST — there is no JSON-RPC endpoint to talk to. Pinning a
+  fictional protocol would have meant standing up an MCP shim or
+  custom RPC layer for no reason.
+- **Foundational re-check via `lean-smt` in Phase 0.** Pulls
+  Mathlib + project scaffolding into Kimina's REPL header, blowing
+  out cache cost and per-call latency, for a Phase 0 gate that
+  doesn't yet have a Phase 1 plan to consume foundational proofs
+  end-to-end. Deferred to a future ADR.
+- **Embedding the proof via raw-string `r#"..."#`.** Lean's lexer
+  does not support arbitrary `#` density (you'd need to count `"#`
+  occurrences in the proof body and pick `n+1` `#`s on both sides).
+  Standard string escaping is round-trip safe and decoder-free.
+- **Hex-encoding the proof and decoding in Lean.** Adds a Lean-side
+  decoder for no benefit over standard string escaping.
+- **Adding a `lean_recheck` field to `FormalVerificationTrace`.**
+  Bumps `SCHEMA_VERSION` for an outcome that is downstream of the
+  trace, not part of the Task 2 wire-format contract. The
+  `LeanRecheck` struct is its own Dapr/MCP envelope.
+- **`reqwest` with `default-tls` (native-tls / OpenSSL).** Pulls
+  in OpenSSL system deps; `rustls` keeps the build hermetic and
+  cross-distro.
+- **`hyper` directly (no `reqwest`).** Saves <1 MB of compile-time
+  cost in exchange for ~150 LOC of body-shaping boilerplate;
+  `reqwest` is the 2026 standard for async HTTP per the same web
+  search referenced above.

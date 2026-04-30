@@ -219,6 +219,17 @@ rs-deduce:
 rs-solver:
     cargo test --package cds-kernel --test solver_smoke -- --nocapture
 
+# Run the Lean re-check smoke gate (Task 7): drives an end-to-end round-trip
+# from contradictory matrix → cvc5 Alethe proof → Kimina headless server
+# → Lean info-message probes parsed back through the bridge. Requires a
+# Kimina daemon reachable at $CDS_KIMINA_URL (default skip is loud, not
+# silent). Start one via `python -m server` from the project-numina
+# kimina-lean-server checkout, then re-run with that URL exported.
+CDS_KIMINA_URL := env_var_or_default('CDS_KIMINA_URL', '')
+
+rs-lean:
+    CDS_KIMINA_URL={{CDS_KIMINA_URL}} cargo test --package cds-kernel --test lean_smoke -- --nocapture
+
 # =============================================================================
 # Frontend (bun + Vite + SvelteKit) — placeholder until Task 9
 # =============================================================================

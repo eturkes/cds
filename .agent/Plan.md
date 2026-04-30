@@ -50,7 +50,7 @@ C6. All inter-process comms = JSON-over-TCP/IP and/or MCP.
 | --------------------- | ------------------------------------------------------------------- |
 | Deductive kernel      | Rust Edition 2024 (Nemo Datalog, Octagons, subprocess warden)        |
 | Neurosymbolic harness | Python 3.12+ (CLOVER, GraphRAG, owlapy, clingo, Z3/cvc5 bindings)   |
-| Theorem subprocesses  | Lean 4 via Kimina headless JSON-RPC; Z3 + cvc5 binaries (.bin/)     |
+| Theorem subprocesses  | Lean 4 via Kimina headless REST (POST /verify); Z3 + cvc5 binaries (.bin/) |
 | Visualizer            | SvelteKit + TS + Vite + utility-first CSS                           |
 | Orchestration         | Dapr Workflows, sidecar pattern, MCP, JSON-over-TCP                 |
 | Pkg mgmt              | `uv` (Py), `bun` (TS), `cargo` (Rust)                                |
@@ -74,7 +74,7 @@ C6. All inter-process comms = JSON-over-TCP/IP and/or MCP.
 | 4  | Python neurosymbolic translators — CLOVER text→AST→SMT-LIB                            | **DONE**   | git commit `feat: complete Python neurosymbolic translators`                               |
 | 5  | Rust deductive engine — Nemo Datalog + Octagon state vectors                          | **DONE**   | git commit `feat: complete Rust deductive engine`                                          |
 | 6  | Mathematical solver integration — Z3/cvc5, MUC extraction, Alethe proof emission      | **DONE**   | git commit `feat: complete Mathematical solver integration`                                |
-| 7  | Headless Lean 4 interop — Kimina JSON-RPC bridge                                      | pending    | Alethe cert mechanically re-checked by Lean 4; produces `Formal_Verification_Trace`.       |
+| 7  | Headless Lean 4 interop — Kimina REST bridge                                          | **DONE**   | git commit `feat: complete Headless Lean 4 interop`                                        |
 | 8  | Dapr workflow orchestration — sidecar boundaries Rust↔Python↔solvers                  | pending    | End-to-end pipeline runs under Dapr; logs traceable per stage.                             |
 | 9  | SvelteKit frontend — wire to live backend; render AST, Octagon, MUCs                  | pending    | UI shows live trace from real dataset; verification flag round-trips.                      |
 

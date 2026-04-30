@@ -21,6 +21,7 @@ thiserror          = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 ascent             = { workspace = true }
+reqwest            = { workspace = true }
 
 [lints.rust]
 unsafe_code = "forbid"
