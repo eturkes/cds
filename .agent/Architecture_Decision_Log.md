@@ -1078,3 +1078,161 @@ a stable wire surface to chain.
 - **Probing `/v1.0/healthz` for sidecar readiness in Phase 0.** Returns
   500 with placement down — would force a fragile retry loop. Outbound
   is the documented Phase 0 gate until Task 8.4 stands placement up.
+
+---
+
+## ADR-018 — Phase 0 Rust kernel Dapr service foundation contract (Task 8.3a)
+
+**Status:** Accepted
+**Date:** 2026-04-30
+
+**Context.** Task 8.3 (Rust kernel Dapr service) was the third sub-task
+in the Task 8 split (ADR-016). Like its predecessors, the original
+single-session scope — three pipeline endpoints (`/v1/deduce`,
+`/v1/solve`, `/v1/recheck`) plus the foundation plus the Dapr smoke —
+repeatedly exceeded a single context window. Plan §8 §nb on
+2026-04-30 split it into **8.3a (this ADR — foundation only)** and
+**8.3b (three pipeline endpoints + cargo integration test through
+daprd)**. The split mirrors the foundation-then-binding shape that
+ADR-016 / ADR-017 already established for the Python harness side;
+8.3a is the symmetric Rust-side foundation.
+
+**Decision.**
+
+### 1. Module layout (`crates/kernel/src/service/`)
+
+- `app.rs` — `build_router()` factory; `KernelHealthz` response shape;
+  `SERVICE_APP_ID` / `HEALTHZ_PATH` constants. The router wires
+  `tower_http::trace::TraceLayer::new_for_http()` so 8.3b's `/v1/*`
+  handlers and 8.4's Workflow events inherit a single tracing
+  convention.
+- `config.rs` — `resolve_host` / `resolve_port` from `CDS_KERNEL_HOST`
+  / `CDS_KERNEL_PORT`, with a pure `parse_port_raw` helper so the
+  unit tests do not need to mutate the process environment.
+- `errors.rs` — `ErrorBody { error, detail }` struct + `IntoResponse`
+  impl returning HTTP 422 by default. The wire shape is identical to
+  the Python harness service's `JSONResponse({"error", "detail"})`
+  (ADR-017 §2) so polyglot clients use one decoder.
+- `bin/cds_kernel_service.rs` — argparse-equivalent (only `--help` /
+  `-h`; everything else is an env var) + tokio multi-thread runtime +
+  `axum::serve(...).with_graceful_shutdown(...)` listening on
+  `Ctrl-C` and SIGTERM (Unix only). A `[[bin]]` entry named
+  `cds-kernel-service` lets `dapr run -- cds-kernel-service` resolve
+  via `$PATH` once `target/debug/` is on it.
+
+### 2. Endpoint contract (Phase 0 / Task 8.3a)
+
+- `GET /healthz` → `{status: "ok", kernel_id, phase, schema_version}`.
+  Response field order matches the Python harness `_Healthz` so
+  smoke clients can decode either backend without reshaping.
+- `/v1/deduce`, `/v1/solve`, `/v1/recheck` are **out of scope** for
+  8.3a. The `errors::ErrorBody` envelope is the wire shape they will
+  drop into in 8.3b.
+
+### 3. Sidecar wiring
+
+The Phase 0 invocation contract is the one ADR-016 §5 documented;
+ADR-017 §3 instantiated it for the Python side. The kernel side
+mirrors:
+
+```
+dapr run \
+  --app-id cds-kernel \
+  --app-port 8082 \
+  --app-protocol http \
+  --runtime-path .bin/.dapr \
+  --resources-path dapr/components \
+  --config dapr/config.yaml \
+  -- target/debug/cds-kernel-service
+```
+
+Inbound traffic from peers lands at
+`http://localhost:<dapr-http-port>/v1.0/invoke/cds-kernel/method/...`.
+The `just rs-service-dapr` recipe wraps the canonical command;
+`just rs-service` runs the binary standalone (no sidecar).
+
+### 4. Default port — 8082, not 8081
+
+The Python harness service holds 8081 (ADR-017 §1). The kernel
+service deliberately picks 8082 so both can run side-by-side under
+a single `just dapr-pipeline` (Task 8.4). Override via
+`CDS_KERNEL_PORT` if 8082 collides locally.
+
+### 5. Readiness probe — same `/v1.0/healthz/outbound` gate
+
+Phase 0 placement bring-up is deferred to Task 8.4 (ADR-016 §6), so
+the kernel-side smoke uses the same `/v1.0/healthz/outbound` (204)
+probe that ADR-017 §4 documents. Task 8.4 may flip both services'
+gates back to `/v1.0/healthz` once placement is up.
+
+### 6. SIGTERM-first test cleanup via `nix`
+
+The gated `dapr_sidecar_drives_healthz_through_service_invocation`
+integration test sends `SIGTERM` to the dapr CLI process before
+falling back to SIGKILL after a 5 s grace. Reason: tokio's
+`Child::kill()` (SIGKILL on the immediate child) **does not
+propagate** to the dapr CLI's grandchildren (daprd + the kernel
+binary), which would orphan them to PID 1 and leak state across
+test invocations. The Python harness test uses Python's
+`subprocess.terminate()` — which is SIGTERM by default and lets the
+dapr CLI's signal handler reap its descendants — and 8.3a matches
+that behaviour by adding `nix = { version = "0.31", default-features = false, features = ["signal"] }`
+as a `[dev-dependencies]` entry on the kernel crate. `nix` is a
+safe wrapper over the `kill(2)` syscall, preserving the kernel's
+top-level `#![forbid(unsafe_code)]` invariant.
+
+The kernel-side warden's own SIGTERM-first escalation (ADR-014 §9 →
+ADR-015 §8 → ADR-016 §7) **remains deferred to Task 8.4**. ADR-018
+narrowly authorizes SIGTERM for *test cleanup* of the `dapr` CLI
+process; the production solver-warden behaviour is unchanged in
+8.3a.
+
+### 7. JSON-over-TCP only; Dapr SDK deferred (parity with ADR-017 §5)
+
+8.3a sticks to plain HTTP through daprd; the Dapr Rust SDK is a
+candidate for Phase 1+ if the workflow / actor / pub-sub
+state-store handles materially benefit from typed bindings.
+
+### 8. axum 0.8 + tower-http 0.6, default-features = false
+
+`axum = { features = ["http1", "json", "tokio", "macros"] }` —
+HTTP/2, multipart, query, ws, fs are intentionally *not* enabled.
+JSON-over-TCP (constraint **C6**) does not need them; pulling them
+in widens the attack surface and the dependency closure with no
+8.3a / 8.3b benefit. `tower = { features = ["util"] }` for
+`ServiceExt::oneshot` in unit tests; `tower-http = { features =
+["trace"] }` for the request-level tracing span.
+
+**Consequences.** Task 8.3b inherits a stable router factory + error
+envelope + binary entrypoint, and only needs to add the three
+pipeline handlers + their domain-error `IntoResponse` impls + a
+broader sidecar smoke that exercises all three endpoints under
+daprd. Task 8.4 (Workflow) gets a kernel sidecar with the same
+service-invocation shape as the harness sidecar; the polyglot
+Workflow can chain them with one HTTP client.
+
+**Alternatives rejected.**
+
+- **`hyper` directly, no axum.** Saves one dep but loses ergonomic
+  routing, extractors, and the `IntoResponse` mapping that 8.3b
+  needs for three error types. axum 0.8 is the documented 2026 SOTA.
+- **`actix-web` instead of axum.** Larger runtime, separate
+  thread-per-core actor model, and no clean tokio-only path that
+  matches the warden's existing `tokio::process::Command` lifecycle.
+- **`clap` for argument parsing.** Useful when more than `--help` is
+  needed; for 8.3a everything is env-var driven so a hand-rolled
+  `--help` keeps the binary tiny. Re-evaluate in 8.3b if richer
+  flag parsing emerges.
+- **A `cds_kernel_service::AppState` struct.** No state is shared in
+  8.3a (the healthz handler is pure). 8.3b will introduce one if
+  the pipeline handlers need shared `VerifyOptions` / `LeanOptions`;
+  introducing an empty `AppState` now would be premature
+  abstraction.
+- **Cargo integration test calling `cargo run` to spawn the binary.**
+  Re-builds inside a test invocation are fragile; cargo's
+  `CARGO_BIN_EXE_<name>` env var gives the integration test a
+  pre-built binary path with no fork-from-cargo cost.
+- **Spawning daprd directly without the dapr CLI.** Loses the
+  components/config-path resolution + automatic shutdown of the
+  app; would force the test to manage daprd's flag surface
+  manually. The CLI is the documented Phase 0 entrypoint.

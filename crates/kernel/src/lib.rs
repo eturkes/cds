@@ -16,6 +16,10 @@
 //!   Alethe proof in a self-contained Lean snippet and POSTs it to a
 //!   running Kimina headless server (REST), surfacing a
 //!   [`lean::LeanRecheck`] outcome.
+//! - The Phase 0 kernel HTTP service ([`service`], Task 8.3a): an
+//!   `axum` router exposing `/healthz` (and, in 8.3b, `/v1/deduce`,
+//!   `/v1/solve`, `/v1/recheck`) under a Dapr sidecar named
+//!   `cds-kernel`. ADR-018 captures the contract.
 
 #![forbid(unsafe_code)]
 #![deny(clippy::all)]
@@ -24,6 +28,7 @@ pub mod canonical;
 pub mod deduce;
 pub mod lean;
 pub mod schema;
+pub mod service;
 pub mod solver;
 
 /// Stable identifier for this crate. Consumed by smoke tests + future trace logs.

@@ -6,10 +6,172 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 8.2 — Python harness Dapr service (FastAPI app under `cds_harness.service`; `/healthz` + `/v1/ingest` + `/v1/translate`; uvicorn entrypoint via `python -m cds_harness.service` / `cds-harness-service`; sidecar smoke drives both endpoints through `dapr run --app-id cds-harness …` and the `:dapr-http-port/v1.0/invoke/cds-harness/method/...` route; pytest 95/95 + ruff clean + cargo workspace clean) (2026-04-30).
-- **Next up:** Task 8.3 — Rust kernel Dapr service (`axum` app exposing `/v1/deduce` + `/v1/solve` + `/v1/recheck`, runs under `dapr run --app-id cds-kernel …`).
+- **Last completed:** Task 8.3a — Rust kernel service foundation (axum app under `cds_kernel::service`; `/healthz` + `[[bin]] cds-kernel-service` + tower-http TraceLayer + `CDS_KERNEL_HOST/PORT` env resolution; sidecar smoke drives `/healthz` through `dapr run --app-id cds-kernel-smoke …` and the `:dapr-http-port/v1.0/invoke/cds-kernel-smoke/method/healthz` route; cargo workspace 113/113 + clippy clean + pytest 95/95 untouched) (2026-04-30).
+- **Next up:** Task 8.3b — Rust kernel pipeline endpoints (`/v1/deduce` + `/v1/solve` + `/v1/recheck` wired to `cds_kernel::deduce::evaluate` / `cds_kernel::solver::verify` / `cds_kernel::lean::recheck` + their domain-error `IntoResponse` impls + cargo integration test driving all three through daprd's `:dapr-http-port/v1.0/invoke/cds-kernel/method/v1/...`).
 
-> **Task 8 was split** into 8.1–8.4 on 2026-04-30 (ADR-016) because a monolithic Dapr-orchestration task repeatedly exhausted a single context window. Sub-task progression is strict: `8.1 < 8.2 < 8.3 < 8.4 < 9`.
+> **Task 8 was split** into 8.1–8.4 on 2026-04-30 (ADR-016) because a monolithic Dapr-orchestration task repeatedly exhausted a single context window. Sub-task progression is strict: `8.1 < 8.2 < 8.3a < 8.3b < 8.4 < 9`. **Task 8.3 was further split** into 8.3a / 8.3b on 2026-04-30 (ADR-018) because the kernel service binds three subprocess pipelines (`deduce`, `solve`, `recheck`) behind one axum app and the foundation + endpoint plumbing each warrant their own session.
+
+## Session 2026-04-30 — Task 8.3a close-out
+
+Shipped the Phase 0 Rust kernel service foundation. A new
+`cds_kernel::service` module binds an axum router behind a thin
+`cds-kernel-service` binary, runnable both standalone (`cargo run --bin
+cds-kernel-service` / `just rs-service`) and under a Dapr sidecar
+(`just rs-service-dapr`). Service-invocation works against the Phase 0
+slim runtime even with placement/scheduler down — `/v1.0/invoke/cds-kernel/
+method/healthz` routes through daprd without touching the actor
+subsystem. ADR-018 codifies the kernel-side service contract.
+
+**Module layout (`crates/kernel/src/service/`):**
+
+| File         | Role                                                                                                                          |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `mod.rs`     | Public re-exports (`build_router`, `KernelHealthz`, `ErrorBody`, `error_response`, host/port helpers, all constants).         |
+| `app.rs`     | `build_router()` factory; `KernelHealthz` (owns its strings so polyglot decoders round-trip cleanly); `tower_http::trace::TraceLayer` wired. |
+| `config.rs`  | `resolve_host` / `resolve_port` from `CDS_KERNEL_HOST` / `CDS_KERNEL_PORT`; `parse_port_raw` is the pure helper unit-tested in isolation. |
+| `errors.rs`  | `ErrorBody { error, detail }` + `IntoResponse` lifting to HTTP 422 — same wire shape as the Python harness service (ADR-017 §2). |
+
+**Binary (`crates/kernel/src/bin/cds_kernel_service.rs`):** registered
+as `[[bin]] cds-kernel-service`. Multi-thread tokio runtime,
+`axum::serve(...).with_graceful_shutdown(...)` listening on Ctrl-C +
+Unix SIGTERM; `--help` / `-h` only — every other knob comes from the
+environment so the Justfile / Dapr CLI is the single source of
+configuration truth. `tracing_subscriber::fmt().try_init()` so a stray
+re-init (test or sidecar combo) does not panic.
+
+**Endpoint contract (constraint C6 — JSON-over-TCP):**
+
+| Method | Path        | Request body | Response body                                      |
+| ------ | ----------- | ------------ | -------------------------------------------------- |
+| GET    | `/healthz`  | —            | `{status, kernel_id, phase, schema_version}`       |
+
+`/v1/deduce`, `/v1/solve`, `/v1/recheck` are forward-declared in module
+docs but are out of scope for 8.3a; they land in 8.3b.
+
+**Justfile additions:**
+
+| Recipe              | Behaviour                                                                                                                                                           |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rs-service`        | Builds + runs the kernel HTTP service standalone (no Dapr). Honours `CDS_KERNEL_HOST` / `CDS_KERNEL_PORT`.                                                          |
+| `rs-service-dapr`   | Pre-builds, then runs the binary under `dapr run --app-id cds-kernel …`. Service-invocation through the Dapr HTTP port routes to `:CDS_KERNEL_PORT/...`.            |
+| `rs-service-smoke`  | **Task 8.3a foundation gate.** Runs the cargo integration test (`tests/service_smoke.rs`) — standalone HTTP + gated dapr sidecar, single-thread to avoid port races.|
+
+**Tests (Rust workspace, all green):**
+
+| Suite                                      | Count | Coverage                                                                                                                                                                                                          |
+| ------------------------------------------ | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Existing schema + canonical + deduce + solver + lean | 80    | unchanged from Task 7.                                                                                                                                                                                            |
+| `service::config` unit                     | 5     | `parse_port_raw`: empty/whitespace → default; valid u16 happy paths; garbage rejected with `PortParse`; zero / overflow rejected with `PortOutOfRange`; negative rejected as `PortParse`.                          |
+| `service::errors` unit                     | 3     | `ErrorBody` serde round-trip pin (`{"error":"…","detail":"…"}` exact JSON shape); `IntoResponse` lifts to HTTP 422; `error_response` honours explicit status (e.g., 500).                                          |
+| `service::app` unit                        | 5     | `SERVICE_APP_ID` pinned to `"cds-kernel"`; healthz invariants (status / kernel_id / phase / schema_version); JSON serialization is byte-stable in field order; router serves `/healthz` via tower `oneshot`; unknown route → 404. |
+| `bin::cds_kernel_service` unit             | 3     | `parse_argv` with no args is fine; `--help` / `-h` recognised as `HelpRequested`; unknown flag rejected as `UnknownArgument`.                                                                                      |
+| `tests/service_smoke.rs` integration       | 2     | **Foundation gate:** standalone axum binds + serves `/healthz`; gated dapr sidecar drives the same path through `/v1.0/invoke/cds-kernel-smoke/method/healthz` with SIGTERM-first cleanup so daprd + the kernel binary don't orphan to PID 1. |
+
+Final gate (all green):
+
+- `cargo test --workspace` → **113 pass** (93 unit + 3 bin + 2 service_smoke + 5 deduce_smoke + 5 golden_roundtrip + 1 lean_smoke + 4 solver_smoke).
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean.
+- `cargo fmt --all -- --check` → clean.
+- `uv run pytest` → 95 pass (no Python regressions).
+- `uv run ruff check .` → clean.
+- `just rs-service-smoke` → 2/2 with `--nocapture`; clean teardown (no daprd / cds-kernel-service orphans).
+- `just dapr-smoke` → ✓ (Task 8.1 gate held).
+- Manual `just rs-service-dapr` (verified out-of-band) → daprd loads `cds-pubsub` + `cds-statestore`; `curl http://127.0.0.1:<dapr-http>/v1.0/invoke/cds-kernel/method/healthz` returns `{"status":"ok","kernel_id":"cds-kernel","phase":0,"schema_version":"0.1.0"}`.
+
+**Dependencies added:**
+
+- `axum = "0.8"` (workspace + kernel) with `default-features = false`,
+  features `["http1", "json", "tokio", "macros"]`. Resolved 0.8.9.
+- `tower = "0.5"` (workspace + kernel) with `default-features = false`,
+  features `["util"]` for `ServiceExt::oneshot` in unit tests.
+- `tower-http = "0.6"` (workspace + kernel) with `default-features = false`,
+  features `["trace"]` for the per-request `TraceLayer`.
+- `nix = "0.31"` (kernel `[dev-dependencies]` only) with
+  `default-features = false`, features `["signal"]` — used **only** by
+  the integration test for SIGTERM-first cleanup of the dapr CLI's
+  grandchildren. Does not enter the production binary.
+
+**Decisions captured in ADR-018** — Phase 0 Rust kernel service
+foundation contract: axum 0.8 with minimal feature set; default port
+8082 (harness holds 8081); same `/v1.0/healthz/outbound` readiness
+probe as ADR-017 (placement still deferred to 8.4); `ErrorBody { error,
+detail }` envelope mirrors the Python `_error_handler` shape; `[[bin]]
+cds-kernel-service` is the entrypoint; SIGTERM-first cleanup in the
+integration test is **narrowly authorized** for the dapr CLI process —
+the kernel solver warden's own SIGTERM-first escalation (ADR-014 §9)
+**remains deferred to Task 8.4**.
+
+## Open notes for Task 8.3b — Rust kernel pipeline endpoints
+
+- **Scope:** wire the existing kernel modules into the axum router.
+  Three handlers, each lifting domain errors to `ErrorBody` (HTTP 422):
+  - `POST /v1/deduce` — request `{payload: ClinicalTelemetryPayload, rules?: Phase0Thresholds}`; response `Verdict` from `cds_kernel::deduce::evaluate(&payload, &rules.unwrap_or_default())`. Default `Phase0Thresholds::default()` if absent.
+  - `POST /v1/solve` — request `{matrix: SmtConstraintMatrix, options?: VerifyOptions-shaped knobs}`; response `FormalVerificationTrace` from `cds_kernel::solver::verify(&matrix, &opts).await`. The warden + Z3/cvc5 binaries (.bin/) are required at runtime; surface a `WardenError::Spawn` as 422 with `{error: "warden", detail}`.
+  - `POST /v1/recheck` — request `{trace: FormalVerificationTrace, options?: LeanOptions-shaped knobs}`; response `LeanRecheck` from `cds_kernel::lean::recheck(&trace, &opts).await`. `kimina_url` defaults from `LeanOptions::default()` (127.0.0.1:8000) but should also accept an env override (e.g., `CDS_KIMINA_URL`).
+- **Discriminated request envelopes.** The Python harness uses
+  `Field(discriminator="format")` on `/v1/ingest`. None of the kernel
+  endpoints have alternative request shapes today; if 8.3b adds one
+  (e.g., `{matrix: …}` vs `{matrix_path: "…"}` to load from disk),
+  use serde's `#[serde(tag = "...")]` discriminator pattern.
+- **`AppState`.** 8.3a deliberately ships no shared state. 8.3b should
+  introduce a `KernelServiceState { verify_options: VerifyOptions,
+  lean_options: LeanOptions }` *only if* the env-driven overrides
+  benefit from one-shot resolution at boot rather than per-request
+  parsing. The healthz handler should remain stateless.
+- **Dapr smoke gate.** Extend `tests/service_smoke.rs` (or split into
+  `service_pipeline_smoke.rs`) with one happy-path sidecar test per
+  endpoint, mirroring the harness side's
+  `test_dapr_sidecar_drives_ingest_and_translate`. Use the canonical
+  fixtures already on disk:
+  `data/guidelines/contradictory-bound.{txt,recorded.json}` (unsat —
+  drives `/v1/solve`); the solver test then hands the trace to
+  `/v1/recheck` (gated by `CDS_KIMINA_URL`). For `/v1/deduce`, drive
+  one of the existing telemetry payloads and assert a non-empty
+  `breach_summary`.
+- **Per-stage tracing.** The `TraceLayer` already emits a span per
+  request. 8.3b should annotate each handler with a
+  `#[tracing::instrument(skip(payload), fields(stage = "deduce"))]`
+  attribute so the Workflow harness (Task 8.4) can correlate stage
+  events without parsing free-form messages.
+- **PHASE marker.** Still `0` on `lib.rs`. ADR-013 / Task 5 / Task 6
+  / Task 7 / Task 8.1 / Task 8.2 each carried this forward unchanged.
+  Decide what `PHASE = 1` means in 8.4 (probably: end-to-end
+  pipeline runs under Dapr).
+- **SIGTERM-first warden escalation** is **still deferred** to 8.4
+  (ADR-018 §6 narrowly authorizes SIGTERM only for the integration
+  test's dapr CLI cleanup; production kernel-spawned solver children
+  remain SIGKILL-on-drop).
+- **Free-port allocator.** `service_smoke.rs` already has
+  `pick_free_port`; 8.3b can lift it into a shared `tests/common.rs`
+  module if more than one suite needs it.
+
+## Open notes for Task 8.4 — End-to-end Dapr Workflow
+
+- **Scope:** Python Dapr Workflow that chains
+  `ingest → translate → deduce → solve → recheck`. Each stage is a
+  Workflow `activity` that calls the appropriate sidecar via
+  service-invocation. The Workflow output is the aggregated envelope:
+  `{ payload, ir, matrix, verdict, trace, lean_recheck }`.
+- **Placement + scheduler bring-up.** Slim init *stages* the binaries
+  but doesn't start them. 8.4 owns `just placement-up` /
+  `just scheduler-up` (background processes via tokio
+  `Command::kill_on_drop(true)` per ADR-004), or rolls them into a
+  single `just dapr-pipeline` recipe that brings everything up,
+  drives the pipeline, then tears down. Once placement is up the
+  readiness gate flips from `/v1.0/healthz/outbound` (Phase 0 8.2 / 8.3
+  shape) to `/v1.0/healthz`.
+- **SIGTERM-first warden escalation comes due here** (ADR-014 §9 →
+  ADR-015 §8 → ADR-016 §7 → ADR-018 §6 — still deferred). Decide
+  whether to amend ADR-014 to enable two-stage escalation for
+  kernel-spawned solver children, or accept Phase 0 SIGKILL-only and
+  amend ADR-014 to make that the permanent stance.
+- **Tracing.** Each stage emits a `tracing` span + a Dapr Workflow
+  event. Final aggregated trace rides on the Workflow output.
+- **Decide:** in-band JSON envelope vs. Dapr state-store handle for
+  the cross-stage payload. JSON envelope is simplest; state-store
+  handles cleaner if payloads grow.
+- **Gate:** `just dapr-pipeline` runs end-to-end against a canonical
+  guideline; verification flag round-trips.
 
 ## Session 2026-04-30 — Task 8.2 close-out
 

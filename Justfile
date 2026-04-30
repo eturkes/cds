@@ -357,6 +357,44 @@ CDS_KIMINA_URL := env_var_or_default('CDS_KIMINA_URL', '')
 rs-lean:
     CDS_KIMINA_URL={{CDS_KIMINA_URL}} cargo test --package cds-kernel --test lean_smoke -- --nocapture
 
+# Run the kernel service smoke gate (Task 8.3a): standalone HTTP +
+# gated Dapr sidecar driving /healthz through service invocation.
+# The sidecar half skips with a loud notice if .bin/dapr / slim
+# runtime are missing; run `just fetch-dapr` to populate.
+rs-service-smoke:
+    cargo test --package cds-kernel --test service_smoke -- --nocapture --test-threads=1
+
+# Bind addresses for the Phase 0 kernel service (Task 8.3a). 8082 is
+# the default — the harness service holds 8081 (ADR-017 §1) so both
+# can run side-by-side under a single `just dapr-pipeline` (Task 8.4).
+CDS_KERNEL_HOST := env_var_or_default('CDS_KERNEL_HOST', '127.0.0.1')
+CDS_KERNEL_PORT := env_var_or_default('CDS_KERNEL_PORT', '8082')
+
+# Run the Rust kernel HTTP service standalone (no Dapr sidecar).
+# Builds first; honours CDS_KERNEL_HOST / CDS_KERNEL_PORT.
+rs-service:
+    cargo build --bin cds-kernel-service
+    CDS_KERNEL_HOST={{CDS_KERNEL_HOST}} CDS_KERNEL_PORT={{CDS_KERNEL_PORT}} \
+        cargo run --bin cds-kernel-service
+
+# Run the kernel service under a Dapr sidecar (Task 8.3a gate target).
+# Service-invocation routes through daprd's `/v1.0/invoke/cds-kernel/method/...`.
+# Pre-builds the binary so daprd's app-discovery wait does not need to
+# block on cargo. Placement-bound features (Workflow, actors) come live
+# in Task 8.4.
+rs-service-dapr:
+    cargo build --bin cds-kernel-service
+    CDS_KERNEL_HOST={{CDS_KERNEL_HOST}} CDS_KERNEL_PORT={{CDS_KERNEL_PORT}} \
+        "{{ justfile_directory() }}/.bin/dapr" run \
+            --app-id cds-kernel \
+            --app-port {{CDS_KERNEL_PORT}} \
+            --app-protocol http \
+            --runtime-path "{{DAPR_INSTALL_DIR}}" \
+            --resources-path "{{DAPR_RESOURCES_PATH}}" \
+            --config "{{DAPR_CONFIG_PATH}}" \
+            --log-level info \
+            -- "{{ justfile_directory() }}/target/debug/cds-kernel-service"
+
 # =============================================================================
 # Frontend (bun + Vite + SvelteKit) — placeholder until Task 9
 # =============================================================================

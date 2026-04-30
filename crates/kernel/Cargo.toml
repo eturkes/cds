@@ -12,6 +12,12 @@ description  = "CDS deductive kernel: ascent Datalog, Octagon abstract interpret
 name = "cds_kernel"
 path = "src/lib.rs"
 
+# Phase 0 kernel service binary (Task 8.3a). axum app exposing /healthz
+# (and, in 8.3b, /v1/deduce, /v1/solve, /v1/recheck) under a Dapr sidecar.
+[[bin]]
+name = "cds-kernel-service"
+path = "src/bin/cds_kernel_service.rs"
+
 [dependencies]
 serde              = { workspace = true }
 serde_json         = { workspace = true }
@@ -22,6 +28,17 @@ tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 ascent             = { workspace = true }
 reqwest            = { workspace = true }
+axum               = { workspace = true }
+tower              = { workspace = true }
+tower-http         = { workspace = true }
+
+# Integration-test-only deps. `nix` is needed by the gated dapr sidecar
+# smoke (tests/service_smoke.rs) to send SIGTERM to the `dapr` CLI so
+# its grandchildren (daprd + the kernel binary) shut down gracefully
+# instead of being orphaned to PID 1 — SIGKILL on the immediate child
+# does not propagate. ADR-018 §6 captures the rationale.
+[dev-dependencies]
+nix = { version = "0.31", default-features = false, features = ["signal"] }
 
 [lints.rust]
 unsafe_code = "forbid"
