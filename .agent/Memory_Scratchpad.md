@@ -6,10 +6,152 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 8.1 — Dapr foundation (slim self-hosted Dapr 1.17 staged under `.bin/.dapr/`; `pubsub.in-memory` + `state.in-memory` (with `actorStateStore=true`) component manifests under `dapr/components/`; `dapr/config.yaml` Configuration; Justfile recipes `fetch-dapr` / `dapr-init` / `dapr-status` / `dapr-clean` / `dapr-smoke`; pytest `test_dapr_foundation.py` 8/8 + `just dapr-smoke` green) (2026-04-30).
-- **Next up:** Task 8.2 — Python harness Dapr service (FastAPI app exposing `/v1/ingest` + `/v1/translate`, runs under `dapr run --app-id cds-harness …`).
+- **Last completed:** Task 8.2 — Python harness Dapr service (FastAPI app under `cds_harness.service`; `/healthz` + `/v1/ingest` + `/v1/translate`; uvicorn entrypoint via `python -m cds_harness.service` / `cds-harness-service`; sidecar smoke drives both endpoints through `dapr run --app-id cds-harness …` and the `:dapr-http-port/v1.0/invoke/cds-harness/method/...` route; pytest 95/95 + ruff clean + cargo workspace clean) (2026-04-30).
+- **Next up:** Task 8.3 — Rust kernel Dapr service (`axum` app exposing `/v1/deduce` + `/v1/solve` + `/v1/recheck`, runs under `dapr run --app-id cds-kernel …`).
 
 > **Task 8 was split** into 8.1–8.4 on 2026-04-30 (ADR-016) because a monolithic Dapr-orchestration task repeatedly exhausted a single context window. Sub-task progression is strict: `8.1 < 8.2 < 8.3 < 8.4 < 9`.
+
+## Session 2026-04-30 — Task 8.2 close-out
+
+Shipped the Phase 0 Python harness service. A new `cds_harness.service`
+package binds the existing ingest + translate machinery behind a thin
+FastAPI app, runnable both standalone (`uv run python -m
+cds_harness.service`) and under a Dapr sidecar (`dapr run --app-id
+cds-harness …`). Service-invocation works against the Phase 0 slim
+runtime even with placement/scheduler down — `/v1.0/invoke/cds-harness/
+method/...` routes through daprd without touching the actor subsystem.
+
+**Module layout (`python/cds_harness/service/`):**
+
+| File          | Role                                                                                                                          |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `__init__.py` | Public re-exports (constants + `create_app` + `resolve_host` / `resolve_port`).                                               |
+| `__main__.py` | argparse + uvicorn entrypoint; honours `CDS_HARNESS_HOST` / `CDS_HARNESS_PORT`; `--host` / `--port` overrides.                |
+| `app.py`      | `create_app()` factory; `_StrictModel` request envelopes (discriminated `format` for ingest); `_InlineAdapter` → translator.  |
+
+**Endpoint contracts (constraint C6 — JSON-over-TCP):**
+
+| Method | Path             | Request body                                                                                          | Response body                                                                       |
+| ------ | ---------------- | ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| GET    | `/healthz`       | —                                                                                                     | `{status, harness_id, phase, schema_version}`                                       |
+| POST   | `/v1/ingest`     | `{format: "json", envelope: {...ClinicalTelemetryPayload}}` ∨ `{format: "csv", csv_text, meta, file_label?}` | `{payload: {...ClinicalTelemetryPayload}}`                                          |
+| POST   | `/v1/translate`  | `{doc_id, text, root: OnionLNode, logic?, smt_check?}`                                                | `{tree: OnionLIRTree, matrix: SmtConstraintMatrix, smt_check: "sat"\|"unsat"\|"unknown"\|null}` |
+
+`IngestError` and `TranslateError` lift to HTTP 422 with
+`{error, detail}`; pydantic validation errors trigger FastAPI's default
+422.
+
+**Helpers added to support inline JSON-over-TCP ingestion** (no
+behaviour change to file-based loaders):
+
+- `cds_harness.ingest.json_loader.load_json_envelope(raw)` — validate +
+  canonicalize a parsed dict envelope.
+- `cds_harness.ingest.csv_loader.load_csv_text(csv_text, meta, *, file_label)` —
+  in-memory variant of `load_csv`. Existing `load_csv(path)` now
+  delegates to the text variant after reading the CSV bytes.
+
+**Console scripts (`[project.scripts]` added):**
+
+- `cds-ingest`          → `cds_harness.ingest.cli:main`
+- `cds-translate`       → `cds_harness.translate.cli:main`
+- `cds-harness-service` → `cds_harness.service.__main__:main`
+
+**Justfile additions:**
+
+| Recipe              | Behaviour                                                                                                                                                              |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `py-service`        | Run the FastAPI app standalone (no Dapr). Honours `CDS_HARNESS_HOST` / `CDS_HARNESS_PORT`.                                                                             |
+| `py-service-dapr`   | Run the app under `dapr run --app-id cds-harness …`. Service-invocation through the Dapr HTTP port routes to `:CDS_HARNESS_PORT/v1/...`.                               |
+
+**Tests (Python suite, all green):**
+
+| Suite                                          | Count | Coverage                                                                                                                                                                 |
+| ---------------------------------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Existing (smoke + schema + ingest + translate + Dapr foundation) | 79    | unchanged — no regressions.                                                                                                                                              |
+| `python/tests/test_service.py` (new)           | 16    | `/healthz` shape + constants pin; `_InlineAdapter` structural-protocol conformance; `resolve_port` defaults / garbage / overrides; `/v1/ingest` JSON + CSV happy paths; ingest 422 paths (invalid envelope, missing `source`, unknown format); `/v1/translate` happy + smt_check sat/unsat + doc_id mismatch + invalid root; **end-to-end** sidecar smoke (gated): `dapr run` → uvicorn → ingest + translate via `/v1.0/invoke/cds-harness/method/v1/...`. |
+
+Final gate (all green):
+
+- `uv run pytest` → **95 pass** (79 prior + 16 new).
+- `uv run ruff check .` → clean.
+- `cargo test --workspace` → 95 pass (no Rust changes — sanity).
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean.
+- `cargo fmt --all -- --check` → clean.
+- `just dapr-smoke` → ✓ both components loaded; workflow engine started; clean shutdown (Task 8.1 gate held).
+- `cds-harness-service --help` / `cds-ingest --help` / `cds-translate --help` → all 0 exit.
+
+**Dependencies added:**
+
+- `fastapi>=0.115` (resolved 0.136.1) — ASGI framework.
+- `uvicorn[standard]>=0.32` (resolved 0.46.0) — ASGI server (uvloop +
+  httptools + websockets + watchfiles + python-dotenv).
+- `httpx>=0.28` (resolved 0.28.1) — async HTTP client (used by the
+  sidecar smoke + by future Dapr SDK Phase-1 swap; FastAPI's TestClient
+  already pulls it transitively).
+- Deprecated `[tool.uv] dev-dependencies` migrated to top-level
+  `[dependency-groups] dev = [...]` per the carry-forward note from
+  Task 8 — `uv run` no longer surfaces the deprecation warning.
+
+**Decisions captured in ADR-017** — the Phase 0 Python harness service
+contract: JSON-over-TCP only (no Dapr SDK in Phase 0 — `httpx`
+sufficient); FastAPI + uvicorn (over Flask/Quart) for ASGI + automatic
+OpenAPI; `/v1.0/invoke/cds-harness/method/v1/...` is the Dapr
+service-invocation route; `/v1.0/healthz/outbound` (not `/v1.0/healthz`)
+is the sidecar-readiness probe in Phase 0 because placement/scheduler
+are deferred to Task 8.4 (ADR-016 §6); the discriminated `format` field
+on `/v1/ingest` keeps the wire schema explicit; `_InlineAdapter` is a
+structural `AutoformalAdapter` so the file-system roundtrip via
+`RecordedAdapter` becomes optional at the service boundary.
+
+## Open notes for Task 8.3 — Rust kernel Dapr service
+
+- **Scope:** thin `axum` (or `hyper`) JSON-over-TCP service in
+  `crates/kernel/src/bin/cds_kernel_service.rs` exposing
+  `POST /v1/deduce` (`ClinicalTelemetryPayload` → `Verdict`),
+  `POST /v1/solve` (`SmtConstraintMatrix` → `FormalVerificationTrace`),
+  `POST /v1/recheck` (`FormalVerificationTrace` → `LeanRecheck`).
+- The warden + Z3/cvc5 + Lean clients already exist; the binary just
+  binds them behind HTTP routes.
+- `dapr run --app-id cds-kernel --app-port <N> -- cargo run --bin
+  cds_kernel_service` boots the sidecar. Smoke = cargo integration test
+  driving all three endpoints through daprd's
+  `:3500/v1.0/invoke/cds-kernel/method/v1/...`. Mirror the readiness
+  gate from 8.2 — probe the kernel's `/healthz` first, then daprd's
+  `/v1.0/healthz/outbound` (placement still down in Phase 0).
+- `lib.rs::PHASE = 0`. Decide what `PHASE = 1` means in 8.3 / 8.4
+  (probably: end-to-end pipeline runs under Dapr).
+- Carry the same JSON-over-TCP discipline: discriminated request
+  envelopes; `serde(deny_unknown_fields)`; lifted error → HTTP 422
+  with `{error, detail}`.
+- Register a `cds-kernel-service` cargo `[[bin]]` so `dapr run -- cds_kernel_service`
+  works without an explicit `cargo run …` wrapper.
+- A `tower-http::trace::TraceLayer` plus the existing `tracing`
+  spans gives per-stage trace continuity for Task 8.4's Workflow.
+
+## Open notes for Task 8.4 — End-to-end Dapr Workflow
+
+- **Scope:** Python Dapr Workflow that chains
+  `ingest → translate → deduce → solve → recheck`. Each stage is a
+  Workflow `activity` that calls the appropriate sidecar via
+  service-invocation. The Workflow output is the aggregated envelope:
+  `{ payload, ir, matrix, verdict, trace, lean_recheck }`.
+- **Placement + scheduler bring-up.** Slim init *stages* the binaries
+  but doesn't start them. 8.4 owns `just placement-up` /
+  `just scheduler-up` (background processes via tokio
+  `Command::kill_on_drop(true)` per ADR-004), or rolls them into a
+  single `just dapr-pipeline` recipe that brings everything up,
+  drives the pipeline, then tears down. Once placement is up the
+  readiness gate flips from `/v1.0/healthz/outbound` (Phase 0 8.2/8.3
+  shape) to `/v1.0/healthz`.
+- **SIGTERM-first warden escalation comes due here** (ADR-014 §9 →
+  ADR-015 §8 → ADR-016 §7 → still deferred from 8.2).
+- **Tracing.** Each stage emits a `tracing` span + a Dapr Workflow
+  event. Final aggregated trace rides on the Workflow output.
+- **Decide:** in-band JSON envelope vs. Dapr state-store handle for
+  the cross-stage payload. JSON envelope is simplest; state-store
+  handles cleaner if payloads grow.
+- **Gate:** `just dapr-pipeline` runs end-to-end against a canonical
+  guideline; verification flag round-trips.
 
 ## Session 2026-04-30 — Task 8.1 close-out
 
@@ -75,72 +217,6 @@ Phase 1+ swap to durable backends; mTLS off on single dev host;
 warnings during 8.1's smoke are expected); SIGTERM-first warden
 escalation rolls forward from ADR-014 §9 → ADR-015 §8 → ADR-016 §7
 to Task 8.4.
-
-## Open notes for Task 8.2 — Python harness Dapr service
-
-- **Scope:** wrap `cds_harness.ingest` and `cds_harness.translate` in a
-  thin FastAPI app exposing `/v1/ingest` (multipart-or-JSON path → returns
-  `ClinicalTelemetryPayload` JSON) and `/v1/translate` (JSON path →
-  returns `OnionLIRTree` + `SmtConstraintMatrix` envelope). The app
-  must be importable as `python -m cds_harness.service` (or a
-  `cds-harness-service` console script) so `dapr run --app-id
-  cds-harness -- python -m cds_harness.service` boots cleanly.
-- **App-port wiring.** `dapr run` needs `--app-port <N>` so daprd can
-  forward inbound traffic. uvicorn binds the same port. Pick an
-  ephemeral default; let env override (`CDS_HARNESS_PORT`).
-- **Constraint C6 still binds.** All endpoints carry JSON
-  request/response bodies. No raw bytes / no shared memory. The Dapr
-  SDK in Python is acceptable (the SDK is JSON-over-TCP under the
-  hood); a plain `httpx` to the local daprd `:3500` is also acceptable.
-- **Console scripts.** `[project.scripts]` should grow `cds-harness-service`
-  for clean `dapr run` wiring (and incidentally `cds-ingest` / `cds-translate`
-  per the carry-forward note from Task 7).
-- **`tool.uv.dev-dependencies` deprecation.** Migrate to
-  `dependency-groups.dev` while wiring 8.2 — every `uv run` still
-  surfaces the warning.
-- **Smoke.** Pytest spawns `dapr run --app-id cds-harness -- python -m
-  cds_harness.service` in a subprocess (timeout-bounded), waits for
-  the sidecar `:3500/v1.0/healthz` to flip ready, then drives one
-  ingest + one translate call through `http://localhost:3500/v1.0/invoke/cds-harness/method/v1/...`.
-
-## Open notes for Task 8.3 — Rust kernel Dapr service
-
-- **Scope:** thin `axum` (or `hyper`) JSON-over-TCP service in
-  `crates/kernel/src/bin/cds_kernel_service.rs` exposing
-  `POST /v1/deduce` (`ClinicalTelemetryPayload` → `Verdict`),
-  `POST /v1/solve` (`SmtConstraintMatrix` → `FormalVerificationTrace`),
-  `POST /v1/recheck` (`FormalVerificationTrace` → `LeanRecheck`).
-- The warden + Z3/cvc5 + Lean clients already exist; the binary just
-  binds them behind HTTP routes.
-- `dapr run --app-id cds-kernel --app-port <N> --
-  cargo run --bin cds_kernel_service` boots the sidecar.
-- Smoke = cargo integration test driving all three endpoints through
-  daprd's `:3500/v1.0/invoke/cds-kernel/method/v1/...`.
-- **PHASE marker.** `lib.rs::PHASE = 0`. Decide what `PHASE = 1` means
-  in 8.3 / 8.4 (probably: end-to-end pipeline runs under Dapr).
-
-## Open notes for Task 8.4 — End-to-end Dapr Workflow
-
-- **Scope:** Python Dapr Workflow that chains
-  `ingest → translate → deduce → solve → recheck`. Each stage is a
-  Workflow `activity` that calls the appropriate sidecar via
-  service-invocation. The Workflow output is the aggregated envelope:
-  `{ payload, ir, matrix, verdict, trace, lean_recheck }`.
-- **Placement + scheduler bring-up.** Slim init *stages* the binaries
-  but doesn't start them. 8.4 owns `just placement-up` /
-  `just scheduler-up` (background processes via tokio
-  `Command::kill_on_drop(true)` per ADR-004), or rolls them into a
-  single `just dapr-pipeline` recipe that brings everything up,
-  drives the pipeline, then tears down.
-- **SIGTERM-first warden escalation comes due here** (ADR-014 §9 →
-  ADR-015 §8 → ADR-016 §7).
-- **Tracing.** Each stage emits a `tracing` span + a Dapr Workflow
-  event. Final aggregated trace rides on the Workflow output.
-- **Decide:** in-band JSON envelope vs. Dapr state-store handle for
-  the cross-stage payload. JSON envelope is simplest; state-store
-  handles cleaner if payloads grow.
-- **Gate:** `just dapr-pipeline` runs end-to-end against a canonical
-  guideline; verification flag round-trips.
 
 ## Session 2026-04-30 — Task 7 close-out
 

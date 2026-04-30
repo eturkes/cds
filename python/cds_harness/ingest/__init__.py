@@ -17,7 +17,7 @@ namespace (:data:`CANONICAL_VITALS`), and rejects duplicate
 from __future__ import annotations
 
 from cds_harness.ingest.canonical import CANONICAL_VITALS
-from cds_harness.ingest.csv_loader import load_csv
+from cds_harness.ingest.csv_loader import load_csv, load_csv_text
 from cds_harness.ingest.errors import (
     DuplicateMonotonicError,
     IngestError,
@@ -26,7 +26,7 @@ from cds_harness.ingest.errors import (
     MissingMetadataError,
     UnknownVitalError,
 )
-from cds_harness.ingest.json_loader import load_json
+from cds_harness.ingest.json_loader import load_json, load_json_envelope
 from cds_harness.ingest.loader import discover_payloads
 from cds_harness.ingest.timestamps import canonicalize_utc, parse_utc_timestamp
 
@@ -41,6 +41,8 @@ __all__ = [
     "canonicalize_utc",
     "discover_payloads",
     "load_csv",
+    "load_csv_text",
     "load_json",
+    "load_json_envelope",
     "parse_utc_timestamp",
 ]

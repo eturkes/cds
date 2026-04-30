@@ -292,6 +292,30 @@ GUIDELINE_PATH := env_var_or_default('GUIDELINE_PATH', 'data/guidelines')
 py-translate:
     uv run python -m cds_harness.translate {{GUIDELINE_PATH}} --smt-check --pretty
 
+CDS_HARNESS_HOST := env_var_or_default('CDS_HARNESS_HOST', '127.0.0.1')
+CDS_HARNESS_PORT := env_var_or_default('CDS_HARNESS_PORT', '8081')
+
+# Run the Python harness FastAPI service standalone (no Dapr sidecar).
+# Defaults to 127.0.0.1:8081; override via CDS_HARNESS_HOST / CDS_HARNESS_PORT.
+py-service:
+    CDS_HARNESS_HOST={{CDS_HARNESS_HOST}} CDS_HARNESS_PORT={{CDS_HARNESS_PORT}} \
+        uv run python -m cds_harness.service
+
+# Run the Python harness service under a Dapr sidecar (Task 8.2 gate target).
+# Service-invocation routes through daprd's `/v1.0/invoke/cds-harness/method/...`.
+# Placement-bound features (Workflow, actors, pub/sub) come live in Task 8.4.
+py-service-dapr:
+    CDS_HARNESS_HOST={{CDS_HARNESS_HOST}} CDS_HARNESS_PORT={{CDS_HARNESS_PORT}} \
+        "{{ justfile_directory() }}/.bin/dapr" run \
+            --app-id cds-harness \
+            --app-port {{CDS_HARNESS_PORT}} \
+            --app-protocol http \
+            --runtime-path "{{DAPR_INSTALL_DIR}}" \
+            --resources-path "{{DAPR_RESOURCES_PATH}}" \
+            --config "{{DAPR_CONFIG_PATH}}" \
+            --log-level info \
+            -- uv run python -m cds_harness.service
+
 # =============================================================================
 # Rust (cargo + clippy + rustfmt + cargo-test)
 # =============================================================================

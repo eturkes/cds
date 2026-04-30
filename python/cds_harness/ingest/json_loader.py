@@ -19,9 +19,13 @@ from cds_harness.ingest.validation import (
 from cds_harness.schema import ClinicalTelemetryPayload
 
 
-def load_json(json_path: Path) -> ClinicalTelemetryPayload:
-    """Load a fully-formed payload JSON envelope."""
-    raw = json.loads(Path(json_path).read_text(encoding="utf-8"))
+def load_json_envelope(raw: object) -> ClinicalTelemetryPayload:
+    """Validate + canonicalize a parsed JSON envelope (dict-like).
+
+    Mirrors :func:`load_json` but operates on an in-memory object. Useful
+    on the JSON-over-TCP boundary where the wire delivers the envelope
+    directly (constraint C6) without a filesystem detour.
+    """
     payload = ClinicalTelemetryPayload.model_validate(raw)
     canonical_samples = [
         sample.model_copy(
@@ -34,4 +38,10 @@ def load_json(json_path: Path) -> ClinicalTelemetryPayload:
     return payload.model_copy(update={"samples": canonical_samples})
 
 
-__all__ = ["load_json"]
+def load_json(json_path: Path) -> ClinicalTelemetryPayload:
+    """Load a fully-formed payload JSON envelope."""
+    raw = json.loads(Path(json_path).read_text(encoding="utf-8"))
+    return load_json_envelope(raw)
+
+
+__all__ = ["load_json", "load_json_envelope"]

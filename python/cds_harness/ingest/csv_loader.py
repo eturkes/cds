@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import bisect
 import csv
+import io
 import json
 from pathlib import Path
 
@@ -54,16 +55,33 @@ def load_csv(csv_path: Path) -> ClinicalTelemetryPayload:
         )
 
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    if "source" not in meta:
+    csv_text = csv_path.read_text(encoding="utf-8")
+    return load_csv_text(csv_text, meta, file_label=csv_path.name)
+
+
+def load_csv_text(
+    csv_text: str,
+    meta: object,
+    *,
+    file_label: str = "<inline>",
+) -> ClinicalTelemetryPayload:
+    """In-memory variant of :func:`load_csv`.
+
+    The CSV body and the sidecar-metadata dict are passed directly so the
+    JSON-over-TCP boundary (constraint C6) can ingest payloads without a
+    filesystem detour. ``file_label`` is the diagnostic name surfaced in
+    error messages.
+    """
+    if not isinstance(meta, dict) or "source" not in meta:
         raise MissingMetadataError(
-            f"sidecar {meta_path.name!r} missing required 'source' object"
+            f"sidecar metadata for {file_label!r} missing required 'source' object"
         )
     source = TelemetrySource.model_validate(meta["source"])
     raw_events = meta.get("events", [])
     events = [DiscreteEvent.model_validate(e) for e in raw_events]
 
-    samples = _parse_csv_samples(csv_path)
-    bucketed = _bucket_events_into_samples(samples, events)
+    samples = _parse_csv_samples_from_text(csv_text, file_label)
+    bucketed = _bucket_events_into_samples(samples, events, file_label=file_label)
     return ClinicalTelemetryPayload(
         schema_version=SCHEMA_VERSION,
         source=source,
@@ -72,34 +90,41 @@ def load_csv(csv_path: Path) -> ClinicalTelemetryPayload:
 
 
 def _parse_csv_samples(csv_path: Path) -> list[TelemetrySample]:
+    return _parse_csv_samples_from_text(
+        csv_path.read_text(encoding="utf-8"),
+        csv_path.name,
+    )
+
+
+def _parse_csv_samples_from_text(csv_text: str, file_label: str) -> list[TelemetrySample]:
     seen_monotonic: set[int] = set()
     samples: list[TelemetrySample] = []
-    with csv_path.open(encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if reader.fieldnames is None:
-            raise MalformedCsvError(f"empty CSV {csv_path.name!r}")
-        header = list(reader.fieldnames)
-        missing = _RESERVED_COLUMNS - set(header)
-        if missing:
-            raise MalformedCsvError(
-                f"CSV {csv_path.name!r} missing required columns: {sorted(missing)}"
+    handle = io.StringIO(csv_text)
+    reader = csv.DictReader(handle)
+    if reader.fieldnames is None:
+        raise MalformedCsvError(f"empty CSV {file_label!r}")
+    header = list(reader.fieldnames)
+    missing = _RESERVED_COLUMNS - set(header)
+    if missing:
+        raise MalformedCsvError(
+            f"CSV {file_label!r} missing required columns: {sorted(missing)}"
+        )
+    vital_columns = [c for c in header if c not in _RESERVED_COLUMNS]
+    for col in vital_columns:
+        if col not in CANONICAL_VITALS:
+            raise UnknownVitalError(
+                f"CSV column {col!r} is not a canonical vital; "
+                f"set={sorted(CANONICAL_VITALS)}"
             )
-        vital_columns = [c for c in header if c not in _RESERVED_COLUMNS]
-        for col in vital_columns:
-            if col not in CANONICAL_VITALS:
-                raise UnknownVitalError(
-                    f"CSV column {col!r} is not a canonical vital; "
-                    f"set={sorted(CANONICAL_VITALS)}"
-                )
-        for row_idx, row in enumerate(reader, start=2):  # row 1 is the header
-            sample = _row_to_sample(row, vital_columns, csv_path.name, row_idx)
-            if sample.monotonic_ns in seen_monotonic:
-                raise DuplicateMonotonicError(
-                    f"{csv_path.name}: duplicate monotonic_ns={sample.monotonic_ns} "
-                    f"at row {row_idx}"
-                )
-            seen_monotonic.add(sample.monotonic_ns)
-            samples.append(sample)
+    for row_idx, row in enumerate(reader, start=2):  # row 1 is the header
+        sample = _row_to_sample(row, vital_columns, file_label, row_idx)
+        if sample.monotonic_ns in seen_monotonic:
+            raise DuplicateMonotonicError(
+                f"{file_label}: duplicate monotonic_ns={sample.monotonic_ns} "
+                f"at row {row_idx}"
+            )
+        seen_monotonic.add(sample.monotonic_ns)
+        samples.append(sample)
     return samples
 
 
@@ -148,11 +173,13 @@ def _row_to_sample(
 def _bucket_events_into_samples(
     samples: list[TelemetrySample],
     events: list[DiscreteEvent],
+    *,
+    file_label: str = "<inline>",
 ) -> list[TelemetrySample]:
     if not samples:
         if events:
             raise MalformedCsvError(
-                "cannot attach sidecar events to an empty sample stream"
+                f"cannot attach sidecar events to an empty sample stream ({file_label})"
             )
         return samples
     ordered = sorted(samples, key=lambda s: s.monotonic_ns)
@@ -169,4 +196,4 @@ def _bucket_events_into_samples(
     ]
 
 
-__all__ = ["load_csv"]
+__all__ = ["load_csv", "load_csv_text"]
