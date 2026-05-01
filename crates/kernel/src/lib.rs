@@ -34,8 +34,12 @@ pub mod solver;
 /// Stable identifier for this crate. Consumed by smoke tests + future trace logs.
 pub const KERNEL_ID: &str = "cds-kernel";
 
-/// Phase 0 marker. Bumped to 1 when the SMT layer lands.
-pub const PHASE: u8 = 0;
+/// Phase marker. Bumped 0 → 1 at Task 9.3 close-out, when the
+/// stakeholder visualizer demonstrably round-trips the Phase 0 success
+/// criterion (Plan §8 row 9: "UI shows live trace from real dataset;
+/// verification flag round-trips"). Phase 1 scope per Plan §1: live
+/// FHIR streaming, distributed cloud, ZKSMT.
+pub const PHASE: u8 = 1;
 
 /// Returns whether the kernel identifier is well-formed (ASCII, kebab-case).
 #[must_use]
@@ -61,7 +65,10 @@ mod tests {
     }
 
     #[test]
-    fn phase_zero_is_active() {
-        assert_eq!(PHASE, 0, "phase marker must be 0 until SMT integration");
+    fn phase_one_is_active() {
+        assert_eq!(
+            PHASE, 1,
+            "phase marker advances to 1 at Task 9.3 close-out (UI round-trip)"
+        );
     }
 }

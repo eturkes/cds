@@ -141,7 +141,7 @@ C6. All inter-process comms = JSON-over-TCP/IP and/or MCP.
 | 8.4b   | End-to-end Dapr Workflow — `cds_harness.workflow` package + Dapr Python SDK + aggregated envelope + `just dapr-pipeline` + end-to-end pytest smoke | **DONE** | git commit `feat: complete Task 8.4b End-to-end Dapr Workflow + Task 8 close-out`                                                    |
 | 9.1    | Frontend foundation — SvelteKit 2 + Svelte 5 runes + Vite 7 + Tailwind 4 + ESLint 9 + Prettier 3 + Playwright tombstone + Justfile `frontend-*` recipes | **DONE** | git commit `feat: complete Task 9.1 Frontend foundation`                                                                              |
 | 9.2    | TS schema mirrors + BFF + canonical smoke — six TS schemas + `+server.ts` routes + `frontend-bff-smoke` Justfile recipe + parity tripwire           | **DONE** | git commit `feat: complete Task 9.2 TS schema mirrors + BFF + canonical smoke`                                                       |
-| 9.3    | Visualizers + Phase 0 close-out — AST tree + Octagon + MUC viewer + verification trace + Playwright E2E + PHASE 0 → 1 flip                          | pending  | UI shows live trace from real dataset; verification flag round-trips. git commit `feat: complete Task 9.3 Visualizers + Phase 0 close-out` |
+| 9.3    | Visualizers + Phase 0 close-out — AST tree + Octagon + MUC viewer + verification trace + Playwright E2E + PHASE 0 → 1 flip                          | **DONE** | git commit `feat: complete Task 9.3 Visualizers + Phase 0 close-out` — **Phase 0 closed**                                                  |
 
 **At any session:** select STRICTLY the lowest-numbered uncompleted
 task. No leapfrogging. Sub-tasks follow the same discipline —

@@ -127,21 +127,59 @@ just test
 
 `just --list` enumerates every available recipe.
 
+### Running Phase 0 end-to-end
+
+The full vertical slice (telemetry → autoformalization → deduction → SMT
+solve → Lean recheck → live UI) needs both daprd sidecars, the SvelteKit
+adapter-node BFF, and a Kimina headless Lean server. Two close-out
+gates exercise the stack:
+
+```bash
+# Wire-contract gate (Task 9.2): drives the canonical contradictory-bound
+# fixture through the BFF via curl and asserts trace.sat == false +
+# recheck.ok == true.
+CDS_KIMINA_URL=http://127.0.0.1:8000 just frontend-bff-smoke
+
+# Visualizer gate (Task 9.3): drives the same flow through the live UI
+# and asserts the unsat banner + ≥2 MUC entries + AST highlights via
+# Playwright.
+CDS_KIMINA_URL=http://127.0.0.1:8000 just frontend-pipeline-smoke
+```
+
+For interactive exploration, bring up the cluster + sidecars + BFF and
+load `http://127.0.0.1:5173/`:
+
+```bash
+just dapr-cluster-up
+just py-service-dapr   # cds-harness sidecar
+just rs-service-dapr   # cds-kernel sidecar
+just frontend-dev      # SvelteKit + Vite dev server on :5173
+```
+
+The page renders the OnionL IR tree (left), the Octagon abstract domain
+(right), the verification trace banner (top), and the MUC viewer
+(bottom); MUC entries cross-link back into the AST tree on click.
+
 ---
 
 ## 7. Phase 0 MVP Roadmap
 
 | Task | Title                                                            | Status |
 | ---- | ---------------------------------------------------------------- | ------ |
-| 1    | Foundational scaffolding & environment provisioning              | **DONE** (this commit) |
-| 2    | Core conceptual schemas (Rust structs + Pydantic models)         | pending |
-| 3    | Live genuine data ingestion pipeline (CSV/JSON → harness)        | pending |
-| 4    | Python neurosymbolic translators (CLOVER → SMT-LIB)              | pending |
-| 5    | Rust deductive engine (Nemo + Octagon state vectors)             | pending |
-| 6    | Mathematical solver integration (Z3/cvc5, MUC, Alethe)           | pending |
-| 7    | Headless Lean 4 interop (Kimina JSON-RPC)                        | pending |
-| 8    | Dapr workflow orchestration (sidecar boundaries)                 | pending |
-| 9    | SvelteKit frontend wired to live backend                         | pending |
+| 1    | Foundational scaffolding & environment provisioning              | **DONE** |
+| 2    | Core conceptual schemas (Rust structs + Pydantic models)         | **DONE** |
+| 3    | Live genuine data ingestion pipeline (CSV/JSON → harness)        | **DONE** |
+| 4    | Python neurosymbolic translators (CLOVER → SMT-LIB)              | **DONE** |
+| 5    | Rust deductive engine (Nemo + Octagon state vectors)             | **DONE** |
+| 6    | Mathematical solver integration (Z3/cvc5, MUC, Alethe)           | **DONE** |
+| 7    | Headless Lean 4 interop (Kimina JSON-RPC)                        | **DONE** |
+| 8    | Dapr workflow orchestration (sidecar boundaries)                 | **DONE** (8.1–8.4b) |
+| 9    | SvelteKit frontend wired to live backend                         | **DONE** (9.1–9.3) |
+
+**Phase 0 closed at Task 9.3.** The stakeholder visualizer round-trips
+the canonical `contradictory-bound` flow against a live Dapr cluster,
+demonstrating the Plan §1 success criterion. Phase 1+ scope (FHIR
+streaming, distributed cloud, ZKSMT) opens with its own roadmap.
 
 Each task is executed in its **own atomic session** under the *Context-Governed Re-Entry Protocol* documented in `.agent/Plan.md`.
 

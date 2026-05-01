@@ -2627,3 +2627,160 @@ PHASE flip).
   actually demonstrable.
 
 ---
+
+## ADR-023 — Phase 0 close-out (Task 9.3 visualizers + PHASE flip)
+
+**Status:** Accepted (Phase 0 close-out)
+**Date:** 2026-05-01
+
+**Context.** ADR-022 §4 scoped Task 9.3 as the visualizer-and-close-out
+axis of the SvelteKit frontend split: four hand-rolled Svelte 5
+visualizer components (AstTree, Octagon, MucViewer, VerificationTrace)
++ a cross-component highlight rune store + a single-page `+page.svelte`
+composition driving the five `/api/*` BFF routes from 9.2 + a
+Playwright E2E gated on a live cluster + the Phase 0 → Phase 1 marker
+flip. ADR-022 §10 reserved the option to mid-flight split into 9.3a
+("scaffold + AST + Octagon, defer MUC viewer + close-out") and 9.3b
+("MUC viewer + Playwright + PHASE flip + Phase 0 close-out") if a
+single context window proved insufficient. The 9.3 session executed
+in a single window without invoking the contingency split.
+
+This ADR records the architectural decisions that **landed** at
+close-out, distinct from the §10 contingency that did not trigger.
+
+**Decision.**
+
+1. **Hand-rolled SVG visualizers, no chart / graph library.** AstTree,
+   Octagon, MucViewer, VerificationTrace are written directly in
+   Svelte 5 + Tailwind 4 against the wire schemas from 9.2. No D3,
+   Plotly, svelte-flow, or comparable runtime dependency. Per
+   ADR-022 §6, the Phase 0 visualizer surface is small (one recursive
+   tree + one 2D box + one list + one banner) and one-to-one with the
+   data; a chart library would hide the schema-rendering relationship
+   behind configuration objects and add a runtime dependency that any
+   future Phase 1 design system would have to replace anyway.
+   Reopen if Phase 1+ adds heat-maps, force-directed graphs, or
+   anything where layout cost dominates.
+2. **Self-import recursion replaces `<svelte:self>`.** AstTree
+   recurses on `children(node)` via
+   `import Self from './AstTree.svelte'` + `<Self ... />`, which is
+   the documented Svelte 5 forward-compatible shape. `<svelte:self>`
+   is deprecated in Svelte 5; persisting it would compile under a
+   sustained typecheck warning. The diff cost is one extra import line
+   per recursive component.
+3. **`$state` rune store in `*.svelte.ts`, not `*.ts`.** Cross-
+   component highlight is implemented via
+   `frontend/src/lib/stores/highlight.svelte.ts` exposing
+   `getHighlightedSpan()` + `getPulseToken()` + `pulseHighlight(span)`.
+   The `.svelte.ts` extension is mandatory: Svelte 5 forbids runes
+   outside `.svelte` and `.svelte.ts` files. ESM consumers import as
+   `from '$lib/stores/highlight.svelte'` (the `.ts` is dropped at
+   the import site under SvelteKit's default resolver). A separate
+   `pulseToken` (monotonic integer) decouples "what is highlighted"
+   from "should we re-fire the pulse animation now," so re-clicking
+   the same MUC entry retriggers the keyframe — runes deduplicate
+   equal-value writes, so a sole `highlightedSpan` channel would no-op
+   on repeat clicks.
+4. **Single-page `+page.svelte` composition under one `$state<State>`
+   rune.** The page replaces the 9.1 placeholder. A single `$state`
+   rune holds `{payload, ir, matrix, verdict, trace, recheck, stages,
+   runId}`; `runPipeline()` drives the five `/api/*` routes in
+   sequence; per-stage errors lift to `{status: 'error', message}`
+   carrying the BFF's lifted detail envelope; the layout is
+   form → stage badges → VerificationTrace → 2-col grid (AstTree |
+   Octagon) → MucViewer. Sample-payload defaults inline the canonical
+   `contradictory-bound` fixture so a fresh load is one button-click
+   from a full pipeline run.
+5. **Playwright self-skip pattern.** `frontend/e2e/pipeline.e2e.ts`
+   guards the full assertion path with
+   `test.skip(baseURL === '', ...)` reading
+   `playwright.config.ts use.baseURL = process.env.CDS_E2E_BASE_URL ??
+   undefined`. Bare `just frontend-e2e` exits 1-skipped (no cluster /
+   daprd / Kimina prerequisites); the `frontend-pipeline-smoke` recipe
+   exports `CDS_E2E_BASE_URL=http://127.0.0.1:${bff_port}` and runs
+   the full assertions against the live cluster. The dual-mode design
+   keeps one test file authoritative — a separate `*.smoke.e2e.ts`
+   would duplicate the test body for no benefit.
+6. **Adapter-node BFF entrypoint, not Vite preview.** The
+   `frontend-pipeline-smoke` recipe spins
+   `bun frontend/build/index.js` (with `DAPR_HTTP_PORT_HARNESS` /
+   `DAPR_HTTP_PORT_KERNEL` / `PORT` / `HOST` env), not `vite preview`.
+   `vite preview` serves only static client-side assets — `+server.ts`
+   SSR routes don't run. The production-shaped runnable for
+   `@sveltejs/adapter-node` is `node frontend/build/index.js` (here
+   `bun ...`); ADR-022 §3's mention of "preview" was the
+   SvelteKit-vernacular sense ("the served build, not the dev
+   server"). The recipe header inlines the rationale.
+7. **PHASE flip lands inside 9.3.** `cds_kernel::PHASE` 0 → 1 (lib.rs
+   constant + docstring + `phase_zero_is_active` test renamed to
+   `phase_one_is_active`); `cds_harness.__init__.PHASE` 0 → 1 (module
+   constant + module docstring + `test_phase_zero_is_active` →
+   `test_phase_one_is_active`). Plan §10 step 7 + ADR-022 §9 schedule
+   the flip on Task 9 close-out; landing it inside 9.3 keeps the
+   marker semantically aligned with what is demonstrable as of this
+   commit.
+8. **README "Running Phase 0 end-to-end" subsection.** Quickstart
+   gains a subsection enumerating the two close-out gates
+   (`frontend-bff-smoke` for 9.2's wire-contract gate;
+   `frontend-pipeline-smoke` for 9.3's visualizer gate) plus the
+   interactive `frontend-dev` workflow. Phase 0 roadmap table is
+   flipped to all-DONE with the explicit "Phase 0 closed at Task 9.3"
+   paragraph.
+9. **No 9.3a / 9.3b mid-flight split.** The §10 contingency in
+   ADR-022 was reserved to be invoked only if a single context window
+   could not absorb the four components + composition + Playwright +
+   PHASE flip + memory updates. The session executed in one window;
+   the contingency is recorded as not-triggered for the historical
+   record.
+
+**Consequences.**
+
+- The frontend now round-trips the canonical `contradictory-bound`
+  fixture through the BFF → kernel → harness → solver → Lean stack
+  and renders the five-stage trace under a single page, in ≤ 6 min
+  (Kimina recheck dominates).
+- Cross-component MUC↔AST highlight gives stakeholders a literal
+  visual aid for the unsat-core narrative — clicking an MUC entry
+  pulses the corresponding atom in the IR tree.
+- The PHASE constants are now `1` everywhere; any tooling that
+  branches on phase markers (none in Phase 0; potential Phase 1+)
+  will see Phase 1 immediately on first import.
+- The Playwright self-skip pattern means `frontend-test` (and CI /
+  pre-commit) do not need a live cluster, while `frontend-pipeline-
+  smoke` retains a single-command operator path to the full UI gate.
+- The hand-rolled SVG visualizers are the contractual zero-dependency
+  baseline; any Phase 1+ chart-library introduction will need its own
+  ADR weighing the runtime cost against the rendering scope at that
+  point.
+- Phase 0 is closed. The Phase 1 scope (FHIR streaming, distributed
+  cloud, ZKSMT) opens with its own plan restructure session.
+
+**Alternatives rejected.**
+
+- **D3 / Plotly / svelte-flow.** Phase 0 visualizer surface is too
+  small to amortize the runtime cost; per ADR-022 §6.
+- **`<svelte:self>` recursion.** Deprecated in Svelte 5; persisting
+  forces a sustained typecheck warning.
+- **`*.ts` rune store with a workaround.** Svelte 5 outright forbids
+  runes outside `.svelte` / `.svelte.ts`; no workaround compiles.
+- **Sole `highlightedSpan` channel, no `pulseToken`.** Re-clicking
+  the same MUC entry would no-op (rune dedup); the keyframe would
+  not retrigger.
+- **Multi-page composition (`/ingest`, `/translate`, …).** The five
+  stages are conceptually one pipeline; users orient on the verdict +
+  MUC + trace as a single view. Multi-page would force route-
+  internal state to be passed via session storage or query params,
+  fighting the rune model.
+- **Vite preview for the smoke runtime.** `+server.ts` SSR routes
+  don't run under `vite preview`. The adapter-node entry is the
+  documented production shape.
+- **Hard-required `CDS_E2E_BASE_URL` for `pipeline.e2e.ts`.** Would
+  break `frontend-test` when no cluster is up; the self-skip pattern
+  preserves the bare-CI gate.
+- **PHASE flip deferred to Phase 1 plan restructure.** Leaves the
+  marker stale across the migration window; flipping at 9.3 close-
+  out keeps the marker semantically truthful per Plan §10 step 7.
+- **Mid-flight 9.3a / 9.3b split.** Reserved by ADR-022 §10 but not
+  triggered; the single-session execution closed the contract.
+
+---

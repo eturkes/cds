@@ -1030,6 +1030,123 @@ frontend-bff-smoke:
     PY
 
 # =============================================================================
+# Frontend pipeline E2E (Task 9.3)
+# =============================================================================
+# `just frontend-pipeline-smoke` is the Phase 0 close-out gate. Mirrors
+# `frontend-bff-smoke` for cluster + sidecar + adapter-node BFF bring-up
+# but exits the Playwright path: the canonical contradictory-bound flow
+# is driven through the live UI (`+page.svelte` form → `Run pipeline`
+# button), with Playwright asserting the unsat banner + ≥2 MUC entries
+# + ≥2 AST nodes highlighted with `data-muc=true` + `recheck-pill`
+# data-state == ok. Per ADR-022 §4.
+
+# End-to-end Phase 0 visualizer + Playwright gate (Task 9.3 close-out). Requires .bin/dapr + slim runtime + .bin/{z3,cvc5} + reachable $CDS_KIMINA_URL + bun in $PATH.
+frontend-pipeline-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo="{{ justfile_directory() }}"
+    dapr_cli="$repo/.bin/dapr"
+    daprd="{{DAPR_DAPRD}}"
+    [ -x "$dapr_cli" ] && [ -x "$daprd" ] || \
+        { echo "dapr CLI / slim runtime missing — run \`just fetch-dapr\`"; exit 1; }
+    [ -x "$repo/.bin/z3" ] && [ -x "$repo/.bin/cvc5" ] || \
+        { echo "Z3 / cvc5 missing — run \`just fetch-bins\`"; exit 1; }
+    [ -n "${CDS_KIMINA_URL:-}" ] || \
+        { echo "CDS_KIMINA_URL unset — start Kimina (\`python -m server\` from the project-numina/kimina-lean-server checkout) and re-run with that URL exported."; exit 1; }
+    command -v bun >/dev/null 2>&1 || \
+        { echo "bun not found — install bun (https://bun.sh) before running this recipe."; exit 1; }
+
+    cargo build --bin cds-kernel-service
+    ( cd "$repo/frontend" && bun install >/dev/null && bun run build >/dev/null )
+    ( cd "$repo/frontend" && bunx playwright install chromium >/dev/null )
+
+    mkdir -p target
+
+    py_pid="target/pipeline-smoke-harness.pid"; py_log="target/pipeline-smoke-harness.log"
+    rs_pid="target/pipeline-smoke-kernel.pid";  rs_log="target/pipeline-smoke-kernel.log"
+    bff_pid="target/pipeline-smoke-bff.pid";    bff_log="target/pipeline-smoke-bff.log"
+
+    cleanup() {
+        for pidfile in "$bff_pid" "$rs_pid" "$py_pid"; do
+            if [ -f "$pidfile" ]; then
+                pid=$(cat "$pidfile")
+                if kill -0 "$pid" 2>/dev/null; then
+                    kill -TERM "$pid" 2>/dev/null || true
+                    for _ in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+                    if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
+                fi
+                rm -f "$pidfile"
+            fi
+        done
+        just dapr-cluster-down >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT INT TERM
+
+    just dapr-cluster-up
+    for _ in $(seq 1 60); do
+        if curl -sf "http://127.0.0.1:{{DAPR_PLACEMENT_HZ}}/healthz" >/dev/null; then break; fi
+        sleep 0.5
+    done
+    for _ in $(seq 1 60); do
+        if curl -sf "http://127.0.0.1:{{DAPR_SCHEDULER_HZ}}/healthz" >/dev/null; then break; fi
+        sleep 0.5
+    done
+
+    pick_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
+    py_app_port=$(pick_port); py_http=$(pick_port); py_grpc=$(pick_port); py_met=$(pick_port)
+    rs_app_port=$(pick_port); rs_http=$(pick_port); rs_grpc=$(pick_port); rs_met=$(pick_port)
+    bff_port=$(pick_port)
+
+    CDS_HARNESS_HOST=127.0.0.1 CDS_HARNESS_PORT=$py_app_port \
+    nohup "$dapr_cli" run \
+        --app-id cds-harness \
+        --app-port "$py_app_port" --app-protocol http \
+        --dapr-http-port "$py_http" --dapr-grpc-port "$py_grpc" --metrics-port "$py_met" \
+        --runtime-path "{{DAPR_INSTALL_DIR}}" --resources-path "{{DAPR_RESOURCES_PATH}}" \
+        --config "{{DAPR_CONFIG_PATH}}" --log-level info \
+        -- uv run python -m cds_harness.service \
+        > "$py_log" 2>&1 < /dev/null &
+    echo $! > "$py_pid"
+
+    CDS_KERNEL_HOST=127.0.0.1 CDS_KERNEL_PORT=$rs_app_port \
+    nohup "$dapr_cli" run \
+        --app-id cds-kernel \
+        --app-port "$rs_app_port" --app-protocol http \
+        --dapr-http-port "$rs_http" --dapr-grpc-port "$rs_grpc" --metrics-port "$rs_met" \
+        --runtime-path "{{DAPR_INSTALL_DIR}}" --resources-path "{{DAPR_RESOURCES_PATH}}" \
+        --config "{{DAPR_CONFIG_PATH}}" --log-level info \
+        -- "$repo/target/debug/cds-kernel-service" \
+        > "$rs_log" 2>&1 < /dev/null &
+    echo $! > "$rs_pid"
+
+    wait_ready() {
+        local url=$1 budget=${2:-60}
+        for _ in $(seq 1 $budget); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$url" || echo 000)
+            if [ "$code" = "200" ] || [ "$code" = "204" ]; then return 0; fi
+            sleep 0.5
+        done
+        echo "readiness wait timed out for $url"; return 1
+    }
+    wait_ready "http://127.0.0.1:${py_app_port}/healthz"
+    wait_ready "http://127.0.0.1:${rs_app_port}/healthz"
+    wait_ready "http://127.0.0.1:${py_http}/v1.0/healthz" 90
+    wait_ready "http://127.0.0.1:${rs_http}/v1.0/healthz" 90
+
+    DAPR_HTTP_PORT_HARNESS=$py_http DAPR_HTTP_PORT_KERNEL=$rs_http \
+    PORT=$bff_port HOST=127.0.0.1 \
+    nohup bun "$repo/frontend/build/index.js" > "$bff_log" 2>&1 < /dev/null &
+    echo $! > "$bff_pid"
+    wait_ready "http://127.0.0.1:${bff_port}/" 60
+
+    echo "→ Driving Playwright pipeline E2E against http://127.0.0.1:${bff_port}"
+    cd "$repo/frontend" && \
+        CDS_E2E_BASE_URL="http://127.0.0.1:${bff_port}" \
+        bunx playwright test e2e/pipeline.e2e.ts --reporter=list
+
+    echo "✓ frontend-pipeline-smoke complete"
+
+# =============================================================================
 # Aggregates
 # =============================================================================
 

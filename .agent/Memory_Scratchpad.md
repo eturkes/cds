@@ -6,10 +6,200 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 9.2 — TS schema mirrors + BFF + canonical smoke. Closed the wire-contract-and-transport axis of ADR-022 §3. Eight TS schema modules under `frontend/src/lib/schemas/` (`parse.ts` shape primitives + `telemetry.ts` + `onion.ts` + `smt.ts` + `verdict.ts` + `trace.ts` + `recheck.ts` + `pipeline.ts` + `index.ts` barrel) hand-mirror the Phase 0 Rust source-of-truth (`crates/kernel/src/schema/{telemetry,onionl,smt,verification}.rs` + `crates/kernel/src/deduce/mod.rs` + `crates/kernel/src/service/handlers.rs`) plus the workflow `PipelineInput` (`python/cds_harness/workflow/pipeline.py`) plus the in-band `PipelineEnvelope` (8.4b's six-key Workflow output). Each schema module carries a JSDoc cross-reference back to its source-of-truth path. Five SvelteKit `+server.ts` BFF routes (`src/routes/api/{ingest,translate,deduce,solve,recheck}/+server.ts`) proxy through daprd via the new `$lib/server/dapr.ts` helper (resolves `DAPR_HTTP_PORT_HARNESS` / `DAPR_HTTP_PORT_KERNEL` at request time, defaults 3500 / 3501) and lift HTTP 422 `{error, detail}` envelopes into typed `BackendError` instances (re-emitted with the original status). Per-stage `console.info({stage, app_id, path, status, duration_ms})` matches the harness's `tracing` shape. Vitest parity tripwire `frontend/src/lib/schemas/parity.test.ts` decodes the four core golden fixtures (`tests/golden/{clinical_telemetry_payload,onionl_ir_tree,smt_constraint_matrix,formal_verification_trace}.json`) through the TS parsers and asserts strict-deep-equality plus a coverage check that every disk fixture is registered. Tombstone `tombstone.spec.ts` deleted; `lib/index.ts` now re-exports the schemas barrel. New Justfile recipe `frontend-bff-smoke` (operator-runnable, gated on `.bin/dapr` + slim runtime + `.bin/{z3,cvc5}` + `CDS_KIMINA_URL` + `bun`) brings up cluster + harness + kernel sidecars on freshly-allocated ports + `bun frontend/build/index.js` (adapter-node) on a picked port, then runs an inline Python driver that POSTs the canonical `data/sample/icu-monitor-02.json` + `data/guidelines/contradictory-bound.{txt,recorded.json}` through `/api/{ingest,translate,deduce,solve,recheck}` and asserts `trace.sat == false`, `len(trace.muc) >= 2`, `recheck.ok == true`, `recheck.custom_id == 'cds-bff-smoke'`. Trap-driven reverse-teardown on every exit path. Final 9.2 gate: `just frontend-typecheck` 343 files / 0 errors / 0 warnings; `just frontend-lint` clean; `just frontend-test` 5/5 pass (4 parity + 1 coverage); `just frontend-build` clean (server entries: `_server.ts.js` chunks for `api/{ingest,translate,deduce,solve,recheck}`); `cargo test --workspace` 153 pass (unchanged from 9.1); `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all -- --check` clean; `uv run pytest` 95 pass + 1 skip (Kimina-gated); `uv run ruff check .` clean; `just env-verify` exit 0; `just frontend-bff-smoke` pre-flight surfaces a clear actionable error when `CDS_KIMINA_URL` is unset (matches `dapr-pipeline`'s shape). Visualizers + Playwright + PHASE flip defer to 9.3.
-- **Next up:** Task 9.3 — Visualizers + Phase 0 close-out. Four hand-rolled Svelte 5 components under `frontend/src/lib/components/` (`AstTree.svelte` recursive-svelte:self with per-node collapse + source-span tooltip + MUC highlight, `Octagon.svelte` SVG half-plane rendering with selectable canonical-vital projection, `MucViewer.svelte` cross-component highlight via `frontend/src/lib/stores/highlight.ts` `$state` rune + `animate-pulse`, `VerificationTrace.svelte` sat/unsat pill banner + Lean recheck pill + Alethe proof preview) + a new single-page composition replacing the 9.1 placeholder (`+page.svelte` driving `/api/ingest → /api/translate → /api/deduce → /api/solve → /api/recheck` in sequence with per-stage state in a single `$state` rune) + Playwright E2E (`e2e/pipeline.e2e.ts` against `frontend-preview` + a live cluster) + the Phase 0 → Phase 1 marker flip on `cds_harness.__init__.PHASE` and the kernel's `PHASE` constant + README touch-up + Plan §8 row 9.3 close-out. ADR-022 §4 + §10 captures the contract; if scope explodes, split into 9.3a/9.3b mid-flight per the established 8.3 → 8.3b → 8.3b2 pattern. **Phase 0 closes at 9.3.**
+- **Last completed:** Task 9.3 — Visualizers + Phase 0 close-out. **Phase 0 closed.** Closed the visualization-and-close-out axis of ADR-022 §4 in a single session (no mid-flight 9.3a/9.3b split required). Five new `frontend/src/lib/` modules: `stores/highlight.svelte.ts` (`$state` rune store exposing `getHighlightedSpan` / `getPulseToken` / `pulseHighlight` — the `.svelte.ts` extension is mandatory for runes outside `.svelte` files), `components/AstTree.svelte` (Svelte 5 self-import recursion via `import Self from './AstTree.svelte'` — `<svelte:self>` is deprecated in Svelte 5; per-node collapse via local `$state(false)`; `title` tooltip with `${doc_id} bytes ${start}-${end}`; MUC highlight via Tailwind `bg-rose-100 ring-rose-300` when `atom:${doc_id}:${start}-${end}` ∈ `trace.muc`; cross-component pulse via `:global(.cds-pulse)` keyframe re-triggered through `pulseEl.classList.remove(...) → offsetWidth → add(...)` so the second click re-pulses), `components/Octagon.svelte` (hand-rolled SVG `<rect>` over the projected `±x ±y ≤ c` bounds for the selected canonical-vital pair; `presentVitals(verdict)` filters to keys with finite `low<high`; current sample as `<circle fill-sky-600>` from the last-sample marker; module-script export of `CANONICAL_VITALS` + `projectBox` + `presentVitals` + `Box` + `CanonicalVital` keeps the helpers unit-testable), `components/MucViewer.svelte` (clickable `<button>` per entry; visual feedback via `class:bg-rose-100={highlighted === entry}` reading `getHighlightedSpan()`), `components/VerificationTrace.svelte` (sat/unsat pill banner with three `data-state` modes — `pending` / `sat` / `unsat`; Lean recheck pill `pending` / `ok` / `error`; `<details>/<summary>` collapsible Alethe proof preview capped at 50 lines via `proof.split('\n').slice(0, 50)`). The new `+page.svelte` replaces the 9.1 placeholder: telemetry+guideline+recorded-root form (defaults reproduce the canonical `contradictory-bound` fixture inline so a fresh load is one button-click from a full pipeline run) → "Run pipeline" button driving `/api/ingest → /api/translate → /api/deduce → /api/solve → /api/recheck` in sequence under a single `$state<State>` rune holding `{payload, ir, matrix, verdict, trace, recheck, stages, runId}` → per-stage badge row + inline error surfacing → verification trace banner → AST tree (left) | Octagon (right) → MUC viewer (bottom). Strictly-typed: errors lift to a stage-local `{status: 'error', message}` carrying the BFF's lifted `detail` envelope. Playwright E2E `frontend/e2e/pipeline.e2e.ts` self-skips when `CDS_E2E_BASE_URL` is unset (so `just frontend-e2e` exits clean without cluster prerequisites) and otherwise asserts every stage badge `data-status=ok` + `sat-pill` `data-state=unsat` + `recheck-pill` `data-state=ok` + `data-testid=muc-entry` count == 2 + `[data-testid=ast-node][data-muc=true]` count == 2 + `octagon-svg` visible + first-MUC click pulses the corresponding AST node. Tombstone `e2e/tombstone.e2e.ts` deleted. New Justfile recipe `frontend-pipeline-smoke` (operator-runnable, gated on `.bin/dapr` + slim runtime + `.bin/{z3,cvc5}` + `CDS_KIMINA_URL` + `bun`) mirrors `frontend-bff-smoke` cluster bring-up + adapter-node BFF + `bunx playwright install chromium` then runs `bunx playwright test e2e/pipeline.e2e.ts` against the live cluster with `CDS_E2E_BASE_URL=http://127.0.0.1:${bff_port}` exported. **PHASE flip:** `cds_kernel::PHASE` 0 → 1 (lib.rs constant + `phase_zero_is_active` test renamed to `phase_one_is_active`); `cds_harness.__init__.PHASE` 0 → 1 (module constant + docstring refresh + `test_phase_zero_is_active` renamed to `test_phase_one_is_active`). README "Running Phase 0 end-to-end" section added pointing at `frontend-bff-smoke` (9.2) + `frontend-pipeline-smoke` (9.3) + interactive `frontend-dev` workflow; Phase 0 roadmap table flipped to all-DONE with the explicit "Phase 0 closed at 9.3" close-out paragraph. Final 9.3 gate: `just frontend-typecheck` 348 files / 0 errors / 0 warnings; `just frontend-lint` clean; `just frontend-test` 5/5 pass (parity tripwire unchanged); `just frontend-build` clean (server entries unchanged + `_page.svelte.js` 24.84 kB / gzip 6.08 kB — full visualizer composition); `just frontend-e2e` 1 skipped (self-skip when `CDS_E2E_BASE_URL` unset, as designed); `cargo test --workspace` **153 pass** (unchanged from 9.2 — only the PHASE constant + its in-crate test name changed); `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all -- --check` clean; `uv run pytest` 95 pass + 1 skip (Kimina-gated); `uv run ruff check .` clean; `just env-verify` exit 0; `just frontend-pipeline-smoke` pre-flight surfaces a clear actionable error when `CDS_KIMINA_URL` is unset (matches `dapr-pipeline` + `frontend-bff-smoke` shape). Manual `bun run preview` smoke confirms `/` returns 200 with all key tokens (`Pipeline visualizer`, `run-button`, `sat-pill`, `stage-badge-ingest`).
+- **Next up:** **Phase 1.** Phase 0 is closed. Plan §1 enumerates the deferred Phase 1 scope: live FHIR streaming, distributed cloud microservices, and ZKSMT post-quantum proof attestation. A Phase 1 plan restructure session is the next checklist item — there is no incremental task in §8 to pick up.
 
 > **Task 8 was split** into 8.1–8.4 on 2026-04-30 (ADR-016) because a monolithic Dapr-orchestration task repeatedly exhausted a single context window. **Task 8.3 was further split** into 8.3a / 8.3b on 2026-04-30 (ADR-018) because the kernel service binds three subprocess pipelines (`deduce`, `solve`, `recheck`) behind one axum app and the foundation + endpoint plumbing each warrant their own session. **Task 8.3b was further split** into 8.3b1 / 8.3b2 on 2026-05-01 (ADR-019) because the original 8.3b scope (three handlers + their `IntoResponse` impls + comprehensive unit tests + `AppState` wiring + a Dapr-driven cargo integration test driving all three endpoints through daprd) again exceeded a single context window. **Task 8.3b2 was further split** into 8.3b2a / 8.3b2b on 2026-05-01 (ADR-020) because the original 8.3b2 scope (`AppState` introduction + env-driven option resolution + handler refactor onto `axum::extract::State` + shared smoke helpers + three daprd-driven cargo integration tests) again exceeded a single context window — and the external-dependency gate of solve/recheck (`.bin/z3`, `.bin/cvc5`, `CDS_KIMINA_URL`) cleanly separates from the dependency-free `/v1/deduce` smoke + the foundation refactor. **Task 8.4 was further split** into 8.4a / 8.4b on 2026-05-01 (ADR-021) because the original 8.4 scope (placement+scheduler bring-up + production SIGTERM-first warden escalation + readiness gate flip + Python `cds_harness.workflow` package + Dapr Python SDK introduction + aggregated envelope + per-stage tracing + `just dapr-pipeline` + end-to-end pytest smoke) again exceeded a single context window — and the Rust-foundation vs. Python-composition boundary cleanly separates the cluster bring-up + warden refactor from the Workflow harness composition. **Task 9 was further split** into 9.1 / 9.2 / 9.3 on 2026-05-01 (ADR-022) because the original Task 9 scope (first-time JS/TS toolchain introduction + six TS schema mirrors + SvelteKit `+server.ts` BFF + canonical happy-path smoke + four Svelte 5 visualizer components + Playwright + the Phase 0 → Phase 1 marker flip) was structurally larger than every prior Phase 0 task and the natural three-axis boundary (toolchain-foundation / wire-contract+transport / visualizers+close-out) cleanly separates the green-field scaffold from the BFF contract from the UI close-out. Sub-task progression is strict: `8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9.1 < 9.2 < 9.3`.
+
+## Session 2026-05-01 — Task 9.3 close-out (Visualizers + Phase 0 close-out)
+
+Closed the visualizers-and-close-out axis of ADR-022 §4 in a single
+session. **Phase 0 is closed.** The frontend now round-trips the
+canonical `contradictory-bound` fixture through five typed `+server.ts`
+proxy routes and renders the OnionL IR tree, the projected Octagon
+abstract domain, the verification-trace banner, and the MUC viewer —
+with cross-component highlight pulse — under a single-page composition
+driven by a single `$state<State>` rune. **No 9.3a / 9.3b mid-flight
+split was required** — the §10 contingency anticipated by ADR-022 §10
+did not trigger.
+
+**New visualizer modules (`frontend/src/lib/`):**
+
+| File                                  | Role                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stores/highlight.svelte.ts`          | `$state` rune store. Exposes `getHighlightedSpan()` + `getPulseToken()` + `pulseHighlight(span)`. The `.svelte.ts` extension is mandatory (Svelte 5 forbids runes outside `.svelte` and `.svelte.ts` files). `pulseToken` bumps every call so re-clicking the same MUC entry re-pulses the AST node.                                                                                                                                                                              |
+| `components/AstTree.svelte`           | Recursive OnionL tree. **Self-import pattern** `import Self from './AstTree.svelte'` + `<Self ... />` (replaces deprecated `<svelte:self>`). Per-node collapse via local `let collapsed = $state(false)`. MUC highlight via `class:bg-rose-100={isMuc} class:ring-rose-300={isMuc}` whenever `atom:${doc_id}:${start}-${end}` ∈ `trace.muc`. Cross-component pulse via `:global(.cds-pulse)` keyframe re-triggered through `el.classList.remove(...) → offsetWidth → add(...)`. |
+| `components/Octagon.svelte`           | Hand-rolled SVG `<rect>` over the projected `±x ±y ≤ c` bounds for the selected canonical-vital pair. Module-script exports `CANONICAL_VITALS` (lex-sorted 6-tuple), `CanonicalVital`, `Box`, `projectBox(verdict, x, y)`, `presentVitals(verdict)`. Static `$state` defaults `'heart_rate_bpm'` / `'spo2_percent'` + a separate `$effect` reconciling against the derived `present` list (avoids `state_referenced_locally`). Current sample rendered as `<circle fill-sky-600>`.   |
+| `components/MucViewer.svelte`         | One `<button data-testid=muc-entry data-span-id={entry}>` per MUC source-span. Visual feedback via `class:bg-rose-100={highlighted === entry}`. Click → `pulseHighlight(entry)`.                                                                                                                                                                                                                                                                                                  |
+| `components/VerificationTrace.svelte` | Three sat-pill states (`pending` slate / `sat` emerald / `unsat` rose) via `data-state` attr. Three recheck-pill states (`pending` / `ok` / `error`). `<details>/<summary>` collapsible Alethe proof preview capped at first 50 lines (`proof.split('\n').slice(0, 50)`).                                                                                                                                                                                                         |
+
+**Single-page composition (`frontend/src/routes/+page.svelte` REPLACED):**
+
+The 9.1 placeholder was replaced wholesale. New composition:
+
+```
+form (telemetry / guideline / recorded-root) [defaults inline the
+    canonical contradictory-bound fixture so a fresh load is one
+    click from a full pipeline run]
+↓
+"Run pipeline" button → runPipeline() drives the five /api/* routes
+    in sequence under a single $state<State> rune holding
+    {payload, ir, matrix, verdict, trace, recheck, stages, runId}
+↓
+per-stage badge row with data-testid=stage-badge-{ingest,translate,
+    deduce,solve,recheck} + data-status={pending,running,ok,error}
+    + inline error surfacing as {status: 'error', message} carrying
+    the BFF's lifted detail envelope
+↓
+VerificationTrace (top)
+↓
+2-col grid: AstTree (left) | Octagon (right)
+↓
+MucViewer (bottom)
+```
+
+**Playwright E2E (`frontend/e2e/pipeline.e2e.ts` NEW; `tombstone.e2e.ts` deleted):**
+
+| Aspect              | Behaviour                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Self-skip gate      | `test.skip(baseURL === '', '…')` reading `playwright.config.ts use.baseURL = process.env.CDS_E2E_BASE_URL ?? undefined`. Bare `just frontend-e2e` exits 1-skipped (no cluster needed); full assertion path runs only under `frontend-pipeline-smoke` with `CDS_E2E_BASE_URL=http://127.0.0.1:${bff_port}` exported.                                                                                                       |
+| Timeout             | 6 min for the full pipeline (Kimina recheck typically 60–90 s).                                                                                                                                                                                                                                                                                                                                                          |
+| Assertions          | Every `stage-badge-*` `data-status=ok`; `sat-pill` `data-state=unsat`; `recheck-pill` `data-state=ok`; `[data-testid=muc-entry]` count == 2; `[data-testid=ast-node][data-muc=true]` count == 2; `[data-testid=octagon-svg]` visible; click first MUC entry → corresponding AST node receives `cds-pulse` class within the keyframe window (re-click triggers the pulse a second time via the `pulseToken` bump). |
+
+**New Justfile recipe `frontend-pipeline-smoke`:**
+
+Mirrors `frontend-bff-smoke` (9.2) but exits the Playwright path
+rather than the inline Python curl driver. Pre-flight bins +
+Kimina URL + bun → `cargo build cds-kernel-service` → `cd frontend
+&& bun install && bun run build && bunx playwright install chromium`
+→ `dapr-cluster-up` + curl-poll placement/scheduler `/healthz` →
+allocate 9 ports via inline `python3 -c socket` (4 per sidecar + 1
+BFF) → `nohup`-spawn cds-harness sidecar + cds-kernel sidecar +
+adapter-node BFF (`bun frontend/build/index.js` with `DAPR_HTTP_PORT_*`
++ `PORT` + `HOST` env) → wait both app `/healthz` + both daprd
+`/v1.0/healthz` + BFF `/` → `bunx playwright test e2e/pipeline.e2e.ts`
+with `CDS_E2E_BASE_URL=http://127.0.0.1:${bff_port}` →
+`trap`-driven reverse-teardown (BFF → kernel → harness → cluster) on
+every exit path. README "Running Phase 0 end-to-end" section points
+operators at it.
+
+**PHASE flip:**
+
+| Locus                                            | Before | After | Notes                                                                                                                                                                |
+| ------------------------------------------------ | ------ | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/kernel/src/lib.rs::PHASE`                | `0`    | `1`   | Constant + docstring rewritten ("Phase marker. Bumped 0 → 1 at Task 9.3 close-out…"). Test `phase_zero_is_active` renamed to `phase_one_is_active` asserting `== 1`. |
+| `python/cds_harness/__init__.py::PHASE`          | `0`    | `1`   | Constant + module docstring rewritten ("Phase 0 closed at Task 9.3…"). Test `python/tests/test_smoke.py::test_phase_zero_is_active` → `test_phase_one_is_active`.   |
+
+The flip is the contractually-load-bearing close-out signal per
+Plan §10 step 7 + ADR-022 §9. Doing it inside 9.3 (rather than
+deferring to a Phase 1 setup session) keeps the marker semantically
+aligned with what is actually demonstrable: as of this commit, an
+operator with the prerequisites can `just frontend-pipeline-smoke`
+and watch the canonical contradictory-bound flow exit through the
+live UI in ≤ 6 min.
+
+**README `## 6. Quickstart` updates:**
+
+A new "Running Phase 0 end-to-end" subsection enumerates the two
+close-out gates (`frontend-bff-smoke` for 9.2's wire-contract gate
+and `frontend-pipeline-smoke` for 9.3's visualizer gate) plus the
+interactive `frontend-dev` workflow. The Phase 0 roadmap table is
+flipped to all-DONE with the explicit "Phase 0 closed at Task 9.3"
+paragraph immediately below.
+
+**Why hand-rolled SVG visualizers (no D3 / Plotly / svelte-flow)?**
+ADR-022 §6 closed this. The Phase 0 visualizer surface is small (one
+recursive tree + one 2D box + one list + one banner) and the per-shape
+SVG is one-to-one with the data it renders — a chart library would
+hide the schema-rendering relationship behind a configuration object
+and add a runtime dependency that any future Phase 1 design system
+would have to replace anyway. Reopen if Phase 1+ adds heat-maps,
+force-directed graphs, or anything where layout cost dominates.
+
+**Why `<svelte:self>` is gone — self-import recursion.**
+Svelte 5 deprecates `<svelte:self>` in favour of explicit self-import
+(`import Self from './AstTree.svelte'` + `<Self ... />`). The diff is
+pure ergonomics: AstTree only renders itself recursively for
+`children(node)` and the self-import is one extra line. Compiling
+under the deprecation warning would have been a sustained typecheck
+nuisance; the explicit form is also the documented forward-compatible
+shape.
+
+**Why `.svelte.ts` for the highlight store, not `.ts`.**
+Svelte 5 forbids `$state` + `$derived` runes outside `.svelte` and
+`.svelte.ts` files. The store needs runes (a writable + reactive
+`highlightedSpan` and a monotonic `pulseToken`); a `.ts` file would
+fail compilation on the first `$state(...)` call. Renaming to
+`.svelte.ts` is the documented escape hatch — the file is still
+imported by ESM `import { ... } from '$lib/stores/highlight.svelte'`
+(the `.ts` is dropped at the import site as usual under
+`@sveltejs/kit`'s default resolver).
+
+**Why a `pulseToken` rune, not a per-call animation prop.**
+The pulse needs to retrigger when the *same* MUC entry is clicked a
+second time. Listing only `highlightedSpan` would cause the second
+click to be a no-op (Svelte runes deduplicate equal-value writes).
+A monotonic `pulseToken` decouples the "what is highlighted" channel
+from the "should we animate now" channel — the AstTree's `$effect`
+reads `getPulseToken()` and unconditionally triggers the keyframe via
+the `el.classList.remove(...) → offsetWidth → add(...)` DOM trick,
+which is the canonical Web-API way to re-fire a single CSS animation
+on the same element.
+
+**Why the Playwright self-skip pattern.**
+Bare `just frontend-e2e` (with no cluster, no daprd, no Kimina) must
+exit clean — that gate is part of `frontend-test`'s contract for CI
+and pre-commit. The full assertion path requires the live cluster +
+Kimina, which is operator-runnable only. Self-skipping on
+`baseURL === ''` lets one test file serve both modes: the single
+file's `test.skip(...)` short-circuits when `CDS_E2E_BASE_URL` is
+unset; `frontend-pipeline-smoke` exports the env var and the same
+file runs the full assertions. A separate `*.smoke.e2e.ts` would
+duplicate the test body for no win.
+
+**Why adapter-node entry, not Vite preview.**
+`bun run preview` invokes `vite preview`, which serves only static
+client-side assets — `+server.ts` SSR routes don't run. The
+production-shaped runnable for `@sveltejs/adapter-node` is
+`node frontend/build/index.js` (here: `bun frontend/build/index.js`).
+ADR-022 §3's reference to "preview" was the SvelteKit-vernacular sense
+("the served build, not the dev server"); the Justfile lands on the
+adapter-node entry. Inlined the rationale in the `frontend-pipeline-
+smoke` recipe header.
+
+**Why the PHASE flip lands here, not in a Phase 1 setup session.**
+Plan §10 step 7 schedules the flip on Task 9 close-out. Deferring to
+a Phase 1 plan-restructure session would leave the marker stale across
+the migration window (any pre-Phase-1 audit reading the constants
+would see `PHASE == 0` while every Phase 0 task in the table is
+DONE). Flipping at 9.3 is the smallest atomic edit that keeps the
+marker semantically truthful — Phase 0 deliverables are demonstrable
+and Phase 1 work has not yet started.
+
+**Final 9.3 regression gate (all green):**
+
+| Gate                                                    | Result                                                                                                         |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `cargo test --workspace`                                | **153 pass** (unchanged from 9.2 — only PHASE constant + its in-crate test name changed)                       |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean                                                                                                          |
+| `cargo fmt --all -- --check`                            | clean                                                                                                          |
+| `uv run pytest`                                         | 95 pass + 1 skip (Kimina-gated)                                                                                |
+| `uv run ruff check .`                                   | clean                                                                                                          |
+| `just frontend-typecheck`                               | 348 files / 0 errors / 0 warnings                                                                              |
+| `just frontend-lint`                                    | clean                                                                                                          |
+| `just frontend-test`                                    | 5/5 (parity tripwire unchanged)                                                                                |
+| `just frontend-build`                                   | clean (server entries unchanged + `_page.svelte.js` 24.84 kB / gzip 6.08 kB — full visualizer composition)     |
+| `just frontend-e2e`                                     | 1 skipped (self-skip when `CDS_E2E_BASE_URL` unset, by design)                                                 |
+| `just env-verify`                                       | exit 0                                                                                                          |
+| `just frontend-pipeline-smoke` pre-flight               | surfaces a clear actionable error when `CDS_KIMINA_URL` is unset (matches `dapr-pipeline` + `frontend-bff-smoke` shape) |
+| Manual `bun run preview` smoke                          | `/` returns 200 with all key tokens (`Pipeline visualizer`, `run-button`, `sat-pill`, `stage-badge-ingest`)    |
+
+ADR-023 records the close-out architectural decisions (visualizer
+composition, self-import recursion, `.svelte.ts` rune store, Playwright
+self-skip pattern, adapter-node entry, PHASE flip semantics). With 9.3
+green, **Phase 0 is closed**; the next checklist action is a Phase 1
+plan restructure (FHIR streaming + distributed cloud + ZKSMT per
+Plan §1).
 
 ## Session 2026-05-01 — Task 9.2 close-out (TS schema mirrors + BFF + canonical smoke)
 

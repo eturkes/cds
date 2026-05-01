@@ -14,8 +14,8 @@ def test_harness_id_is_stable() -> None:
     assert HARNESS_ID == "cds-harness"
 
 
-def test_phase_zero_is_active() -> None:
-    assert PHASE == 0, "phase marker must remain 0 until Task 5 lands"
+def test_phase_one_is_active() -> None:
+    assert PHASE == 1, "phase marker advances to 1 at Task 9.3 close-out (UI round-trip)"
 
 
 def test_version_string_shape() -> None:
