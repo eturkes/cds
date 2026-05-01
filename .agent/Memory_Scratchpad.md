@@ -6,10 +6,174 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 9.1 — Frontend foundation. Scaffolded `frontend/` from a `.gitkeep`-only directory via the modern `bunx sv create --template minimal --types ts --add eslint prettier tailwindcss=plugins:none vitest=usages:unit playwright --install bun frontend` (Svelte CLI v0.15.2 — the successor to the deprecated `npm create svelte@latest`). Resolved versions: SvelteKit 2.57.0 + Svelte 5.55.2 (runes mode forced repo-wide via `svelte.config.js`) + Vite 8.0.7 + TypeScript 6.0.2 + Tailwind 4.2.2 (via `@tailwindcss/vite` plugin — no `tailwind.config.js`, no `postcss.config.js`, Lightning CSS handles vendor prefixes) + ESLint 10.2.0 (flat config) + Prettier 3.8.1 + Playwright 1.59.1 + Vitest 4.1.5 + svelte-check 4.4.6. All resolved versions ≥ ADR-022 §2 minimums per Plan §10 step 5 modernity persistence (ESLint 10 ≥ 9, Vite 8 ≥ 7, TS 6 ≥ 5.7, Vitest 4 ≥ 3). Locked-in modifications post-scaffold: swapped `@sveltejs/adapter-auto` (no Phase 0 hosted environment to detect) for `@sveltejs/adapter-node` 5.5.4 so `bun run build` emits a non-empty `frontend/build/` (BFF in 9.2 needs server-side `+server.ts` routes); flipped the test scripts from `npm run` chains to `bun run` chains (`test:unit` = `vitest run`, `test:e2e` = `playwright install chromium && playwright test`); added `noUncheckedIndexedAccess` + `noImplicitOverride` to `tsconfig.json`; replaced the demo SvelteKit homepage with a single `+page.svelte` rendering "Phase 0 — Neurosymbolic CDS" placeholder; deleted the demo `/demo` routes + the vitest-examples + the `.vscode/` scaffold dir; wrote one Vitest tombstone (`src/lib/tombstone.spec.ts` — `expect(1+1).toBe(2)`) and one Playwright tombstone (`e2e/tombstone.e2e.ts` — same shape, no `page` fixture) with a `webServer`-less `playwright.config.ts` (Chromium-only project, headless, `testDir: 'e2e'`, `testMatch: '**/*.e2e.ts'`); committed `bun.lock` (text-based; modern bun 1.3.x emits `bun.lock`, not the older `bun.lockb`); added `frontend/bunfig.toml` (registry pinned + telemetry off); added Justfile recipe block `frontend-*` (install / dev / build / preview / lint / format / typecheck / test / e2e — every recipe a single-line `cd frontend && bun run <script>`); flipped the aggregator targets `lint` / `test` / `build` from `ts-*` to `frontend-*` and `run-frontend` from `ts-dev` to `frontend-dev`; added five new entries to root `.gitignore` for Playwright + Vite-timestamp artifacts. Final 9.1 gate: `just frontend-build` exits 0 with `frontend/build/{client,server,handler.js,index.js,env.js,shims.js}` populated; `just frontend-typecheck` 322 files / 0 errors / 0 warnings; `just frontend-lint` clean (Prettier check + ESLint flat); `just frontend-test` 1/1 pass (Vitest tombstone); `just frontend-e2e` 1/1 pass (Playwright tombstone, Chromium auto-fetched into `~/.cache/ms-playwright/`); `cargo test --workspace` 153 pass (unchanged from 8.4b); `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all -- --check` clean; `uv run pytest` 95 pass + 1 skip (Kimina-gated); `uv run ruff check .` clean; `just env-verify` exit 0. Frontend is fully wired but consumes no live backend yet — that lands in 9.2.
-- **Next up:** Task 9.2 — TS schema mirrors + BFF + canonical smoke. Six TS schema modules under `frontend/src/lib/schemas/` mirroring the Phase 0 Rust source-of-truth (`telemetry.ts` + `onion.ts` + `smt.ts` + `verdict.ts` + `trace.ts` + `recheck.ts` + `pipeline.ts` + `index.ts` barrel) + SvelteKit `+server.ts` BFF routes (`/api/{ingest,translate,deduce,solve,recheck}`) proxying through daprd at `http://127.0.0.1:${process.env.DAPR_HTTP_PORT_*}/v1.0/invoke/<app-id>/method/v1/<path>` with HTTP 422 `{error,detail}` lift to a typed `BackendError` exception + per-stage `console.info` tracing + a `vitest` schema parity tripwire (`frontend/src/lib/schemas/parity.test.ts`) decoding every `crates/schemas/tests/fixtures/*.json` golden through the TS parsers + a new `frontend-bff-smoke` Justfile recipe driving the canonical `contradictory-bound` pipeline through the BFF against a live cluster. **No visualizers in 9.2.** ADR-022 §3 captures the contract.
+- **Last completed:** Task 9.2 — TS schema mirrors + BFF + canonical smoke. Closed the wire-contract-and-transport axis of ADR-022 §3. Eight TS schema modules under `frontend/src/lib/schemas/` (`parse.ts` shape primitives + `telemetry.ts` + `onion.ts` + `smt.ts` + `verdict.ts` + `trace.ts` + `recheck.ts` + `pipeline.ts` + `index.ts` barrel) hand-mirror the Phase 0 Rust source-of-truth (`crates/kernel/src/schema/{telemetry,onionl,smt,verification}.rs` + `crates/kernel/src/deduce/mod.rs` + `crates/kernel/src/service/handlers.rs`) plus the workflow `PipelineInput` (`python/cds_harness/workflow/pipeline.py`) plus the in-band `PipelineEnvelope` (8.4b's six-key Workflow output). Each schema module carries a JSDoc cross-reference back to its source-of-truth path. Five SvelteKit `+server.ts` BFF routes (`src/routes/api/{ingest,translate,deduce,solve,recheck}/+server.ts`) proxy through daprd via the new `$lib/server/dapr.ts` helper (resolves `DAPR_HTTP_PORT_HARNESS` / `DAPR_HTTP_PORT_KERNEL` at request time, defaults 3500 / 3501) and lift HTTP 422 `{error, detail}` envelopes into typed `BackendError` instances (re-emitted with the original status). Per-stage `console.info({stage, app_id, path, status, duration_ms})` matches the harness's `tracing` shape. Vitest parity tripwire `frontend/src/lib/schemas/parity.test.ts` decodes the four core golden fixtures (`tests/golden/{clinical_telemetry_payload,onionl_ir_tree,smt_constraint_matrix,formal_verification_trace}.json`) through the TS parsers and asserts strict-deep-equality plus a coverage check that every disk fixture is registered. Tombstone `tombstone.spec.ts` deleted; `lib/index.ts` now re-exports the schemas barrel. New Justfile recipe `frontend-bff-smoke` (operator-runnable, gated on `.bin/dapr` + slim runtime + `.bin/{z3,cvc5}` + `CDS_KIMINA_URL` + `bun`) brings up cluster + harness + kernel sidecars on freshly-allocated ports + `bun frontend/build/index.js` (adapter-node) on a picked port, then runs an inline Python driver that POSTs the canonical `data/sample/icu-monitor-02.json` + `data/guidelines/contradictory-bound.{txt,recorded.json}` through `/api/{ingest,translate,deduce,solve,recheck}` and asserts `trace.sat == false`, `len(trace.muc) >= 2`, `recheck.ok == true`, `recheck.custom_id == 'cds-bff-smoke'`. Trap-driven reverse-teardown on every exit path. Final 9.2 gate: `just frontend-typecheck` 343 files / 0 errors / 0 warnings; `just frontend-lint` clean; `just frontend-test` 5/5 pass (4 parity + 1 coverage); `just frontend-build` clean (server entries: `_server.ts.js` chunks for `api/{ingest,translate,deduce,solve,recheck}`); `cargo test --workspace` 153 pass (unchanged from 9.1); `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all -- --check` clean; `uv run pytest` 95 pass + 1 skip (Kimina-gated); `uv run ruff check .` clean; `just env-verify` exit 0; `just frontend-bff-smoke` pre-flight surfaces a clear actionable error when `CDS_KIMINA_URL` is unset (matches `dapr-pipeline`'s shape). Visualizers + Playwright + PHASE flip defer to 9.3.
+- **Next up:** Task 9.3 — Visualizers + Phase 0 close-out. Four hand-rolled Svelte 5 components under `frontend/src/lib/components/` (`AstTree.svelte` recursive-svelte:self with per-node collapse + source-span tooltip + MUC highlight, `Octagon.svelte` SVG half-plane rendering with selectable canonical-vital projection, `MucViewer.svelte` cross-component highlight via `frontend/src/lib/stores/highlight.ts` `$state` rune + `animate-pulse`, `VerificationTrace.svelte` sat/unsat pill banner + Lean recheck pill + Alethe proof preview) + a new single-page composition replacing the 9.1 placeholder (`+page.svelte` driving `/api/ingest → /api/translate → /api/deduce → /api/solve → /api/recheck` in sequence with per-stage state in a single `$state` rune) + Playwright E2E (`e2e/pipeline.e2e.ts` against `frontend-preview` + a live cluster) + the Phase 0 → Phase 1 marker flip on `cds_harness.__init__.PHASE` and the kernel's `PHASE` constant + README touch-up + Plan §8 row 9.3 close-out. ADR-022 §4 + §10 captures the contract; if scope explodes, split into 9.3a/9.3b mid-flight per the established 8.3 → 8.3b → 8.3b2 pattern. **Phase 0 closes at 9.3.**
 
 > **Task 8 was split** into 8.1–8.4 on 2026-04-30 (ADR-016) because a monolithic Dapr-orchestration task repeatedly exhausted a single context window. **Task 8.3 was further split** into 8.3a / 8.3b on 2026-04-30 (ADR-018) because the kernel service binds three subprocess pipelines (`deduce`, `solve`, `recheck`) behind one axum app and the foundation + endpoint plumbing each warrant their own session. **Task 8.3b was further split** into 8.3b1 / 8.3b2 on 2026-05-01 (ADR-019) because the original 8.3b scope (three handlers + their `IntoResponse` impls + comprehensive unit tests + `AppState` wiring + a Dapr-driven cargo integration test driving all three endpoints through daprd) again exceeded a single context window. **Task 8.3b2 was further split** into 8.3b2a / 8.3b2b on 2026-05-01 (ADR-020) because the original 8.3b2 scope (`AppState` introduction + env-driven option resolution + handler refactor onto `axum::extract::State` + shared smoke helpers + three daprd-driven cargo integration tests) again exceeded a single context window — and the external-dependency gate of solve/recheck (`.bin/z3`, `.bin/cvc5`, `CDS_KIMINA_URL`) cleanly separates from the dependency-free `/v1/deduce` smoke + the foundation refactor. **Task 8.4 was further split** into 8.4a / 8.4b on 2026-05-01 (ADR-021) because the original 8.4 scope (placement+scheduler bring-up + production SIGTERM-first warden escalation + readiness gate flip + Python `cds_harness.workflow` package + Dapr Python SDK introduction + aggregated envelope + per-stage tracing + `just dapr-pipeline` + end-to-end pytest smoke) again exceeded a single context window — and the Rust-foundation vs. Python-composition boundary cleanly separates the cluster bring-up + warden refactor from the Workflow harness composition. **Task 9 was further split** into 9.1 / 9.2 / 9.3 on 2026-05-01 (ADR-022) because the original Task 9 scope (first-time JS/TS toolchain introduction + six TS schema mirrors + SvelteKit `+server.ts` BFF + canonical happy-path smoke + four Svelte 5 visualizer components + Playwright + the Phase 0 → Phase 1 marker flip) was structurally larger than every prior Phase 0 task and the natural three-axis boundary (toolchain-foundation / wire-contract+transport / visualizers+close-out) cleanly separates the green-field scaffold from the BFF contract from the UI close-out. Sub-task progression is strict: `8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9.1 < 9.2 < 9.3`.
+
+## Session 2026-05-01 — Task 9.2 close-out (TS schema mirrors + BFF + canonical smoke)
+
+Closed the wire-contract-and-transport axis of ADR-022 §3. The frontend
+now consumes the live Phase 0 backend through five typed `+server.ts`
+proxy routes against daprd; six wire-schema modules + an envelope type
+sit under `frontend/src/lib/schemas/` with a Vitest parity tripwire
+that decodes every cargo-emitted golden fixture through the TS parsers.
+A new `frontend-bff-smoke` Justfile recipe drives the canonical
+`contradictory-bound` flow end-to-end through the BFF against a live
+cluster. **No visualizers yet** — those land in 9.3.
+
+**Schema mirrors (`frontend/src/lib/schemas/`):**
+
+| File             | Mirror of                                                           | Notes                                                                                                                                                         |
+| ---------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `parse.ts`       | (helpers)                                                           | `SchemaParseError` + `asObject` / `asString` / `asNumber` / `asInt` / `asBool` / `asArray` / `asRecord` / `asNullable` / `asLiteral` + `sortRecordKeys`.       |
+| `telemetry.ts`   | `crates/kernel/src/schema/telemetry.rs`                             | `ClinicalTelemetryPayload` + `TelemetrySource` + `TelemetrySample` + `DiscreteEvent`. `sortVitalsKeys()` restores BTreeMap key order on outbound payloads.    |
+| `onion.ts`       | `crates/kernel/src/schema/onionl.rs`                                | `OnionLIRTree` + `OnionLNode` discriminated union (`scope` / `relation` / `indicator_constraint` / `atom`) + `Term` (`variable` / `constant`) + `SourceSpan`. |
+| `smt.ts`         | `crates/kernel/src/schema/smt.rs`                                   | `SmtConstraintMatrix` + `LabelledAssertion`. `provenance: string \| null` (Rust `Option<String>` without `skip_serializing_if`).                              |
+| `verdict.ts`     | `crates/kernel/src/deduce/mod.rs`                                   | `Verdict` + `BreachSummary` (nine clinical conditions) + `VitalInterval`.                                                                                     |
+| `trace.ts`       | `crates/kernel/src/schema/verification.rs`                          | `FormalVerificationTrace` (`sat` + `muc[]` + `alethe_proof: string \| null`).                                                                                  |
+| `recheck.ts`     | `crates/kernel/src/service/handlers.rs::LeanRecheckWire`            | `LeanRecheckWire` + `LeanMessageWire` + `LeanSeverityWire` (`info \| warning \| error`).                                                                       |
+| `pipeline.ts`    | `python/cds_harness/workflow/pipeline.py` + 8.4b envelope shape      | `PipelineInput` + `PipelineEnvelope` (`{ payload, ir, matrix, verdict, trace, recheck }`).                                                                    |
+| `index.ts`       | (barrel)                                                            | Re-exports types + parsers + `parse.ts` helpers.                                                                                                              |
+| `parity.test.ts` | (vitest)                                                            | Decodes `tests/golden/*.json` through TS parsers; `expect(parsed).toStrictEqual(raw)` per fixture + a coverage check.                                          |
+
+Each parser walks an `unknown` input and rebuilds an output containing
+**only** the documented fields, so the parity tripwire fails fast in
+either drift direction (Rust adds a field → TS drops it → mismatch;
+TS expects a field Rust no longer emits → `SchemaParseError`).
+
+**BFF transport (`frontend/src/lib/server/`):**
+
+| File         | Role                                                                                                                                                                                                         |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `errors.ts`  | `BackendError` class wrapping `(status, code, detail)` — preserves the upstream daprd 422 envelope shape end-to-end.                                                                                          |
+| `dapr.ts`    | `invokeHarness(path, body, stage)` + `invokeKernel(path, body, stage)` — POST through `http://127.0.0.1:${DAPR_HTTP_PORT_*}/v1.0/invoke/<app-id>/method/<path>`; `console.info` per stage `{stage, app_id, path, status, duration_ms}` (JSON-shaped to match harness `tracing`); `backendErrorResponse(e)` re-emits the original `{error, detail}` envelope at the original status. Defaults: `DAPR_HTTP_PORT_HARNESS=3500` / `DAPR_HTTP_PORT_KERNEL=3501` when env unset; ports re-read at request time so a `frontend-bff-smoke` session sees fresh allocations. |
+
+**Routes (`frontend/src/routes/api/`):**
+
+| Route             | Body                                                                | Returns                                            |
+| ----------------- | ------------------------------------------------------------------- | -------------------------------------------------- |
+| `/api/ingest`     | `{format: 'json', envelope}` or `{format: 'csv', csv_text, meta?}` | `ClinicalTelemetryPayload` (BFF unwraps harness's `{payload}` envelope; `sortVitalsKeys` restores BTreeMap order on emission). |
+| `/api/translate`  | `{doc_id, text, root, logic?, smt_check?}`                          | `{ir, matrix}` (BFF rebrands harness's `tree → ir` to match the 8.4b workflow envelope's field naming).                       |
+| `/api/deduce`     | `{payload: ClinicalTelemetryPayload, rules?}`                       | `Verdict`                                                                                                                       |
+| `/api/solve`      | `{matrix: SmtConstraintMatrix, options?}`                           | `FormalVerificationTrace`                                                                                                       |
+| `/api/recheck`    | `{trace: FormalVerificationTrace, options?}`                        | `LeanRecheckWire`                                                                                                               |
+
+Every route file is the same six-line shape: `await request.json()` →
+`invoke{Harness,Kernel}(...)` → parse the response through the matching
+TS schema → `json(...)` it back. Errors are `instanceof BackendError`-
+caught and re-emitted via `backendErrorResponse(e)`; anything else
+re-throws (SvelteKit's default machinery returns 500).
+
+**Justfile addition:**
+
+| Recipe / variable          | Role                                                                                                                                                                                  |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DAPR_BFF_SMOKE_RECORDED`  | Default `data/guidelines/contradictory-bound.recorded.json` — pre-formalised OnionL root node fed to `/api/translate` (the harness's translate endpoint validates source-spans against `text` + uses `_InlineAdapter` to return the supplied root unchanged). |
+| `frontend-bff-smoke`       | Pre-flight bins + Kimina URL + bun → `cargo build cds-kernel-service` → `cd frontend && bun install && bun run build` → `dapr-cluster-up` + curl-poll placement/scheduler `/healthz` → allocate 9 ports via inline `python3 -c socket` (4 per sidecar + 1 BFF) → `nohup`-spawn cds-harness sidecar (`uv run python -m cds_harness.service`) + cds-kernel sidecar (`target/debug/cds-kernel-service`) + adapter-node BFF (`bun frontend/build/index.js` with `DAPR_HTTP_PORT_HARNESS` / `DAPR_HTTP_PORT_KERNEL` / `PORT` / `HOST` env) → wait both app `/healthz` + both daprd `/v1.0/healthz` + BFF `/` → run inline Python driver POSTing five `/api/*` routes against the canonical `contradictory-bound` fixture → assert `trace.sat is False` / `len(trace.muc) >= 2` / `recheck.ok is True` / `recheck.custom_id == 'cds-bff-smoke'` → `trap`-driven reverse-teardown of BFF → kernel → harness → cluster on every exit path. |
+
+The Python driver lives inline in the Justfile as a `<<'PY'` heredoc
+(no escaping needed — `'PY'` quotes prevent shell interpolation; the
+script reads env vars via `os.environ`). Mirrors the shape of
+`dapr-pipeline` (8.4b) but exits the curl-on-BFF path rather than the
+headless Workflow path. Fail-loud pre-flight when any external
+dependency is missing — same shape as the existing `dapr-pipeline` and
+`test_dapr_pipeline.py` skip messages.
+
+**Why hand-written TS, not `schemars` codegen?**
+ADR-022 §8 closed this. Phase 0 has six wire shapes plus an envelope
+type. A `schemars` JSON-Schema export adds (a) a Rust-side build
+dependency on `schemars`; (b) a TS-side codegen step (e.g.
+`json-schema-to-typescript`) wired into `frontend-build`; (c) a
+generated-files-in-VCS policy decision. For seven hand-mirrored types
+plus the parity tripwire, the codegen overhead does not pay back.
+Reopen at `>~12` schemas or when an external consumer needs the schema
+export.
+
+**Why `tests/golden/*.json`, not `crates/schemas/tests/fixtures/*.json`
+(ADR-022 §3 nominal path)?**
+The actual Phase 0 golden fixtures live at the top-level
+`tests/golden/` directory (committed alongside Task 2's schema work,
+not under `crates/schemas/tests/fixtures/` as ADR-022 §3 referred to).
+The parity tripwire reads from the actual on-disk path. No schema
+crate exists yet (per the Phase 0 single-crate `crates/kernel/`
+layout); inlined the cross-reference in the parity test's docstring
+and the schema modules' JSDoc headers. ADR amendment not needed — the
+inherited reference was speculative; the real fixture path is
+unambiguous.
+
+**Why Workflow deferred (per ADR-022 §7)?**
+The 8.4b `cds_harness.workflow` package is a CLI orchestrator over a
+gRPC `DaprWorkflowClient`; it is not an HTTP endpoint that JS can call
+directly. Phase 0 BFF wants per-stage round-trip latency so the 9.3
+UI can incrementally surface ingest → AST → matrix → verdict → trace
+→ recheck as each stage settles; a Workflow-shaped envelope returns
+all stages at once. Direct daprd service-invocation through the five
+`+server.ts` routes supports both incremental and aggregated UX while
+keeping the BFF transport policy uniform with the rest of the Phase 0
+service surface (constraint **C6**). A Phase 1 `/api/pipeline/workflow`
+route via `@dapr/dapr` JS SDK is the obvious follow-up when batch /
+headless pipeline runs need a UI hook.
+
+**Adapter-node entrypoint, not Vite preview.**
+`bun run preview` runs `vite preview`, which is meant for static
+client-only sites; for `@sveltejs/adapter-node` builds the runnable is
+`frontend/build/index.js` — a Node HTTP server. The smoke recipe
+spawns it via `bun frontend/build/index.js` with `PORT` + `HOST` +
+`DAPR_HTTP_PORT_*` env so the BFF reads daprd ports at request time.
+`frontend-preview` is preserved unchanged as a 9.3 Playwright
+preview-build hook (Vite's preview is fine for the tombstone +
+visualizer demo at 4173).
+
+**`tombstone.spec.ts` deleted.** Replaced by `parity.test.ts` per
+ADR-022 §3. The tombstone served only to confirm the Vitest runner
+was wired (9.1's gate); 9.2's parity tripwire is the real test.
+
+**Final regression gate (this session):**
+
+- `just env-verify` → exit 0 (`uv 0.11.8` + `cargo 1.95` + `rustc 1.95` + `bun 1.3.13` + `just 1.50` + `git 2.47` + `curl 8.14` + `.bin/{cvc5,dapr,z3}` populated; `.bin/.dapr/` slim runtime present).
+- `just frontend-typecheck` → 343 files / 0 errors / 0 warnings (svelte-check 4.4.6 against tsconfig strict + `noUncheckedIndexedAccess` + `noImplicitOverride`).
+- `just frontend-lint` → clean (Prettier 3.8.1 `--check` + ESLint 10.2.0 flat config).
+- `just frontend-test` → 5/5 pass (4 parity round-trip cases + 1 coverage check). 1 test file. `vitest run` ~270 ms.
+- `just frontend-build` → clean. 5 server-route chunks emitted (`api/ingest/_server.ts.js` = 2.94 kB, `api/translate/_server.ts.js` = 4.38 kB, `api/deduce/_server.ts.js` = 2.21 kB, `api/solve/_server.ts.js` = 1.48 kB, `api/recheck/_server.ts.js` = 1.99 kB).
+- `cargo test --workspace` → **153 pass** (unchanged from 9.1; no Rust touchpoints). One transient daprd readiness flake on `dapr_sidecar_drives_healthz_through_service_invocation` (re-ran cleanly; pre-existing flake — not a 9.2 regression).
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean.
+- `cargo fmt --all -- --check` → clean.
+- `uv run pytest` → 95 pass + 1 skip (`test_dapr_workflow_drives_contradictory_pipeline` — Kimina-gated, as designed).
+- `uv run ruff check .` → clean.
+- `just frontend-bff-smoke` → pre-flight gate surfaces a clear actionable error message when `CDS_KIMINA_URL` is unset (matches `dapr-pipeline`'s shape). Full live-cluster validation runs when an operator has Kimina + `.bin/{dapr,z3,cvc5}` + slim runtime present.
+- `just --list` → shows `frontend-bff-smoke` with the close-out comment.
+
+**Files added / modified:**
+
+```
+A  frontend/src/lib/schemas/parse.ts
+A  frontend/src/lib/schemas/telemetry.ts
+A  frontend/src/lib/schemas/onion.ts
+A  frontend/src/lib/schemas/smt.ts
+A  frontend/src/lib/schemas/verdict.ts
+A  frontend/src/lib/schemas/trace.ts
+A  frontend/src/lib/schemas/recheck.ts
+A  frontend/src/lib/schemas/pipeline.ts
+A  frontend/src/lib/schemas/index.ts
+A  frontend/src/lib/schemas/parity.test.ts
+A  frontend/src/lib/server/errors.ts
+A  frontend/src/lib/server/dapr.ts
+A  frontend/src/routes/api/ingest/+server.ts
+A  frontend/src/routes/api/translate/+server.ts
+A  frontend/src/routes/api/deduce/+server.ts
+A  frontend/src/routes/api/solve/+server.ts
+A  frontend/src/routes/api/recheck/+server.ts
+M  frontend/src/lib/index.ts                 # barrel re-exports schemas
+D  frontend/src/lib/tombstone.spec.ts        # superseded by parity.test.ts
+M  Justfile                                  # +frontend-bff-smoke + DAPR_BFF_SMOKE_RECORDED
+M  .agent/Plan.md                            # 9.2 row → DONE
+M  .agent/Memory_Scratchpad.md               # this block + active-task pointer
+```
+
+No Rust / Python source touched. Cargo + pytest baselines stay green.
+
+
 
 ## Session 2026-05-01 — Task 9.1 close-out (Frontend foundation)
 

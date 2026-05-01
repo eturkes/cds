@@ -825,6 +825,211 @@ frontend-e2e:
     cd frontend && bun run test:e2e
 
 # =============================================================================
+# Frontend BFF canonical smoke (Task 9.2)
+# =============================================================================
+# `just frontend-bff-smoke` brings up placement+scheduler, both Phase 0
+# daprd sidecars (cds-harness + cds-kernel) on freshly-allocated ports,
+# plus the SvelteKit BFF as a compiled adapter-node server, then drives
+# `/api/{ingest,translate,deduce,solve,recheck}` end-to-end against the
+# canonical `data/guidelines/contradictory-bound.{txt,recorded.json}`
+# fixture and asserts `trace.sat == false` + `recheck.ok == true`. Mirrors
+# `dapr-pipeline` but exits the curl-on-BFF path rather than the headless
+# Workflow path. Per ADR-022 §3.
+
+DAPR_BFF_SMOKE_RECORDED := env_var_or_default('DAPR_BFF_SMOKE_RECORDED', 'data/guidelines/contradictory-bound.recorded.json')
+
+# End-to-end Phase 0 BFF smoke (Task 9.2 close-out gate). Requires .bin/dapr + slim runtime + .bin/{z3,cvc5} + reachable $CDS_KIMINA_URL + bun in $PATH.
+frontend-bff-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo="{{ justfile_directory() }}"
+    dapr_cli="$repo/.bin/dapr"
+    daprd="{{DAPR_DAPRD}}"
+    [ -x "$dapr_cli" ] && [ -x "$daprd" ] || \
+        { echo "dapr CLI / slim runtime missing — run \`just fetch-dapr\`"; exit 1; }
+    [ -x "$repo/.bin/z3" ] && [ -x "$repo/.bin/cvc5" ] || \
+        { echo "Z3 / cvc5 missing — run \`just fetch-bins\`"; exit 1; }
+    [ -n "${CDS_KIMINA_URL:-}" ] || \
+        { echo "CDS_KIMINA_URL unset — start Kimina (\`python -m server\` from the project-numina/kimina-lean-server checkout) and re-run with that URL exported."; exit 1; }
+    command -v bun >/dev/null 2>&1 || \
+        { echo "bun not found — install bun (https://bun.sh) before running this recipe."; exit 1; }
+
+    # Pre-build kernel + frontend so both sidecars + BFF start fast.
+    cargo build --bin cds-kernel-service
+    ( cd "$repo/frontend" && bun install >/dev/null && bun run build >/dev/null )
+
+    mkdir -p target
+
+    py_pid="target/bff-smoke-harness.pid";  py_log="target/bff-smoke-harness.log"
+    rs_pid="target/bff-smoke-kernel.pid";   rs_log="target/bff-smoke-kernel.log"
+    bff_pid="target/bff-smoke-bff.pid";     bff_log="target/bff-smoke-bff.log"
+
+    cleanup() {
+        for pidfile in "$bff_pid" "$rs_pid" "$py_pid"; do
+            if [ -f "$pidfile" ]; then
+                pid=$(cat "$pidfile")
+                if kill -0 "$pid" 2>/dev/null; then
+                    kill -TERM "$pid" 2>/dev/null || true
+                    for _ in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+                    if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
+                fi
+                rm -f "$pidfile"
+            fi
+        done
+        just dapr-cluster-down >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT INT TERM
+
+    # 1. Cluster (placement + scheduler).
+    just dapr-cluster-up
+    for _ in $(seq 1 60); do
+        if curl -sf "http://127.0.0.1:{{DAPR_PLACEMENT_HZ}}/healthz" >/dev/null; then break; fi
+        sleep 0.5
+    done
+    for _ in $(seq 1 60); do
+        if curl -sf "http://127.0.0.1:{{DAPR_SCHEDULER_HZ}}/healthz" >/dev/null; then break; fi
+        sleep 0.5
+    done
+
+    pick_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
+    py_app_port=$(pick_port); py_http=$(pick_port); py_grpc=$(pick_port); py_met=$(pick_port)
+    rs_app_port=$(pick_port); rs_http=$(pick_port); rs_grpc=$(pick_port); rs_met=$(pick_port)
+    bff_port=$(pick_port)
+
+    # 2. Harness sidecar.
+    CDS_HARNESS_HOST=127.0.0.1 CDS_HARNESS_PORT=$py_app_port \
+    nohup "$dapr_cli" run \
+        --app-id cds-harness \
+        --app-port "$py_app_port" --app-protocol http \
+        --dapr-http-port "$py_http" --dapr-grpc-port "$py_grpc" --metrics-port "$py_met" \
+        --runtime-path "{{DAPR_INSTALL_DIR}}" --resources-path "{{DAPR_RESOURCES_PATH}}" \
+        --config "{{DAPR_CONFIG_PATH}}" --log-level info \
+        -- uv run python -m cds_harness.service \
+        > "$py_log" 2>&1 < /dev/null &
+    echo $! > "$py_pid"
+
+    # 3. Kernel sidecar.
+    CDS_KERNEL_HOST=127.0.0.1 CDS_KERNEL_PORT=$rs_app_port \
+    nohup "$dapr_cli" run \
+        --app-id cds-kernel \
+        --app-port "$rs_app_port" --app-protocol http \
+        --dapr-http-port "$rs_http" --dapr-grpc-port "$rs_grpc" --metrics-port "$rs_met" \
+        --runtime-path "{{DAPR_INSTALL_DIR}}" --resources-path "{{DAPR_RESOURCES_PATH}}" \
+        --config "{{DAPR_CONFIG_PATH}}" --log-level info \
+        -- "$repo/target/debug/cds-kernel-service" \
+        > "$rs_log" 2>&1 < /dev/null &
+    echo $! > "$rs_pid"
+
+    wait_ready() {
+        local url=$1 budget=${2:-60}
+        for _ in $(seq 1 $budget); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$url" || echo 000)
+            if [ "$code" = "200" ] || [ "$code" = "204" ]; then return 0; fi
+            sleep 0.5
+        done
+        echo "readiness wait timed out for $url"; return 1
+    }
+    wait_ready "http://127.0.0.1:${py_app_port}/healthz"
+    wait_ready "http://127.0.0.1:${rs_app_port}/healthz"
+    wait_ready "http://127.0.0.1:${py_http}/v1.0/healthz" 90
+    wait_ready "http://127.0.0.1:${rs_http}/v1.0/healthz" 90
+
+    # 4. SvelteKit BFF (production build via adapter-node). Reads
+    # DAPR_HTTP_PORT_{HARNESS,KERNEL} at request time.
+    DAPR_HTTP_PORT_HARNESS=$py_http DAPR_HTTP_PORT_KERNEL=$rs_http \
+    PORT=$bff_port HOST=127.0.0.1 \
+    nohup bun "$repo/frontend/build/index.js" > "$bff_log" 2>&1 < /dev/null &
+    echo $! > "$bff_pid"
+    wait_ready "http://127.0.0.1:${bff_port}/" 60
+
+    # 5. Drive the canonical pipeline through the BFF.
+    BFF_PORT=$bff_port \
+    PAYLOAD_PATH="{{DAPR_PIPELINE_PAYLOAD}}" \
+    GUIDELINE_PATH="{{DAPR_PIPELINE_GUIDELINE}}" \
+    RECORDED_PATH="{{DAPR_BFF_SMOKE_RECORDED}}" \
+    DOC_ID="{{DAPR_PIPELINE_DOC_ID}}" \
+    Z3_PATH="$repo/.bin/z3" CVC5_PATH="$repo/.bin/cvc5" \
+    KIMINA_URL="$CDS_KIMINA_URL" \
+    python3 - <<'PY'
+    import json, os, sys, urllib.request, urllib.error
+
+    BFF = f"http://127.0.0.1:{os.environ['BFF_PORT']}"
+
+    def post(path, body):
+        url = f"{BFF}/{path}"
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(url, method='POST', data=data,
+                                      headers={'content-type': 'application/json'})
+        try:
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            sys.stderr.write(f"✗ {path}: HTTP {e.code} {e.read().decode()[:500]}\n")
+            sys.exit(1)
+        except Exception as e:
+            sys.stderr.write(f"✗ {path}: {e}\n")
+            sys.exit(1)
+
+    envelope = json.load(open(os.environ['PAYLOAD_PATH']))
+    text     = open(os.environ['GUIDELINE_PATH']).read()
+    recorded = json.load(open(os.environ['RECORDED_PATH']))
+
+    print(">>> /api/ingest",    file=sys.stderr)
+    payload = post('api/ingest', {'format': 'json', 'envelope': envelope})
+    assert isinstance(payload.get('samples'), list) and payload['samples'], 'ingest empty samples'
+
+    print(">>> /api/translate", file=sys.stderr)
+    translate = post('api/translate', {
+        'doc_id': os.environ['DOC_ID'],
+        'text':   text,
+        'root':   recorded['root'],
+        'logic':  'QF_LRA',
+    })
+    matrix = translate['matrix']
+    assert matrix.get('logic') == 'QF_LRA', f"translate.matrix.logic={matrix.get('logic')}"
+
+    print(">>> /api/deduce",    file=sys.stderr)
+    verdict = post('api/deduce', {'payload': payload})
+    assert isinstance(verdict.get('breach_summary'), dict), 'deduce missing breach_summary'
+
+    print(">>> /api/solve",     file=sys.stderr)
+    trace = post('api/solve', {
+        'matrix':  matrix,
+        'options': {
+            'timeout_ms': 30000,
+            'z3_path':    os.environ['Z3_PATH'],
+            'cvc5_path':  os.environ['CVC5_PATH'],
+        },
+    })
+    assert trace.get('sat') is False, f"trace.sat={trace.get('sat')}, expected False"
+    assert isinstance(trace.get('muc'), list) and len(trace['muc']) >= 2, \
+        f"expected >=2 MUC entries, got {trace.get('muc')}"
+
+    print(">>> /api/recheck",   file=sys.stderr)
+    recheck = post('api/recheck', {
+        'trace':   trace,
+        'options': {
+            'kimina_url': os.environ['KIMINA_URL'],
+            'timeout_ms': 60000,
+            'custom_id':  'cds-bff-smoke',
+        },
+    })
+    assert recheck.get('ok') is True, f"recheck.ok={recheck.get('ok')}, expected True"
+    assert recheck.get('custom_id') == 'cds-bff-smoke'
+
+    summary = {
+        'payload_samples':     len(payload['samples']),
+        'matrix_assumptions':  len(matrix['assumptions']),
+        'trace_sat':           trace['sat'],
+        'trace_muc':           trace['muc'],
+        'recheck_ok':          recheck['ok'],
+        'recheck_custom_id':   recheck['custom_id'],
+    }
+    print('\n✓ frontend-bff-smoke complete', file=sys.stderr)
+    print(json.dumps(summary, indent=2))
+    PY
+
+# =============================================================================
 # Aggregates
 # =============================================================================
 
