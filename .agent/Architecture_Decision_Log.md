@@ -2109,3 +2109,521 @@ ADR-021 decision in a single recipe.
   fully replaces the other.
 
 ---
+
+## ADR-022 — Phase 0 SvelteKit frontend split (Task 9 → 9.1 + 9.2 + 9.3)
+
+**Status:** Accepted
+**Date:** 2026-05-01
+
+**Context.** Task 9 — the last open Phase 0 row in Plan §8 — is a
+full vertical-slice frontend: SvelteKit project scaffolding under
+`frontend/` (currently a `.gitkeep`-only directory) + Tailwind 4
+utility-first CSS + ESLint 9 + Prettier 3 + Playwright + bun + Vite
+toolchain wiring + a complete set of Justfile recipes
+(`frontend-dev` / `frontend-build` / `frontend-lint` /
+`frontend-test` / `frontend-e2e`) + TypeScript schema mirrors for the
+six Phase 0 wire types (`ClinicalTelemetryPayload`, `OnionLIRTree`
+plus its four `kind`-discriminated variants, `SmtConstraintMatrix`,
+`Verdict`, `FormalVerificationTrace`, `LeanRecheckWire`, plus the
+8.4b aggregated envelope and `PipelineInput`) + a SvelteKit
+`+server.ts` BFF that calls the Phase 0 daprd sidecars validated
+across 8.2 / 8.3a / 8.3b1 / 8.3b2a / 8.3b2b + a canonical
+happy-path round-trip smoke through a real cluster + an AST tree
+visualizer rendering the OnionL IR with per-node source-span
+tooltips + an Octagon abstract-domain visualizer (2D projections of
+`±x ±y ≤ c` constraints) + a MUC viewer cross-linking offending
+atoms back into AST highlights + a verification-trace banner
+displaying `sat / unsat ∧ Lean recheck pass/fail` with an Alethe
+proof preview + an end-to-end Playwright UI smoke driving the
+canonical pipeline through a live cluster + the Phase 0 → Phase 1
+marker flip on `cds_harness.__init__.PHASE` and `cds_kernel::PHASE`
++ Task 9 close-out documentation. That bundle is materially larger
+than every prior Phase 0 task split — Task 8 (ADR-016, 4-way),
+8.3 (ADR-018, 2-way), 8.3b (ADR-019, 2-way), 8.3b2 (ADR-020, 2-way),
+8.4 (ADR-021, 2-way) — each of which was forced into a planning-only
+restructure session because a single context window could not hold
+the inherited scope. Plan §8 §nb on 2026-05-01 splits Task 9 along
+the natural **frontend-foundation / BFF-and-types / visualizers-and-
+close-out** boundary into **9.1**, **9.2**, **9.3**.
+
+**Decision.**
+
+### 1. Split rationale — three-stage layered split, not two-stage
+
+Unlike 8.4 (Rust foundation vs. Python composition) or 8.3b (handler
+plumbing vs. integration test), Task 9 has **three** scope axes that
+each warrant their own session:
+
+- **Toolchain + scaffolding axis.** First-time introduction of the
+  TS/JS toolchain into this repo (no existing `package.json`,
+  `node_modules`, `bun.lockb`, `.eslintrc`, `prettier.config.*`,
+  `playwright.config.*`, or Vite config exists today). `bun` is
+  already in `just env-verify` (1.3.13 verified) but no JS code
+  consumes it. Scaffolding is a self-contained, tooling-heavy
+  session: SvelteKit's `sv create` template + Tailwind 4 plugin +
+  ESLint 9 flat config + Prettier 3 + Playwright + Justfile
+  integration. None of it depends on backend wire types or
+  visualizer logic.
+- **Wire-contract + transport axis.** The frontend's six TS schema
+  mirrors and the BFF route shape are the **boundary contract**
+  with the Phase 0 backend. They depend on the scaffold (9.1) but
+  must precede any visualizer that consumes their types. They are
+  also where the BFF's transport policy is decided
+  (direct service-invocation vs. Workflow-via-`DaprWorkflowClient`)
+  — a non-trivial design call that deserves its own session. A
+  canonical happy-path round-trip smoke against the live cluster
+  closes 9.2.
+- **Visualization + UI close-out axis.** Four Svelte 5 components
+  (AST tree, Octagon, MUC viewer, verification trace) + a
+  Playwright E2E smoke + the Phase 0 → 1 marker flip + Task 9 (and
+  Phase 0) close-out documentation. Each component is
+  self-contained but they all consume the 9.2 BFF + types. The
+  close-out paperwork (PHASE marker flip + Plan §10 step-7 update +
+  the human-facing README touchups that mark Phase 0 complete) lives
+  here because Phase 0 is not "done" until the UI shows the live
+  trace round-trip end-to-end (Plan §8 row 9 success criterion).
+
+A two-way split (e.g. "scaffold + types" vs. "visualizers +
+close-out") would shove the BFF + smoke into one of the halves and
+double its scope. A four-way split (e.g. visualizers as
+9.3a / 9.3b) is left as a **further-split contingency** in §10
+below — pulled in mid-flight only if the 9.3 session repeats the
+context-window pattern, mirroring how 8.3 → 8.3b → 8.3b2 → 8.3b2a/b
+each split mid-task once.
+
+Splitting along these three axes keeps each session's gate tractable:
+9.1's gate is `bun run build` + `bun run check` + lint clean; 9.2's
+gate adds the live BFF round-trip against a `dapr-cluster-up`
+cluster with both sidecars; 9.3's gate adds Playwright + the
+PHASE flip + Phase 0 close-out.
+
+### 2. 9.1 contract — frontend foundation
+
+- **SvelteKit scaffold.** Use `sv create frontend --template minimal
+  --types ts --no-add-ons` (the modern Svelte CLI as of 2025+ —
+  successor to the deprecated `npm create svelte@latest`). Strip
+  to bare minimum: SvelteKit 2.x + Svelte 5 (runes) + TS 5.7+ +
+  Vite 7. No demo / hello-world routes — replace with one `+page.svelte`
+  that renders "Phase 0 — Neurosymbolic CDS" plus a placeholder
+  for the visualizers.
+- **Bun adoption — exclusive runtime + package manager + script
+  runner.** `bun install` (no `npm install` / `pnpm install`); 9.1's
+  Justfile recipes shell out to `bun run <script>`. ADR-007 already
+  locked bun + Vite as exclusive; 9.1 is the first place those locks
+  bind in the repo. `bunfig.toml` pins the registry + telemetry off.
+  No `package-lock.json`, no `pnpm-lock.yaml` — `bun.lockb` only,
+  committed.
+- **Tailwind 4.** `tailwindcss@^4` + `@tailwindcss/vite` plugin in
+  `vite.config.ts` (Tailwind 4 ships its own Vite plugin; no
+  `postcss.config.js` / `autoprefixer` needed — Tailwind 4's
+  Lightning CSS engine handles vendor prefixes natively). Single
+  `src/app.css` with `@import "tailwindcss";`. Utility-first per
+  Plan §6 — no custom theme tokens until 9.3 needs them; expand
+  inline at component time.
+- **ESLint 9 + Prettier 3.** `eslint@^9` flat-config (`eslint.config.js`
+  with `eslint-plugin-svelte` + `typescript-eslint`); `prettier@^3.5`
+  + `prettier-plugin-svelte`. No legacy `.eslintrc.*` /
+  `.prettierrc.*` JSON. The flat config is the 2025+ baseline.
+- **Playwright wired but not used yet.** `@playwright/test@^1.51`
+  installed, `playwright.config.ts` written, `e2e/` directory
+  scaffolded with one tombstone test that asserts `1 + 1 === 2`
+  (ensures the Playwright runner is wired and `bun run test:e2e`
+  exits 0 without spinning up a server). Real E2E tests land in 9.3.
+- **TypeScript strict.** `tsconfig.json` extends SvelteKit's defaults
+  with `"strict": true`, `"noUncheckedIndexedAccess": true`,
+  `"noImplicitOverride": true`. No JS files allowed under
+  `frontend/src/` — `.ts` / `.svelte` only.
+- **Justfile recipes (new block — `frontend-*`):**
+
+  | Recipe                  | Role                                                                                                                  |
+  | ----------------------- | --------------------------------------------------------------------------------------------------------------------- |
+  | `frontend-install`      | `cd frontend && bun install --frozen-lockfile` for CI; plain `bun install` otherwise (env var gated).                  |
+  | `frontend-dev`          | `cd frontend && bun run dev -- --host 127.0.0.1 --port 5173` — Vite dev server, HMR, no auto-open browser.            |
+  | `frontend-build`        | `cd frontend && bun run build` — production build into `frontend/build/`.                                              |
+  | `frontend-preview`      | `cd frontend && bun run preview` — serves the production build on `:4173`.                                             |
+  | `frontend-lint`         | `cd frontend && bun run lint` (ESLint + Prettier `--check` chained).                                                   |
+  | `frontend-format`       | `cd frontend && bun run format` (Prettier `--write`).                                                                  |
+  | `frontend-typecheck`    | `cd frontend && bun run check` (`svelte-check` against the project).                                                   |
+  | `frontend-test`         | `cd frontend && bun run test:unit` — vitest (deferred to 9.3 — recipe exists but routes to a tombstone in 9.1).        |
+  | `frontend-e2e`          | `cd frontend && bun run test:e2e` — Playwright (tombstone in 9.1, real tests in 9.3).                                  |
+
+  Recipes match the existing `py-*` / `rs-*` Justfile blocks for
+  developer ergonomics. None depend on a Dapr cluster being up —
+  the BFF only needs daprd at runtime, which 9.2 wires.
+
+- **Gate.** `cd frontend && bun install` succeeds without warnings;
+  `just frontend-build` exits 0 with a non-empty `frontend/build/`;
+  `just frontend-typecheck` clean; `just frontend-lint` clean; one
+  manual `just frontend-dev` smoke confirms `:5173` returns the
+  placeholder page; `just frontend-test` + `just frontend-e2e`
+  exit 0 against tombstones; cargo + pytest baselines unchanged
+  (no Rust / Python touchpoints in 9.1); `just env-verify` clean.
+
+### 3. 9.2 contract — TS schema mirrors + BFF + canonical smoke
+
+- **TypeScript schema mirrors.** New module tree under
+  `frontend/src/lib/schemas/`:
+  - `telemetry.ts` — `ClinicalTelemetryPayload` (vitals dict +
+    discrete events; lexicographic key ordering enforced by a
+    `BTreeMap`-equivalent — Phase 0 uses plain `Record<string, number>`
+    with a runtime sort guard at the BFF boundary because TS objects
+    do not preserve insertion order on integer-string-coerced keys).
+  - `onion.ts` — `OnionLIRTree` discriminated union: `Scope` +
+    `Relation` + `IndicatorConstraint` + `Atom`, each carrying a
+    `kind` literal narrowing tag. Source-span byte offsets are
+    `{ start: number; end: number; doc_id: string }`.
+  - `smt.ts` — `SmtConstraintMatrix` + `LabelledAssertion`.
+  - `verdict.ts` — `Verdict` (mirrors `cds_kernel::deduce::Verdict`
+    breach summary).
+  - `trace.ts` — `FormalVerificationTrace` (`sat`, `muc[]`,
+    `alethe_proof`).
+  - `recheck.ts` — `LeanRecheckWire` (`ok`, `custom_id`,
+    `lean_proof_text`, diagnostics array).
+  - `pipeline.ts` — `PipelineInput` (the 8.4b Pydantic model
+    cross-walked) + `PipelineEnvelope`
+    `{ payload, ir, matrix, verdict, trace, recheck }`.
+  - `index.ts` — barrel re-exports.
+  All schemas carry a JSDoc cross-reference back to the Rust /
+  Python source-of-truth file path so a future schema bump
+  surfaces the cross-language coordination requirement at
+  edit-time. **No `schemars` JSON-Schema export** — the open
+  question from the Memory_Scratchpad ("schemars JSON-Schema export
+  for the SvelteKit frontend (Task 9). Not needed until then;
+  revisit when wiring the BFF.") is closed: hand-written TS mirrors
+  with a tripwire test in 9.2 (`test_ts_schema_parity`) that
+  decodes the cargo-emitted golden JSON fixtures
+  (`crates/schemas/tests/fixtures/*.json`) through the TS
+  `parse*` helpers and asserts round-trip equivalence. Rationale:
+  schemars adds a Rust-side build dependency + a TS-side codegen
+  step + a generated-file-in-VCS policy decision, each of which
+  needs its own ADR; for six small schemas hand-mirrored TS
+  with a parity tripwire is materially simpler. Reopen only when
+  schema count > ~12 or when an external consumer needs the
+  schema export.
+- **BFF transport policy — direct service-invocation, not
+  Workflow.** SvelteKit `+server.ts` BFF routes call the Phase 0
+  daprd sidecars directly via `fetch` against
+  `http://127.0.0.1:${process.env.DAPR_HTTP_PORT_HARNESS}/v1.0/invoke/cds-harness/method/v1/<path>`
+  and the symmetric `cds-kernel` URL. No
+  `DaprWorkflowClient`. Reasons:
+  1. 8.4b's `cds_harness.workflow.run-pipeline` is a CLI
+     orchestrator — not an HTTP endpoint that JS can call. Spinning
+     a `WorkflowRuntime` from JS would require either the (immature)
+     `@dapr/dapr` JS SDK with workflow extension or a long-running
+     Python sidecar that exposes Workflow scheduling over HTTP;
+     both add complexity that Phase 0 does not need.
+  2. The UI wants per-stage round-trip latency so it can stage
+     the pipeline incrementally (show ingest → AST → matrix →
+     verdict → trace → recheck as each stage completes). A
+     Workflow-shaped envelope returns all stages at once; direct
+     invocation supports both incremental and aggregated UX.
+  3. JSON-over-TCP between BFF and daprd matches constraint **C6**
+     and ADR-002. The BFF is a thin proxy whose only job is to
+     bridge the browser's same-origin policy and the daprd
+     invocation URL.
+  Phase 1+ may add a Workflow-via-`DaprWorkflowClient` route under
+  `/api/pipeline/workflow` for batch / headless pipelines. Phase 0
+  ships per-stage routes only.
+- **BFF route shape (`frontend/src/routes/api/`):**
+
+  | Route                      | Method | Body                                               | Returns                                 |
+  | -------------------------- | ------ | -------------------------------------------------- | --------------------------------------- |
+  | `/api/ingest`              | POST   | `IngestRequest` (telemetry payload + format hint)  | `ClinicalTelemetryPayload`              |
+  | `/api/translate`           | POST   | `TranslateRequest` (doc_id + guideline text)       | `{ ir: OnionLIRTree, matrix: SmtConstraintMatrix }` |
+  | `/api/deduce`              | POST   | `{ payload: ClinicalTelemetryPayload }`            | `Verdict`                               |
+  | `/api/solve`               | POST   | `{ matrix: SmtConstraintMatrix, options? }`        | `FormalVerificationTrace`               |
+  | `/api/recheck`             | POST   | `{ trace: FormalVerificationTrace, options? }`     | `LeanRecheckWire`                       |
+
+  Each route is a thin `+server.ts` that proxies through daprd, lifts
+  HTTP 422 `{error, detail}` envelopes into a typed
+  `BackendError` exception, and emits a structured `console.info`
+  per stage (matches the harness's `tracing` shape). Route handlers
+  are typed end-to-end via the `lib/schemas` barrel.
+- **BFF dependency convention — environment-driven daprd ports.**
+  9.2 does **not** spin up daprd from inside the Vite dev server.
+  An operator runs `just dapr-cluster-up` + `just py-service-dapr` +
+  `just rs-service-dapr` (existing 8.4a recipes) before
+  `just frontend-dev`; the BFF reads `$DAPR_HTTP_PORT_HARNESS` /
+  `$DAPR_HTTP_PORT_KERNEL` from `process.env` at request time.
+  Defaults (`3500` / `3501`) match the existing Phase 0 sidecar
+  conventions when env is unset. A short README block in
+  `frontend/README.md` documents the dev workflow.
+- **Canonical smoke gate.** New Justfile recipe
+  `frontend-bff-smoke`: brings up the cluster + both sidecars (via
+  `just dapr-cluster-up` / `py-service-dapr` / `rs-service-dapr`),
+  starts the SvelteKit BFF on `:5173`, drives a single canonical
+  pipeline run via `curl` against the BFF (`/api/ingest` →
+  `/api/translate` → `/api/deduce` → `/api/solve` →
+  `/api/recheck`), asserts every stage returns 200 + the verification
+  flag round-trips end-to-end (`trace.sat=false` for
+  `contradictory-bound`), then `trap`-driven reverse-teardown of
+  every spawned process. Mirrors the shape of `just dapr-pipeline`
+  (8.4b) but exits the SvelteKit + curl path rather than the Python
+  Workflow path.
+- **Schema parity tripwire.** New unit test
+  `frontend/src/lib/schemas/parity.test.ts` (vitest) decodes each
+  `crates/schemas/tests/fixtures/*.json` golden through the TS
+  parse helpers and asserts `JSON.parse(json) ≡ schema.parse(json)`
+  (round-trip identity). Catches drift between Rust source-of-truth
+  and TS mirrors at edit-time.
+- **Gate.** `just frontend-typecheck` clean (TS strict mode passes
+  with all six schemas + BFF routes); `just frontend-test` →
+  parity tripwire + any unit cases pass; `just frontend-bff-smoke`
+  end-to-end against a live cluster returns the canonical
+  `contradictory-bound` envelope; cargo + pytest baselines
+  unchanged; `just env-verify` clean. **Visualizers + Playwright
+  defer to 9.3.**
+
+### 4. 9.3 contract — visualizers + Phase 0 close-out
+
+- **AST tree component (`frontend/src/lib/components/AstTree.svelte`).**
+  Recursive Svelte 5 component (uses `<svelte:self>` or the
+  runes-equivalent recursion pattern) rendering an `OnionLIRTree`
+  via discriminated-union narrowing on the `kind` tag. Each node:
+  - Indented box; collapsible via a `$state` signal per subtree.
+  - Source-span tooltip on hover (`title` attribute or a
+    Svelte-tooltip primitive — pick at component-time, no
+    third-party tooltip lib).
+  - When the node's `source_span.id` is in the current
+    `FormalVerificationTrace.muc[]`, apply a Tailwind
+    `bg-rose-100 ring-1 ring-rose-300` highlight class.
+  Tree state is read-only (no edit affordances in Phase 0); the
+  whole tree is a derived value of the BFF's `/api/translate`
+  response.
+- **Octagon visualizer (`frontend/src/lib/components/Octagon.svelte`).**
+  Hand-rolled SVG component rendering 2D projections of
+  `±x ±y ≤ c` constraints over a configurable pair of canonical
+  vitals (selectable from a `<select>` element backed by
+  `CANONICAL_VITALS`). Renders:
+  - Cartesian axes with vital units labelled.
+  - The feasible region as a polygon clip-path filled with
+    Tailwind `fill-emerald-100 stroke-emerald-500`.
+  - Each constraint as a half-plane line annotated with its
+    label (matches `LabelledAssertion.label`).
+  - Current telemetry sample as a marker dot (`fill-sky-600`).
+  No D3 / Plotly / Chart.js — the abstract domain is geometric
+  primitives over half a dozen lines, comfortably within
+  hand-rolled SVG. If 9.3 hits a hard limit (e.g. >100 constraints
+  per projection — extremely unlikely at Phase 0 fixture sizes),
+  open a follow-up ADR before reaching for a viz library.
+- **MUC viewer (`frontend/src/lib/components/MucViewer.svelte`).**
+  Lists each MUC entry by `source_span` with a click handler that
+  scrolls the AST tree to the matching node and pulses its
+  highlight. Cross-component state via a small `$state` store in
+  `frontend/src/lib/stores/highlight.ts` (one writable rune holding
+  the current highlighted span id; AST tree subscribes to it).
+- **Verification trace banner
+  (`frontend/src/lib/components/VerificationTrace.svelte`).**
+  Top-of-page banner: green `sat` / red `unsat` pill + Lean
+  recheck status pill (`ok` green / `error` red) + a collapsible
+  Alethe proof preview (first 50 lines, scroll for more — uses a
+  monospaced `<pre>` block under a `details/summary` widget).
+- **Single-page route (`frontend/src/routes/+page.svelte`).**
+  Replaces the 9.1 placeholder. Composition order top-to-bottom:
+  guideline + telemetry input form → "Run pipeline" button (drives
+  `/api/ingest` → `/api/translate` → `/api/deduce` → `/api/solve`
+  → `/api/recheck` in sequence, surfacing per-stage errors inline)
+  → verification trace banner → AST tree (left column) | Octagon
+  (right column) | MUC viewer (bottom row). Pure single-page;
+  no SvelteKit form actions in 9.3 (reserved for Phase 1's
+  multi-payload comparison view).
+- **Playwright E2E smoke (`frontend/e2e/pipeline.e2e.ts`).**
+  Drives the canonical `contradictory-bound` flow end-to-end:
+  navigate to `/`, submit the form with the canonical payload +
+  guideline, wait for the verification banner to settle to
+  "unsat", assert the MUC viewer shows two entries, assert the AST
+  tree highlights both atoms with `bg-rose-100`, assert the
+  verification trace banner shows "Lean recheck ✓". Gate:
+  `just frontend-e2e` against a live `dapr-cluster-up` +
+  `py-service-dapr` + `rs-service-dapr` + `frontend-preview`
+  (production build, not dev — closer to deploy parity).
+- **Phase 0 → Phase 1 marker flip.** Bump
+  `cds_harness.__init__.PHASE = 0` → `1` and `cds_kernel::PHASE: u8 = 0`
+  → `1`. Update the docstring on each constant to reflect "Phase 1
+  scope: live FHIR streaming, distributed cloud, ZKSMT" per
+  Plan §1. The flip is a one-line edit on each side; the
+  micro-decision (Plan §10 step 7) lands in 9.3 because that is
+  when Phase 0's success criterion (Plan §8 row 9: "UI shows live
+  trace from real dataset; verification flag round-trips") is
+  actually demonstrable end-to-end.
+- **README touch-up.** Add a "Running Phase 0 end-to-end" section
+  to the human-facing `README.md` that points at
+  `just frontend-bff-smoke` (9.2) and the visualizer demo URL
+  (9.3). One-paragraph close-out — comprehensive docs land in
+  Phase 1 once the API surface is durable.
+- **Gate.** `just frontend-test` clean (vitest + parity tripwire);
+  `just frontend-e2e` green against a live cluster; `just
+  frontend-build` clean; cargo + pytest baselines unchanged
+  (no kernel / harness touchpoints in 9.3 except the PHASE
+  constant flip — which adds zero tests but the existing
+  `tests::phase_marker_is_phase_zero` cases in
+  `python/tests/test_smoke.py` + `crates/kernel/src/lib.rs`
+  flip alongside, so cargo test + pytest both still pass);
+  `just env-verify` clean. **Phase 0 closes here.**
+
+### 5. Locked toolchain decisions
+
+Locking the JS/TS stack pins versions at the floor; bun resolves
+upper bounds at install time:
+
+| Layer                  | Floor            | Rationale                                                                                                                                                    |
+| ---------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Bun runtime            | 1.3.x            | Already in `just env-verify`. ADR-007 lock; exclusive pkg manager + script runner.                                                                            |
+| SvelteKit              | 2.x              | Current major (Svelte 5 runes are stable; SvelteKit 2 is the matching framework major).                                                                       |
+| Svelte                 | 5.x              | Runes API for fine-grained reactivity; succeeds Svelte 4's `$:` reactive declarations.                                                                        |
+| Vite                   | 7.x              | Current major; default for `sv create`.                                                                                                                       |
+| TypeScript             | 5.7+             | `noUncheckedIndexedAccess` strict-mode + decorators stable.                                                                                                   |
+| Tailwind CSS           | 4.x              | `@tailwindcss/vite` plugin replaces `tailwindcss/postcss` chain; Lightning CSS engine; current major.                                                         |
+| ESLint                 | 9.x              | Flat config (`eslint.config.js`); legacy `.eslintrc.*` is unsupported as of 9.0.                                                                              |
+| Prettier               | 3.x              | + `prettier-plugin-svelte` 3.x for Svelte 5 syntax.                                                                                                            |
+| Playwright             | 1.51+            | Current; SvelteKit's recommended E2E runner.                                                                                                                  |
+| Vitest                 | 3.x              | Bundled with SvelteKit's `sv create` scaffold; runs unit tests including the schema parity tripwire.                                                          |
+
+No D3, Plotly, Chart.js, ECharts, svelte-flow, vis-network,
+react-flow, cytoscape, mermaid, or any node-graph viz library is
+introduced in 9.1–9.3. Phase 0's visualizers are simple enough to
+hand-roll; introducing a viz library would inflate `package.json`
+by megabytes for no Phase 0 benefit. Reopen the decision in Phase 1
+if the Octagon component's projection count or the AST node count
+exceeds what's tractable with raw SVG.
+
+### 6. Visualizer library policy — hand-rolled SVG + Svelte 5 reactivity
+
+For each visualizer (AST tree, Octagon, MUC viewer, verification
+trace), the implementation is hand-rolled Svelte 5 components using
+the standard browser SVG / HTML primitives + Tailwind utilities + a
+small store for cross-component highlight state. No external
+visualization dependency. The trade-off:
+
+- **Pro.** Zero added dependencies; full control over rendering
+  semantics (e.g. MUC highlight pulse animation matches the AST
+  tree's collapse / expand pattern); aligns with constraint **C6**
+  (JSON-over-TCP / MCP only — no FFI / WASM viz blob); simpler
+  build pipeline (Vite + SvelteKit + Tailwind only); smaller
+  production bundle.
+- **Con.** Hand-rolling layout (especially for the Octagon's
+  half-plane intersection polygon) requires per-component geometry
+  code. The trade is favourable at Phase 0 scale (≤ 50 AST nodes,
+  ≤ 10 octagon constraints per projection, ≤ 10 MUC entries) and
+  unfavourable at scale where layout libraries pay for themselves.
+  Phase 0 sits inside the favourable regime.
+
+If 9.3 hits a hard wall (e.g. AST trees of size O(1000) — extremely
+unlikely at Phase 0 fixture sizes), the contingency is a
+follow-up ADR introducing one viz library at a time. The default
+remains hand-rolled.
+
+### 7. BFF transport policy — direct service-invocation, Workflow deferred
+
+Codified in §3 above. The BFF speaks JSON-over-TCP through daprd
+service-invocation directly to `cds-harness` and `cds-kernel`. The
+Workflow runtime stays headless (CLI-only, as 8.4b shipped).
+Reopening this is a Phase 1 micro-decision — likely driven by a
+need for batch / cron-driven pipeline runs that the headless
+`python -m cds_harness.workflow run-pipeline` already covers
+without UI involvement.
+
+### 8. Schema-mirror policy — hand-written TS, parity tripwire over codegen
+
+Six TypeScript schema modules under `frontend/src/lib/schemas/`,
+hand-mirrored from the Rust source-of-truth in
+`crates/schemas/src/`. A vitest tripwire (`parity.test.ts`)
+round-trips every cargo-emitted golden JSON fixture through the
+TS parse helpers; a schema-shape drift on either side fails the
+test. **No `schemars` JSON-Schema export, no codegen step.**
+Reopen when schema count > ~12 or when an external consumer needs
+the schema export. Phase 0's six schemas + the aggregated envelope
+are well below that floor.
+
+### 9. PHASE marker semantics
+
+`cds_harness.__init__.PHASE` and `cds_kernel::PHASE` flip 0 → 1
+**at the close of Task 9.3**, when the UI visibly demonstrates the
+Phase 0 success criterion. The flip is part of 9.3's gate, not
+9.1's or 9.2's. ADR-021 §3 documented this same intent for 8.4b but
+deferred to Task 9 because the Workflow harness alone — without a
+UI — does not yet meet Plan §1's "Phase 0 = headless engine +
+stakeholder visualizer" definition. 9.3 closes the gap.
+
+### 10. Further-split contingency
+
+If 9.3 repeats the context-window pattern (visualizers + Playwright
++ Phase 0 close-out exceeds one session), pull in a mid-flight
+4-way split:
+
+- **9.3a** — AST tree component + MUC viewer + cross-component
+  highlight store + per-component vitest cases.
+- **9.3b** — Octagon visualizer + verification trace banner +
+  single-page composition + Playwright E2E + Phase 0 → 1 PHASE
+  flip + Task 9 (and Phase 0) close-out.
+
+This contingency is **not** triggered at split-time; it is the same
+pattern that surfaced for 8.3 → 8.3b → 8.3b1+8.3b2 (each split
+mid-flight once the inheriting session encountered the budget
+ceiling). Enumerated here so a future session does not have to
+re-derive the boundary.
+
+**Consequences.** Task 9.1 inherits a clean slate (no existing
+TS/JS code in the repo) and delivers a green-field SvelteKit
+scaffold + Justfile recipe set + tombstone Playwright + Tailwind 4
+setup. Task 9.2 inherits the scaffold + recipes and delivers the
+six TS schema mirrors + the BFF route shape + the canonical smoke
+against a live cluster, closing the wire-contract boundary
+between frontend and the Phase 0 backend. Task 9.3 inherits the
+full schema + transport + smoke harness and delivers the four
+Svelte 5 visualizer components + Playwright + the PHASE flip,
+closing **Phase 0** end-to-end. Each session's gate is
+self-contained within its own scope axis; cargo + pytest baselines
+stay green throughout (Rust + Python tree untouched until the 9.3
+PHASE flip).
+
+**Alternatives rejected.**
+
+- **Single Task 9 session, accept the context overflow.** Has
+  failed at this scale six times now (ADRs 016, 018, 019, 020,
+  021). The cost of another mid-session context exhaustion is
+  far higher than the cost of one ADR + plan-row split.
+- **Two-way split (9.1 scaffold+types / 9.2 visualizers+close-out).**
+  Forces the BFF + canonical smoke into one of the two halves;
+  doubles that half's scope. Three-way split aligns with the
+  three actual scope axes.
+- **Four-way split up-front (9.1 / 9.2 / 9.3a / 9.3b).** Each
+  visualizer pair is small enough that a single session can
+  plausibly carry all four components + Playwright + the close-out.
+  Pre-emptive split adds session overhead; the contingency in §10
+  pulls it in only if needed.
+- **`schemars` JSON-Schema export + TS codegen pipeline.** Adds a
+  Rust-side build dependency, a TS-side codegen step, a
+  generated-files-in-VCS policy, and a coupling between cargo
+  test and frontend test. Six small hand-written schemas with a
+  parity tripwire delivers the same drift-detection at materially
+  lower complexity. Reopen at >~12 schemas.
+- **D3.js / Plotly / Chart.js / svelte-flow for visualizers.**
+  Megabytes of bundle weight for a Phase 0 prototype that has ≤ 50
+  AST nodes, ≤ 10 octagon constraints, ≤ 10 MUC entries. Hand-rolled
+  SVG is the right call at this scale. §6 documents the contingency.
+- **BFF via Workflow-via-`DaprWorkflowClient` instead of direct
+  service-invocation.** §3 enumerated three reasons against:
+  (a) Workflow is a CLI orchestrator, not an HTTP endpoint;
+  (b) UI wants per-stage round-trip latency for incremental
+  staging; (c) JSON-over-TCP through daprd matches constraint **C6**.
+- **BFF embedded inside a Python service instead of SvelteKit
+  `+server.ts`.** Adds a sixth Phase 0 process to manage; SvelteKit
+  already runs an HTTP server in dev/preview mode; proxying through
+  a Python service would double-hop every request for no benefit.
+- **Skip the canonical BFF smoke in 9.2.** Would let 9.3 inherit
+  an unverified BFF + types contract; failure modes that surface
+  in 9.3 (e.g. a TS schema typo that decodes a real envelope
+  incorrectly) would conflate visualizer bugs with contract bugs.
+  The canonical smoke isolates the contract gate to 9.2.
+- **Skip the schema parity tripwire.** Hand-written mirrors drift
+  silently from the Rust source-of-truth; the tripwire is the
+  cheap continuous check that catches drift at edit-time. Cost is
+  one vitest module + one fixture per schema.
+- **Defer the PHASE 0 → 1 flip to Phase 1 setup.** Plan §10 step 7
+  schedules it on Task 9 close-out. Deferring would leave the
+  marker stale across the Phase 1 migration window; flipping at
+  9.3 close keeps the marker semantically aligned with what is
+  actually demonstrable.
+
+---

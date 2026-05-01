@@ -102,7 +102,25 @@ C6. All inter-process comms = JSON-over-TCP/IP and/or MCP.
 > — and the Rust-foundation vs. Python-composition boundary cleanly
 > separates the cluster bring-up + warden refactor from the Workflow
 > harness composition. ADR-021 captures the rationale and the
-> per-sub-task gates.
+> per-sub-task gates. **Task 9 was further split into 9.1 + 9.2 + 9.3
+> on 2026-05-01** for the same reason: the original Task 9 scope
+> bundled first-time JS/TS toolchain introduction (SvelteKit 2 +
+> Svelte 5 runes + Vite 7 + Tailwind 4 + ESLint 9 + Prettier 3 +
+> Playwright + bun + Justfile recipes) + six TypeScript schema mirrors
+> mirroring the Phase 0 Rust source-of-truth + a SvelteKit `+server.ts`
+> BFF speaking JSON-over-TCP through daprd to `cds-harness` + `cds-kernel`
+> + a canonical happy-path round-trip smoke against a live cluster +
+> four Svelte 5 visualizer components (AST tree, Octagon abstract
+> domain, MUC viewer, verification trace banner) + Playwright E2E
+> + the Phase 0 → Phase 1 marker flip — and the natural three-axis
+> boundary (toolchain-foundation / wire-contract+transport /
+> visualizers+close-out) cleanly separates the green-field scaffold
+> from the BFF contract from the UI close-out. ADR-022 captures the
+> rationale, the locked toolchain, the visualizer-library policy
+> (hand-rolled SVG, no D3 / Plotly / svelte-flow), the BFF transport
+> policy (direct service-invocation, Workflow deferred), the
+> schema-mirror policy (hand-written TS + parity tripwire, no
+> `schemars` codegen), and the per-sub-task gates.
 
 | #     | Task                                                                                                          | Status   | Session output gate                                                                                                                  |
 | ----- | ------------------------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -121,11 +139,13 @@ C6. All inter-process comms = JSON-over-TCP/IP and/or MCP.
 | 8.3b2b | Rust kernel `/v1/solve` + `/v1/recheck` Dapr smokes — gated on `.bin/z3`+`.bin/cvc5` and `CDS_KIMINA_URL`        | **DONE** | git commit `feat: complete Task 8.3b2b Rust kernel solve + recheck Dapr smokes`                                                     |
 | 8.4a   | Dapr cluster bring-up + production SIGTERM-first warden — `placement-up` / `scheduler-up` recipes + warden two-stage shutdown + readiness gate flip | **DONE** | git commit `feat: complete Task 8.4a Dapr cluster bring-up + SIGTERM-first warden`                                                                  |
 | 8.4b   | End-to-end Dapr Workflow — `cds_harness.workflow` package + Dapr Python SDK + aggregated envelope + `just dapr-pipeline` + end-to-end pytest smoke | **DONE** | git commit `feat: complete Task 8.4b End-to-end Dapr Workflow + Task 8 close-out`                                                    |
-| 9      | SvelteKit frontend — wire to live backend; render AST, Octagon, MUCs                                           | pending  | UI shows live trace from real dataset; verification flag round-trips.                                                                |
+| 9.1    | Frontend foundation — SvelteKit 2 + Svelte 5 runes + Vite 7 + Tailwind 4 + ESLint 9 + Prettier 3 + Playwright tombstone + Justfile `frontend-*` recipes | pending  | git commit `feat: complete Task 9.1 Frontend foundation`                                                                              |
+| 9.2    | TS schema mirrors + BFF + canonical smoke — six TS schemas + `+server.ts` routes + `frontend-bff-smoke` Justfile recipe + parity tripwire           | pending  | git commit `feat: complete Task 9.2 TS schema mirrors + BFF + canonical smoke`                                                       |
+| 9.3    | Visualizers + Phase 0 close-out — AST tree + Octagon + MUC viewer + verification trace + Playwright E2E + PHASE 0 → 1 flip                          | pending  | UI shows live trace from real dataset; verification flag round-trips. git commit `feat: complete Task 9.3 Visualizers + Phase 0 close-out` |
 
 **At any session:** select STRICTLY the lowest-numbered uncompleted
 task. No leapfrogging. Sub-tasks follow the same discipline —
-`8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9`.
+`8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9.1 < 9.2 < 9.3`.
 
 ## 9. Context-Governed Re-Entry Prompt (verbatim)
 

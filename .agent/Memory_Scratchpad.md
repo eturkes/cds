@@ -6,10 +6,367 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 8.4b — End-to-end Dapr Workflow + close-out of Task 8 (ADR-021 §3). Added `dapr>=1.17` + `dapr-ext-workflow>=1.17` to `pyproject.toml [project.dependencies]` (ADR-017 §5 reversed only for `WorkflowRuntime` / `@workflow` / `@activity` decorator surfaces — service-invocation calls inside activities stay on plain `httpx`). New `python/cds_harness/workflow/` package: `__init__.py` (public re-exports), `activities.py` (`ingest_activity` / `translate_activity` / `deduce_activity` / `solve_activity` / `recheck_activity` — each a thin `httpx.post` against `http://127.0.0.1:$DAPR_HTTP_PORT/v1.0/invoke/<app-id>/method/<path>` with structured `logging` per stage; `WorkflowActivityError` lifts non-2xx into the runtime's retry-eligible exception path; `register_activities(runtime)` pins activity names so `call_activity` strings stay stable across refactors), `pipeline.py` (`pipeline_workflow(ctx, raw_input)` — generator-style `@workflow`-shaped function chaining the five `yield ctx.call_activity(...)` calls; `PipelineInput` Pydantic v2 model with `frozen=True, extra='forbid'` for replay-deterministic deserialisation; aggregated in-band JSON envelope `{ payload, ir, matrix, verdict, trace, recheck }` returned at the bottom — ADR-021 §7 in-band over state-store handles for Phase 0 small payloads), `__main__.py` (argparse CLI: `run-pipeline` subcommand + `serve` subcommand; `run-pipeline` registers the runtime + workflow + activities, schedules one workflow instance via `DaprWorkflowClient.schedule_new_workflow`, waits for completion with `wait_for_workflow_completion(timeout_in_seconds=...)`, prints the aggregated envelope as a single JSON line on stdout + a compact summary on stderr; `--assert-unsat` / `--assert-sat` / `--assert-recheck-ok` close-out flags exit non-zero on mismatch). Justfile gains `dapr-pipeline` recipe (env-overridable `DAPR_PIPELINE_PAYLOAD` / `DAPR_PIPELINE_GUIDELINE` / `DAPR_PIPELINE_DOC_ID` / `DAPR_PIPELINE_ASSERT` / `DAPR_PIPELINE_TIMEOUT_S`): pre-flights `.bin/dapr` + slim runtime + `.bin/{z3,cvc5}` + `$CDS_KIMINA_URL`; cargo-builds the kernel binary; brings up `dapr-cluster-up`; pre-flights `placement` + `scheduler` `/healthz`; allocates four ports per sidecar (app + dapr-http + dapr-grpc + metrics) via inline `python3` socket-pick; `nohup`-spawns three `dapr run` sidecars (`cds-harness` + `cds-kernel` + `cds-workflow`); waits on the harness/kernel app `/healthz` and daprd full-readiness `/v1.0/healthz`; `wait`s on the workflow runner; `trap`-driven reverse-order cleanup on every exit path (workflow → kernel → harness → cluster). New pytest smoke `python/tests/test_dapr_pipeline.py` (single test `test_dapr_workflow_drives_contradictory_pipeline` gated by `pytestmark = pytest.mark.skipif`): same flow but in-process via `_dapr_cluster()` + nested `_dapr_sidecar(...)` context managers (single combined `with`), reads the aggregated envelope by tailing the workflow sidecar log for the canonical six-key JSON object (cold-stable: daprd's own log lines never produce a JSON line containing all six envelope keys), asserts `verdict.breach_summary` non-empty + `trace.sat == False` + `len(trace.muc) >= 2` + `recheck.ok == True` + `recheck.custom_id == "cds-pipeline"` + per-stage trace strings present in the workflow log. Per-child SIGTERM-then-grace-then-SIGKILL (5 s grace) cleanup discipline matches `crates/kernel/tests/common.rs::sigterm_then_kill`. Gate: `cargo test --workspace` → **153 pass** (unchanged from 8.4a baseline); `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all -- --check` clean; `uv run pytest` 95 pass + 1 skip (`test_dapr_pipeline.py` skips loudly with reason on missing `CDS_KIMINA_URL` — by design, same shape as `tests/lean_smoke.rs` / `tests/service_pipeline_smoke.rs`); `uv run ruff check .` clean; `just env-verify` exit 0. **Task 8 closed.** Final gate locally end-to-end (skipped without Kimina); the Justfile recipe is the developer-friendly shape and the pytest is the CI-friendly shape.
-- **Next up:** Task 9 — SvelteKit frontend wired to the live backend (AST + Octagon + MUC visualisation; verification flag round-trip). All Phase 0 sidecars + the Workflow orchestration that 8.4b composes are now durable; the frontend BFF can either drive `cds-harness` + `cds-kernel` directly (faster iteration) or schedule a Workflow instance through `DaprWorkflowClient` for the full envelope (recommended once the UI needs the `verdict ∧ trace ∧ recheck` triple in one shot). The Phase 0 `PHASE = 0` marker on `cds_harness.__init__.PHASE` and `cds_kernel::PHASE` stays at 0 until Task 9 ships; flipping it to 1 is a Task 9 micro-decision (Plan §10 step 7 — bump it when the frontend close-out lands and Phase 0 is fully visible end-to-end).
+- **Last completed:** Task 9 plan restructure (planning-only) — split monolithic Task 9 into atomic sub-tasks 9.1 / 9.2 / 9.3 along the natural three-axis boundary (toolchain-foundation / wire-contract+transport / visualizers+close-out). ADR-022 captures the rationale, the locked JS/TS toolchain (SvelteKit 2 + Svelte 5 runes + Vite 7 + TS 5.7+ + Tailwind 4 + ESLint 9 flat config + Prettier 3 + Playwright 1.51+ + Bun 1.3.x + Vitest 3), the visualizer-library policy (hand-rolled SVG + Svelte 5 reactivity, no D3 / Plotly / svelte-flow / Chart.js until a hard limit), the BFF transport policy (direct service-invocation through daprd, Workflow-via-`DaprWorkflowClient` deferred to Phase 1), the schema-mirror policy (hand-written TS + a vitest parity tripwire round-tripping cargo golden fixtures, no `schemars` JSON-Schema codegen), the PHASE marker semantics (0 → 1 flip lands at 9.3 close — when the UI demonstrates Plan §1's "Phase 0 = headless engine + stakeholder visualizer" definition end-to-end), the per-sub-task contracts (9.1 scaffolding + Justfile + tombstone Playwright; 9.2 six TS schema mirrors + `+server.ts` BFF + `frontend-bff-smoke` recipe; 9.3 four Svelte 5 visualizer components + Playwright E2E + PHASE flip), and the alternatives rejected (single Task 9 session; two-way split; pre-emptive four-way split; `schemars` codegen pipeline; D3 / Plotly / svelte-flow visualizer libraries; Workflow-via-`DaprWorkflowClient` BFF; BFF embedded in a Python service; skip canonical BFF smoke; skip schema parity tripwire; defer PHASE flip to Phase 1). Plan §8 row 9 split into rows 9.1 / 9.2 / 9.3; ordering note now `8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9.1 < 9.2 < 9.3`. No code, no dependency manifest changes, no test-suite changes this session. Regression-only gate (verify no drift): `cargo test --workspace` 153 pass (unchanged from 8.4b); `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all -- --check` clean; `uv run pytest` 95 pass + 1 skip; `uv run ruff check .` clean; `just env-verify` exit 0.
+- **Next up:** Task 9.1 — Frontend foundation. SvelteKit 2 + Svelte 5 (runes) + Vite 7 + TypeScript 5.7+ strict + Tailwind CSS 4 (with `@tailwindcss/vite`) + ESLint 9 (flat config) + Prettier 3 + Playwright 1.51+ tombstone + Vitest 3. Scaffold under `frontend/` (currently a `.gitkeep`-only directory) using the modern `sv create` CLI (successor to the deprecated `npm create svelte@latest`); single placeholder `+page.svelte`; new Justfile block `frontend-*` (install / dev / build / preview / lint / format / typecheck / test / e2e). No Rust / Python touchpoints; cargo + pytest baselines stay green.
 
-> **Task 8 was split** into 8.1–8.4 on 2026-04-30 (ADR-016) because a monolithic Dapr-orchestration task repeatedly exhausted a single context window. **Task 8.3 was further split** into 8.3a / 8.3b on 2026-04-30 (ADR-018) because the kernel service binds three subprocess pipelines (`deduce`, `solve`, `recheck`) behind one axum app and the foundation + endpoint plumbing each warrant their own session. **Task 8.3b was further split** into 8.3b1 / 8.3b2 on 2026-05-01 (ADR-019) because the original 8.3b scope (three handlers + their `IntoResponse` impls + comprehensive unit tests + `AppState` wiring + a Dapr-driven cargo integration test driving all three endpoints through daprd) again exceeded a single context window. **Task 8.3b2 was further split** into 8.3b2a / 8.3b2b on 2026-05-01 (ADR-020) because the original 8.3b2 scope (`AppState` introduction + env-driven option resolution + handler refactor onto `axum::extract::State` + shared smoke helpers + three daprd-driven cargo integration tests) again exceeded a single context window — and the external-dependency gate of solve/recheck (`.bin/z3`, `.bin/cvc5`, `CDS_KIMINA_URL`) cleanly separates from the dependency-free `/v1/deduce` smoke + the foundation refactor. **Task 8.4 was further split** into 8.4a / 8.4b on 2026-05-01 (ADR-021) because the original 8.4 scope (placement+scheduler bring-up + production SIGTERM-first warden escalation + readiness gate flip + Python `cds_harness.workflow` package + Dapr Python SDK introduction + aggregated envelope + per-stage tracing + `just dapr-pipeline` + end-to-end pytest smoke) again exceeded a single context window — and the Rust-foundation vs. Python-composition boundary cleanly separates the cluster bring-up + warden refactor from the Workflow harness composition. Sub-task progression is strict: `8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9`.
+> **Task 8 was split** into 8.1–8.4 on 2026-04-30 (ADR-016) because a monolithic Dapr-orchestration task repeatedly exhausted a single context window. **Task 8.3 was further split** into 8.3a / 8.3b on 2026-04-30 (ADR-018) because the kernel service binds three subprocess pipelines (`deduce`, `solve`, `recheck`) behind one axum app and the foundation + endpoint plumbing each warrant their own session. **Task 8.3b was further split** into 8.3b1 / 8.3b2 on 2026-05-01 (ADR-019) because the original 8.3b scope (three handlers + their `IntoResponse` impls + comprehensive unit tests + `AppState` wiring + a Dapr-driven cargo integration test driving all three endpoints through daprd) again exceeded a single context window. **Task 8.3b2 was further split** into 8.3b2a / 8.3b2b on 2026-05-01 (ADR-020) because the original 8.3b2 scope (`AppState` introduction + env-driven option resolution + handler refactor onto `axum::extract::State` + shared smoke helpers + three daprd-driven cargo integration tests) again exceeded a single context window — and the external-dependency gate of solve/recheck (`.bin/z3`, `.bin/cvc5`, `CDS_KIMINA_URL`) cleanly separates from the dependency-free `/v1/deduce` smoke + the foundation refactor. **Task 8.4 was further split** into 8.4a / 8.4b on 2026-05-01 (ADR-021) because the original 8.4 scope (placement+scheduler bring-up + production SIGTERM-first warden escalation + readiness gate flip + Python `cds_harness.workflow` package + Dapr Python SDK introduction + aggregated envelope + per-stage tracing + `just dapr-pipeline` + end-to-end pytest smoke) again exceeded a single context window — and the Rust-foundation vs. Python-composition boundary cleanly separates the cluster bring-up + warden refactor from the Workflow harness composition. **Task 9 was further split** into 9.1 / 9.2 / 9.3 on 2026-05-01 (ADR-022) because the original Task 9 scope (first-time JS/TS toolchain introduction + six TS schema mirrors + SvelteKit `+server.ts` BFF + canonical happy-path smoke + four Svelte 5 visualizer components + Playwright + the Phase 0 → Phase 1 marker flip) was structurally larger than every prior Phase 0 task and the natural three-axis boundary (toolchain-foundation / wire-contract+transport / visualizers+close-out) cleanly separates the green-field scaffold from the BFF contract from the UI close-out. Sub-task progression is strict: `8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9.1 < 9.2 < 9.3`.
+
+## Session 2026-05-01 — Task 9 plan restructure (planning-only)
+
+Restructure-only session. Task 9's inherited scope from Plan §8 row 9
+("SvelteKit frontend — wire to live backend; render AST, Octagon,
+MUCs") was diagnosed as context-window-overflowing under the same
+pattern that already forced Task 8 → 8.1–8.4 (ADR-016), Task 8.3 →
+8.3a + 8.3b (ADR-018), Task 8.3b → 8.3b1 + 8.3b2 (ADR-019), Task
+8.3b2 → 8.3b2a + 8.3b2b (ADR-020), and Task 8.4 → 8.4a + 8.4b
+(ADR-021). Task 9 splits this session into three atomic sub-tasks
+along the natural three-axis boundary:
+
+- **9.1** — Frontend foundation. First-time JS/TS toolchain
+  introduction into the repo (no existing `package.json`,
+  `node_modules`, `bun.lockb`, `eslint.config.js`,
+  `prettier.config.*`, `playwright.config.ts`, or Vite config
+  exists today; `bun` is verified at 1.3.13 by `just env-verify`
+  but no JS code consumes it). Scaffold `frontend/` via modern
+  `sv create` CLI (successor to the deprecated `npm create svelte@latest`)
+  pinned to SvelteKit 2.x + Svelte 5 (runes) + Vite 7 + TS 5.7+
+  strict (`noUncheckedIndexedAccess`, `noImplicitOverride`).
+  Tailwind CSS 4 with `@tailwindcss/vite` plugin (no
+  `postcss.config.js` / `autoprefixer` — Tailwind 4's Lightning
+  CSS engine handles vendor prefixes). ESLint 9 flat config
+  (`eslint.config.js` + `eslint-plugin-svelte` + `typescript-eslint`).
+  Prettier 3 + `prettier-plugin-svelte` 3. Playwright 1.51+ wired
+  as tombstone (one trivial `1 + 1 === 2` test ensures
+  `bun run test:e2e` exits 0 without spinning up a server). Vitest 3
+  for unit tests (also tombstone in 9.1). New Justfile block
+  `frontend-*`: `frontend-install` / `frontend-dev` /
+  `frontend-build` / `frontend-preview` / `frontend-lint` /
+  `frontend-format` / `frontend-typecheck` / `frontend-test` /
+  `frontend-e2e`. `bunfig.toml` pins registry + telemetry off.
+  No `package-lock.json` / `pnpm-lock.yaml` — `bun.lockb` only,
+  committed. Single placeholder `+page.svelte` rendering "Phase 0
+  — Neurosymbolic CDS". **Gate.** `cd frontend && bun install`
+  succeeds without warnings; `just frontend-build` exits 0 with
+  non-empty `frontend/build/`; `just frontend-typecheck` clean;
+  `just frontend-lint` clean; manual `just frontend-dev` smoke
+  confirms `:5173` returns the placeholder; `just frontend-test`
+  + `just frontend-e2e` exit 0 against tombstones; cargo + pytest
+  baselines unchanged; `just env-verify` clean.
+- **9.2** — TS schema mirrors + BFF + canonical smoke. Six TS
+  schema modules under `frontend/src/lib/schemas/`: `telemetry.ts`
+  (`ClinicalTelemetryPayload` with lexicographic key ordering
+  enforced at the BFF boundary), `onion.ts` (`OnionLIRTree`
+  discriminated union — Scope / Relation / IndicatorConstraint /
+  Atom narrowed by `kind` literal), `smt.ts`
+  (`SmtConstraintMatrix` + `LabelledAssertion`), `verdict.ts`
+  (`Verdict` mirroring `cds_kernel::deduce::Verdict`), `trace.ts`
+  (`FormalVerificationTrace`), `recheck.ts` (`LeanRecheckWire`),
+  `pipeline.ts` (`PipelineInput` + `PipelineEnvelope`), barrel
+  `index.ts`. Each mirror carries a JSDoc cross-reference to its
+  Rust source-of-truth file path. SvelteKit `+server.ts` BFF
+  routes under `frontend/src/routes/api/`: `/api/ingest`,
+  `/api/translate`, `/api/deduce`, `/api/solve`, `/api/recheck`
+  — each a thin proxy through `http://127.0.0.1:${process.env.DAPR_HTTP_PORT_*}/v1.0/invoke/<app-id>/method/v1/<path>`
+  (defaults 3500/3501 when env unset; matches Phase 0 sidecar
+  conventions). HTTP 422 `{error, detail}` envelopes lift to a
+  typed `BackendError` exception; per-stage `console.info` log.
+  No `DaprWorkflowClient` (ADR-022 §3 — Workflow is a CLI
+  orchestrator, not an HTTP endpoint; per-stage UX requires
+  per-stage round-trip latency that direct invocation supports
+  natively). Schema parity tripwire
+  `frontend/src/lib/schemas/parity.test.ts` (vitest) decodes
+  every `crates/schemas/tests/fixtures/*.json` golden through
+  the TS parse helpers and asserts `JSON.parse(json) ≡
+  schema.parse(json)` round-trip identity — catches drift between
+  Rust source-of-truth and TS mirrors at edit-time. New Justfile
+  recipe `frontend-bff-smoke` brings up `dapr-cluster-up` +
+  `py-service-dapr` + `rs-service-dapr` + a SvelteKit BFF on
+  `:5173`, drives the canonical `contradictory-bound` pipeline
+  via curl through the BFF (ingest → translate → deduce → solve
+  → recheck), asserts every stage 200 + `trace.sat == false`,
+  then `trap`-driven reverse-teardown of every spawned process.
+  **Gate.** Frontend typecheck clean; `frontend-test` runs
+  parity tripwire green; `frontend-bff-smoke` end-to-end against
+  a live cluster returns the canonical envelope; cargo + pytest
+  baselines unchanged.
+- **9.3** — Visualizers + Phase 0 close-out. Four Svelte 5
+  visualizer components: `AstTree.svelte` (recursive component
+  rendering OnionL IR with per-node source-span tooltips,
+  Tailwind `bg-rose-100 ring-1 ring-rose-300` highlight when the
+  node's span id is in the current MUC), `Octagon.svelte`
+  (hand-rolled SVG rendering 2D projections of `±x ±y ≤ c`
+  constraints over a `<select>`-able pair of canonical vitals;
+  feasible region as polygon clip-path with `fill-emerald-100
+  stroke-emerald-500`; current sample as `fill-sky-600` marker),
+  `MucViewer.svelte` (lists MUC entries by source-span, click
+  scrolls AST tree + pulses highlight via a small `$state` rune
+  store at `frontend/src/lib/stores/highlight.ts`),
+  `VerificationTrace.svelte` (sat/unsat + Lean recheck pills +
+  collapsible Alethe proof preview under `details/summary`).
+  No D3 / Plotly / Chart.js / svelte-flow / cytoscape / mermaid
+  — Phase 0 visualizers are simple geometric primitives
+  comfortably within hand-rolled SVG (≤ 50 AST nodes, ≤ 10
+  octagon constraints, ≤ 10 MUC entries; ADR-022 §6 contingency
+  for a hard limit is a follow-up ADR introducing one viz lib).
+  Single-page `+page.svelte` composes: telemetry+guideline form
+  → "Run pipeline" button (drives the five `/api/*` routes in
+  sequence with per-stage error surfacing) → verification trace
+  banner → AST tree (left) | Octagon (right) | MUC viewer
+  (bottom). Playwright E2E `frontend/e2e/pipeline.e2e.ts`
+  drives the canonical `contradictory-bound` flow against a
+  live cluster + `frontend-preview` (production build, deploy
+  parity), asserts banner settles to "unsat" + MUC viewer
+  shows two entries + AST tree highlights both atoms + recheck
+  pill shows ✓. **PHASE marker flip.** Bump
+  `cds_harness.__init__.PHASE = 0` → `1` and
+  `cds_kernel::PHASE: u8 = 0` → `1`; docstrings refresh to
+  reflect "Phase 1 scope: live FHIR streaming, distributed
+  cloud, ZKSMT" per Plan §1. **README touch-up.** New
+  "Running Phase 0 end-to-end" section pointing at
+  `just frontend-bff-smoke` (9.2) and the visualizer demo URL
+  (9.3) — one paragraph; comprehensive Phase 1 docs land later.
+  **Gate.** Vitest + parity tripwire green; Playwright E2E green
+  against a live cluster; `frontend-build` clean; cargo + pytest
+  baselines unchanged (only the PHASE constant on each side
+  flips, which the existing `phase_marker_is_phase_zero`-style
+  tests on each side flip alongside, so both stay green).
+  **Phase 0 closes here.**
+
+ADR-022 captures the rationale, the three-axis split boundary, the
+locked toolchain, the visualizer-library policy (hand-rolled SVG +
+Svelte 5 reactivity), the BFF transport policy (direct
+service-invocation through daprd; Workflow-via-`DaprWorkflowClient`
+deferred to Phase 1), the schema-mirror policy (hand-written TS +
+parity tripwire over `schemars` codegen), the PHASE 0 → 1 flip
+semantics (lands at 9.3 close), the per-sub-task contracts, and the
+alternatives rejected (single Task 9 session; two-way split;
+pre-emptive four-way split; `schemars` codegen; D3 / Plotly /
+svelte-flow viz libs; Workflow BFF; Python BFF; skip canonical BFF
+smoke; skip schema parity tripwire; defer PHASE flip to Phase 1).
+
+**Further-split contingency.** ADR-022 §10 enumerates a 4-way split
+(9.3a AST + MUC + highlight store; 9.3b Octagon + verification
+trace + Playwright + PHASE flip + close-out) **not** triggered at
+plan-time but available mid-flight if 9.3's session repeats the
+context-window pattern — same shape as 8.3 → 8.3b → 8.3b1 + 8.3b2
+→ 8.3b2a + 8.3b2b mid-flight splits.
+
+No code, no dependencies, no test-suite changes this session.
+Final gate (regression-only — verify no drift):
+
+- `cargo test --workspace` → **153 pass** (unchanged from 8.4b close-out).
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean.
+- `cargo fmt --all -- --check` → clean.
+- `uv run pytest` → 95 pass + 1 skip
+  (`test_dapr_pipeline.py::test_dapr_workflow_drives_contradictory_pipeline`
+  loudly skips on missing `CDS_KIMINA_URL` — by design, unchanged
+  from 8.4b).
+- `uv run ruff check .` → clean.
+- `just env-verify` → ✓ (uv 0.11.8, cargo 1.95.0, rustc 1.95.0,
+  bun 1.3.13, just 1.50.0, git 2.47.3, curl 8.14.1).
+
+## Open notes for Task 9.1 — Frontend foundation
+
+- **Use modern `sv create`, not the deprecated `npm create svelte@latest`.**
+  The Svelte CLI (`sv`) is the 2025+ replacement. It scaffolds
+  SvelteKit 2 + Svelte 5 by default. Runs as `bunx sv create
+  frontend --template minimal --types ts --no-add-ons` (or whichever
+  flag set the current `sv` version exposes — verify at session-time;
+  the contract is "minimal scaffold, TypeScript, no add-ons baked in
+  beyond what 9.1 explicitly needs").
+- **`frontend/` currently has only `.gitkeep`.** The first sub-task
+  step is to delete `.gitkeep` (or let the scaffold overwrite it)
+  before running `sv create`. The scaffold fails if `frontend/`
+  already contains files; pre-empt by either running
+  `sv create frontend-tmp` and moving contents, or `sv create .`
+  from inside `frontend/` after removing `.gitkeep`.
+- **Bun-only — no `npm` / `yarn` / `pnpm` invocations.** Justfile
+  recipes shell out to `bun run <script>` exclusively. ADR-007 §3
+  locks bun + Vite as exclusive; 9.1 is the first place those locks
+  bind in the repo. `bun.lockb` is the only lockfile committed.
+- **Tailwind 4 has a different setup than Tailwind 3.** No
+  `tailwind.config.js` (Tailwind 4 reads CSS-side `@theme` blocks
+  + auto-detects content paths from imported CSS). No
+  `postcss.config.js` / `autoprefixer` (Lightning CSS engine
+  handles vendor prefixes). Only `@tailwindcss/vite` plugin
+  registered in `vite.config.ts` + a single `src/app.css` with
+  `@import "tailwindcss";`. Verify at session-time that `sv create`
+  doesn't auto-inject a stale Tailwind 3 setup; if it does, strip.
+- **ESLint 9 flat config only.** `eslint.config.js` (ESM) — not
+  `.eslintrc.json` / `.eslintrc.cjs` / `.eslintrc.yaml`. ESLint 9
+  removed support for legacy configs entirely. The flat config
+  imports `eslint-plugin-svelte` + `@typescript-eslint`/`typescript-eslint`
+  packages directly.
+- **TypeScript `strict` + `noUncheckedIndexedAccess` +
+  `noImplicitOverride`.** SvelteKit's `tsconfig.json` extends a
+  generated `.svelte-kit/tsconfig.json`; add the three flags in
+  the user-visible `tsconfig.json`'s `compilerOptions`. The
+  `noUncheckedIndexedAccess` flag matters for the BFF's
+  `process.env.DAPR_HTTP_PORT_*` reads in 9.2 (would otherwise be
+  silently `string` instead of `string | undefined`).
+- **No JS files allowed under `frontend/src/`.** `.ts` / `.svelte`
+  only. Enforced by `tsconfig.json` `"allowJs": false` and ESLint's
+  `no-restricted-syntax` if needed. Keeps the contract surface
+  homogeneous.
+- **Justfile recipe block placement.** Insert the `frontend-*` block
+  after the existing `dapr-pipeline` recipe but before the
+  comments/help block at the bottom. Each recipe is a single-line
+  `cd frontend && bun run <script>` (or `cd frontend && bun
+  install`); no inline bash logic in 9.1 — the `frontend-bff-smoke`
+  recipe with cluster bring-up is 9.2's scope.
+- **bunfig.toml.** `[install] frozen-lockfile = true` for CI parity
+  (override locally with `bun install --no-frozen-lockfile`);
+  `[telemetry] disabled = true` (Bun phones home by default; turn
+  off per ADR-007 §6 spirit — local-first provisioning).
+- **Vite port + host.** Pin dev server to `127.0.0.1:5173` (default
+  port). The BFF's daprd-port reads in 9.2 expect Vite at 5173;
+  changing that needs a coordinated 9.2 update.
+- **Playwright + Vitest tombstones.** Both runners must exit 0 on
+  9.1's gate, so each gets one trivial test that proves the
+  runner is wired without depending on real fixtures. Real tests
+  land in 9.2 (parity tripwire) + 9.3 (E2E pipeline).
+- **`.gitignore` additions.** `frontend/node_modules/`,
+  `frontend/build/`, `frontend/.svelte-kit/`,
+  `frontend/playwright-report/`, `frontend/test-results/`. Keep
+  `frontend/bun.lockb` committed (binary lockfile).
+- **Phase 0 marker stays at 0.** PHASE flip is 9.3's gate, not
+  9.1's. `cds_harness.__init__.PHASE` and `cds_kernel::PHASE`
+  remain `0` throughout 9.1 + 9.2.
+
+## Open notes for Task 9.2 — TS schema mirrors + BFF + canonical smoke
+
+- **Hand-written TS mirrors, not `schemars` codegen.** ADR-022 §8.
+  Six small schemas + parity tripwire is the lower-complexity
+  path. Reopen at >~12 schemas.
+- **Source-of-truth file paths to mirror.** `crates/schemas/src/`
+  for the four core schemas; `python/cds_harness/workflow/pipeline.py`
+  for `PipelineInput`; the 8.4b aggregated envelope shape lives in
+  the Memory_Scratchpad's "Aggregated envelope shape" block.
+  Each TS file's JSDoc header carries the cross-reference path.
+- **`OnionLIRTree` discriminated union.** Use TS `kind` literal
+  narrowing: `type OnionLNode = Scope | Relation | IndicatorConstraint
+  | Atom`; each variant has `kind: "scope" | "relation" |
+  "indicator_constraint" | "atom"`. The Rust side uses serde
+  `tag = "kind"` on the enum (see `crates/schemas/src/onion.rs`).
+- **`ClinicalTelemetryPayload` key ordering.** Rust uses `BTreeMap`
+  for lexicographic ordering on the wire; TS `Record<string, T>`
+  doesn't guarantee insertion order on integer-string-coerced
+  keys (V8 / SpiderMonkey both reorder). The BFF must sort keys
+  before encoding outbound JSON. Add a `sortVitalsKeys()` helper
+  in the schemas barrel that the BFF uses on every outbound
+  ingest payload.
+- **BFF route file layout.** SvelteKit 2 uses
+  `src/routes/api/<name>/+server.ts` with a `POST` named export
+  per route. Each route imports the relevant schema parser from
+  `lib/schemas/`, validates the inbound body, calls daprd via
+  `fetch`, validates the response, returns it.
+- **Daprd port env vars.** Reads `process.env.DAPR_HTTP_PORT_HARNESS`
+  + `DAPR_HTTP_PORT_KERNEL` at request time (not at module load —
+  ports change between dev sessions when daprd allocates fresh
+  ports). Defaults: 3500 (harness) / 3501 (kernel) when env unset.
+  These match the Phase 0 sidecar conventions but a developer
+  running `just dapr-pipeline` sees different ports per session
+  (allocated via socket-pick); `frontend-bff-smoke` exports the
+  allocated ports as env vars before launching `bun run dev`.
+- **Error envelope decode.** Both `cds-harness` and `cds-kernel`
+  emit HTTP 422 `{error: string, detail: string}` on failures
+  (ADR-017 §2 + ADR-019 §1). Lift to a typed `BackendError` class
+  in `lib/errors.ts`; route handlers re-throw it with the original
+  HTTP status preserved.
+- **Per-stage `console.info` shape.** Match the harness's
+  `tracing` shape: `console.info({ stage: "translate", duration_ms,
+  doc_id })` — JSON-friendly so a future log-aggregation pipeline
+  can ingest BFF logs alongside service logs.
+- **Schema parity tripwire — fixture sources.** Cargo emits
+  golden fixtures under `crates/schemas/tests/fixtures/*.json`
+  during test runs (or read from existing fixtures on disk; the
+  schemas crate already has stable fixtures committed). The
+  vitest tripwire enumerates all `*.json` in that directory,
+  decodes through the matching TS parser, asserts identity. Add
+  a coverage check that asserts every schema has at least one
+  fixture (catches a new schema landing without a parity test).
+- **`frontend-bff-smoke` recipe shape.** Mirrors `dapr-pipeline`
+  (8.4b's recipe) but ends in a curl pipeline rather than a
+  Workflow runner. Pre-flight: `.bin/dapr` + slim runtime +
+  `.bin/{z3,cvc5}` + `$CDS_KIMINA_URL`; bring up cluster +
+  harness + kernel sidecars; allocate Vite port (5173 fixed —
+  or pick at session-time if 5173 is in use); export daprd ports
+  as env to Vite; `bun run preview` (production build, not dev,
+  for closer deploy parity); curl-drive the five `/api/*` routes;
+  assert results; `trap`-driven reverse-teardown.
+- **No new visualizers in 9.2.** `+page.svelte` stays at the 9.1
+  placeholder until 9.3. The BFF + types are the contract; the
+  UI demo is the close-out.
+
+## Open notes for Task 9.3 — Visualizers + Phase 0 close-out
+
+- **Hand-rolled SVG, not D3 / Plotly / svelte-flow / Chart.js.**
+  ADR-022 §6. Phase 0 scale (≤ 50 AST nodes, ≤ 10 octagon
+  constraints, ≤ 10 MUC entries) is comfortably within hand-rolled
+  range. Hard-limit contingency: §10 of ADR-022 — open a follow-up
+  ADR before reaching for a viz lib.
+- **Cross-component highlight store.** Single Svelte 5 `$state`
+  rune at `frontend/src/lib/stores/highlight.ts`:
+  `export const highlight = $state<{ spanId: string | null }>({
+  spanId: null });`. AstTree subscribes via `$derived`; MucViewer
+  writes on click. Pulse animation via Tailwind `animate-pulse`
+  applied for ~600ms after a write (use `setTimeout` to clear).
+- **Octagon constraint extraction.** `SmtConstraintMatrix` carries
+  `LabelledAssertion` entries; the Octagon component filters to
+  the subset where the assertion is a half-plane over the
+  selected vital pair. Phase 0 fixtures only emit one or two
+  octagonal constraints per assertion, so the geometry is
+  trivial; if a fixture grows beyond 10 constraints per
+  projection, ADR-022 §6 hard-limit triggers.
+- **AST tree recursion in Svelte 5.** Use `<svelte:self>` with the
+  child node passed as a prop. Reactivity via `$state` + `$derived`
+  for the per-subtree collapse flag. Source-span tooltip via
+  Svelte's native `<title>` SVG element or HTML `title` attribute
+  — no third-party tooltip lib.
+- **Verification trace pill colours.** Tailwind 4 default palette
+  supports `bg-emerald-100 text-emerald-700` (sat / ok),
+  `bg-rose-100 text-rose-700` (unsat / error), `bg-slate-100
+  text-slate-700` (pending). Pill component lives at
+  `lib/components/Pill.svelte`.
+- **Alethe proof preview.** First 50 lines via `proof.split("\n").slice(0,
+  50).join("\n")`; full proof under a `<details>` element. The
+  `<pre>` block uses Tailwind's `font-mono text-xs` + `overflow-x-auto`.
+- **Single-page composition.** No SvelteKit form actions in
+  9.3 (reserved for a Phase 1 multi-payload comparison view). The
+  pipeline driver is a plain `async function` triggered by a
+  button click; per-stage state stored in a single
+  `$state` rune holding `{ stage: "ingest" | "translate" | ... |
+  "done" | "error", payload, ir, matrix, verdict, trace, recheck,
+  error? }`. Each stage's UI re-renders as the rune updates.
+- **Playwright E2E.** Test discipline matches the cargo
+  integration test shape: gate on `.bin/dapr` + slim runtime +
+  `.bin/{z3,cvc5}` + `$CDS_KIMINA_URL` (Lean recheck assertion
+  needs Kimina); skip loudly with reason on missing deps. Run
+  against `frontend-preview` (production build), not dev — closer
+  to deploy parity. Headless Chromium only in CI; full
+  cross-browser deferred to Phase 1.
+- **PHASE marker flip — coordinated edit.** Two files in lock-step:
+  `python/cds_harness/__init__.py` (`PHASE = 0` → `1`) and
+  `crates/kernel/src/lib.rs` (or wherever `PHASE: u8 = 0` lives —
+  verify at session-time; might be `crates/schemas/src/lib.rs`
+  too). Each side has a unit test asserting `PHASE == 0` (or
+  `PHASE == 1` after the flip); update both. Plan §10 step 7
+  is the touchstone.
+- **README touch-up — one paragraph, not a rewrite.** Add a
+  "Running Phase 0 end-to-end" section after the existing
+  "Quickstart" or equivalent block. Point at
+  `just frontend-bff-smoke` (no UI, fastest CI gate) and
+  `just frontend-preview` + browser at `http://127.0.0.1:4173`
+  (visualizer demo, slowest gate). Comprehensive Phase 1 docs
+  land later.
+- **Phase 0 close-out paperwork.** After the PHASE flip, update
+  Memory_Scratchpad's "Active task pointer" to `Last completed:
+  Task 9.3 — Visualizers + Phase 0 close-out (Phase 0 closed).
+  Next up: Phase 1 planning session.` Plan §8 row 9.3 marked
+  `**DONE**`. Phase 1 task checklist not started in 9.3 — a
+  Phase 1 kickoff session is its own concern.
+
+
 
 ## Session 2026-05-01 — Task 8.4b close-out (Task 8 closed)
 
