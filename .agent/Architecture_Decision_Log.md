@@ -1709,3 +1709,403 @@ integration test (kernel `deduce`/`solve`/`recheck` + harness
   rather than as 30000 ms — fail-loud is the right call). The
   fail-loud rule lifts directly from `service::config::parse_port_raw`
   (ADR-018 §1) and the same arguments apply.
+
+---
+
+## ADR-021 — Phase 0 end-to-end Workflow split (Task 8.4 → 8.4a + 8.4b)
+
+**Status:** Accepted
+**Date:** 2026-05-01
+
+**Context.** Task 8.4 inherited from ADR-016 §6 + the Memory_Scratchpad
+open-notes block a seven-fold scope: (a) `just placement-up` /
+`just scheduler-up` recipes that bring the slim-staged Dapr
+`placement` + `scheduler` binaries up as long-running background
+processes (currently staged but never started — ADR-016 §6 explicitly
+deferred this); (b) **production** SIGTERM-first warden escalation in
+`crate::solver::warden::run_with_input` — replacing the single-stage
+`kill_on_drop`-only SIGKILL contract documented in
+`solver/warden.rs:1-13` with two-stage SIGTERM → grace-window →
+SIGKILL fallback (the deferral has rolled forward through six prior
+ADRs: 014 §9 → 015 §8 → 016 §7 → 018 §6 → 019 §11 → 020 §6); (c)
+flipping the kernel + harness daprd-driven cargo / pytest readiness
+gate from `/v1.0/healthz/outbound` (Phase 0 — placement down, ADR-017
+§4 / ADR-018) back to `/v1.0/healthz` once placement is up; (d) a new
+Python `cds_harness.workflow` package implementing a Dapr Workflow
+that chains `ingest → translate → deduce → solve → recheck` as five
+activities, each a service-invocation call against the Phase 0
+sidecars validated through Tasks 8.2 + 8.3a + 8.3b1 + 8.3b2a + 8.3b2b;
+(e) per-stage `tracing` spans correlated through Workflow
+activity-id; (f) the aggregated cross-stage envelope shape
+(`{ payload, ir, matrix, verdict, trace, lean_recheck }`) plus the
+deferred design call between in-band JSON and Dapr state-store
+handles; (g) a `just dapr-pipeline` recipe + integration smoke that
+brings everything up, drives the canonical guideline through the
+five-stage pipeline, asserts the verification flag round-trips, and
+tears the cluster down cleanly. That bundle is materially larger
+than 8.3b2 (which itself was split into 8.3b2a + 8.3b2b on
+2026-05-01 per ADR-020 because three cohesive integration tests +
+one foundation refactor + one helper lift exceeded a single context
+window). Plan §8 §nb on 2026-05-01 splits 8.4 along the natural
+**Rust-foundation vs. Python-composition** boundary into **8.4a (this
+ADR — placement+scheduler bring-up + production SIGTERM-first warden
+escalation + readiness gate flip)** and **8.4b (Python Dapr Workflow
+harness + aggregated envelope + per-stage tracing +
+`just dapr-pipeline` + end-to-end smoke close-out)**.
+
+**Decision.**
+
+### 1. Split rationale — language-stack + dependency boundary
+
+The seven inherited work items partition cleanly by language stack
+and dependency direction:
+
+- **8.4a — Rust + Justfile foundation.** Owns the long-deferred
+  warden refactor (one file: `crates/kernel/src/solver/warden.rs`,
+  ~175 lines today, plus its three existing `tokio::test`
+  unit cases), the two new Justfile recipes for placement/scheduler
+  bring-up + a unified `dapr-cluster-up` aggregator, and the
+  one-line readiness-probe flip in the shared `tests/common.rs`
+  helper that all five daprd-driven cargo integration tests funnel
+  through (`tests/service_smoke.rs` + `tests/service_pipeline_smoke.rs`).
+  Self-contained: no Python touchpoints, no Workflow harness, no
+  cross-stage envelope decisions. The outputs feed 8.4b but 8.4b
+  cannot need the warden refactor's *implementation details* — it
+  only needs the contract that long-running solver children honour
+  graceful shutdown.
+- **8.4b — Python Workflow + close-out.** Owns the new
+  `cds_harness.workflow` package, the five `@activity` decorated
+  callables, the aggregated envelope shape, the per-stage tracing
+  decision, the `just dapr-pipeline` recipe, and the end-to-end
+  pytest smoke. Depends on 8.4a's outputs (placement+scheduler must
+  be running for Workflow to schedule activities; the warden
+  refactor must not regress the kernel solver / lean pipelines)
+  but only at the contract surface. No Rust kernel changes; no
+  warden touchpoints.
+
+Splitting along this boundary keeps 8.4a's gate self-contained
+within the Rust workspace + Justfile (cargo test + clippy + fmt +
+the new `just dapr-cluster-up` smoke) and 8.4b's gate self-contained
+within the Python workspace + the cluster bring-up that 8.4a
+delivers (pytest + ruff + the new `just dapr-pipeline` smoke). The
+Workflow harness composition is the close-out of Task 8 in its
+entirety; its scope is exactly large enough on its own to fill a
+session given the Dapr Python SDK introduction (ADR-017 §5 deferred
+the SDK; 8.4b decides whether to introduce it or stay on plain
+`httpx` for service-invocation).
+
+### 2. 8.4a contract — Dapr cluster bring-up + warden hardening
+
+- **`just placement-up` recipe.** Background-spawns
+  `.bin/.dapr/.dapr/bin/placement` with stable bind ports
+  (`:50005` is the Dapr-1.17 default; pin via `--port` flag for
+  reproducibility). Logs to `target/dapr-placement.log`. The recipe
+  prints the PID and exits; teardown is by `just dapr-cluster-down`
+  (also new). On Linux, supervises the child via the
+  `setsid`/process-group trick so a `Ctrl-C` on the launching
+  shell propagates SIGTERM to the placement process group.
+- **`just scheduler-up` recipe.** Symmetric to `placement-up` —
+  background-spawns `.bin/.dapr/.dapr/bin/scheduler` on `:50006`
+  (Dapr-1.17 default). Same supervision discipline.
+- **`just dapr-cluster-up` aggregator.** Composes
+  `placement-up` + `scheduler-up`; idempotent (skips if PIDs in the
+  recorded pid-files are still alive). `dapr-cluster-down`
+  SIGTERM-then-grace-then-SIGKILLs both children — same shape as
+  8.3a's `tests/common::sigterm_then_kill` helper but lifted to the
+  Justfile via a small bash function. Pid-files live under
+  `target/` so `cargo clean` reclaims them.
+- **`just dapr-cluster-status` printout.** Mirrors `dapr-status` —
+  prints the placement + scheduler PIDs (or "not running"), the
+  log paths, and the bound ports. Useful operationally and for
+  the 8.4b workflow smoke's pre-flight check.
+- **Production SIGTERM-first warden escalation.** Refactor
+  `crate::solver::warden::run_with_input` to two-stage shutdown:
+  on wall-clock timeout, send `SIGTERM` to the child (via
+  `nix::sys::signal::kill(Pid::from_raw(child.id() as i32),
+  Signal::SIGTERM)`), wait up to a configurable grace window
+  (default `Duration::from_millis(500)` — same shape as
+  `tests/common::sigterm_then_kill(_, Duration::from_secs(5))` but
+  shorter because the warden grace is per-child, not per-CLI), then
+  fall through to tokio `Child::kill()` (SIGKILL) on grace expiry.
+  `kill_on_drop(true)` stays on every `Command` so an upstream
+  panic / cancellation still triggers SIGKILL — the two-stage
+  escalation only fires on the timeout path. Promote `nix` from
+  the kernel crate's `[dev-dependencies]` (added in 8.3a per
+  ADR-018 §6 narrow auth) to `[dependencies]`; same feature set
+  (`default-features = false`, `features = ["signal"]`).
+- **`WardenError` shape preserved.** The existing
+  `WardenError::Timeout { bin, timeout }` remains the surface
+  error; the two-stage escalation is an implementation detail. No
+  variant is added — callers (`solver::z3`, `solver::cvc5`,
+  `service::handlers`, error-tag mapping in `service::errors`) all
+  continue to consume the same enum.
+- **Warden tests grow by two cases.** The existing three tokio
+  unit tests (`echoes_stdin_through_cat`,
+  `timeout_kills_long_running_child`,
+  `missing_binary_yields_spawn_error`) stay; two new cases land:
+  (a) `timeout_sigterm_first_when_child_traps_term` — uses a
+  small bash one-liner via `/bin/bash -c 'trap "exit 0" TERM;
+  while :; do sleep 1; done'` so the child *exits* on SIGTERM
+  before the grace expires; assert the warden returns
+  `WardenError::Timeout` (the wall-clock budget was still
+  exceeded — only the kill mechanism changed) and the elapsed
+  wall-clock is in `[wall_clock, wall_clock + grace]`; (b)
+  `timeout_sigkill_fallback_when_child_ignores_term` — uses
+  `/bin/bash -c 'trap "" TERM; while :; do sleep 1; done'` so
+  SIGTERM is no-op'd; assert `WardenError::Timeout` and elapsed
+  wall-clock is in `[wall_clock + grace, wall_clock + grace +
+  reasonable-margin]`. These are hermetic on any Linux dev host.
+- **Readiness gate flip.** `tests/common::wait_until_ready`
+  currently probes `/v1.0/healthz/outbound` per ADR-017 §4 /
+  ADR-018 §5 (Phase 0, placement down). Once 8.4a's
+  `dapr-cluster-up` exists, integration tests can flip back to
+  `/v1.0/healthz` (Dapr 1.17's full-readiness probe — returns 204
+  iff sidecar + placement are both reachable). The flip is
+  optional in 8.4a if it complicates the transition: keep the
+  outbound probe as the floor (continues to work whether or not
+  placement is up), and let 8.4b's pipeline test additionally
+  pre-flight `/v1.0/healthz` after starting the cluster. Pick at
+  session-time based on whether the existing five integration
+  tests stay green when targeted at `/v1.0/healthz` against a
+  cluster-up sidecar — if yes, flip; if no, document the
+  asymmetry and defer to 8.4b.
+- **Gate.** `cargo test --workspace` green (target: 151 baseline +
+  2 new warden cases = 153 pass); clippy clean; fmt clean; pytest
+  95/95 untouched (no Python edits); `just dapr-cluster-up`
+  followed by `just dapr-cluster-status` prints both PIDs +
+  ports; `just dapr-cluster-down` reclaims both children;
+  `just rs-service-pipeline-smoke` still green (warden refactor
+  must not regress the existing solver/lean integration tests);
+  `just env-verify` clean.
+
+### 3. 8.4b contract — Python Workflow + close-out
+
+- **`cds_harness.workflow` package.** New module under
+  `python/cds_harness/`:
+  - `__init__.py` — public re-exports (workflow registration,
+    activity callables, `run_pipeline()` top-level entrypoint).
+  - `pipeline.py` — the `@workflow` decorated function chaining
+    five `yield ctx.call_activity(...)` calls; the aggregated
+    envelope returned at the bottom. Each activity is a thin
+    `httpx`-over-daprd wrapper around the relevant
+    service-invocation URL.
+  - `activities.py` — five `@activity` callables: `ingest`,
+    `translate`, `deduce`, `solve`, `recheck`. Each calls
+    `httpx.post("http://127.0.0.1:<DAPR_HTTP_PORT>/v1.0/invoke/<app-id>/method/<path>", json=...)`,
+    decodes the response, propagates `{error, detail}` 422s as
+    `WorkflowActivityError` exceptions so the runtime can apply
+    its retry policy.
+  - `__main__.py` — argparse + `dapr.workflow.WorkflowRuntime`
+    setup + a `run_pipeline(payload)` console script that
+    schedules a workflow instance, polls until terminal, prints
+    the aggregated envelope, exits 0 on `Verdict::Sat` happy path
+    or non-zero on the `Unsat` / `LeanError` paths (with the
+    aggregated envelope still printed so an operator sees the
+    full trace).
+- **Dapr SDK introduction — ADR-017 §5 revisit.** ADR-017 §5
+  deferred the Dapr Python SDK to a "Phase 1 candidate".
+  Workflow's typed `@workflow` / `@activity` decorators + the
+  `WorkflowRuntime`'s replay semantics + the activity-id-tagged
+  tracing all materially benefit from the SDK over hand-rolled
+  `httpx` orchestration. 8.4b therefore takes the SDK as a
+  scoped dependency: `dapr>=1.17` + `dapr-ext-workflow>=1.17` in
+  `[project.dependencies]`. The `httpx`-over-daprd path stays for
+  service-invocation inside activities (ADR-017 §5's argument
+  remains valid at the activity boundary — one HTTP POST does
+  not warrant a typed binding); the SDK only owns Workflow
+  registration + replay + tracing.
+- **Aggregated envelope.** In-band JSON shape:
+  ```json
+  {
+    "payload":  { "...ClinicalTelemetryPayload": "..." },
+    "ir":       { "...OnionLIRTree": "..." },
+    "matrix":   { "...SmtConstraintMatrix": "..." },
+    "verdict":  { "...Verdict": "..." },
+    "trace":    { "...FormalVerificationTrace": "..." },
+    "recheck":  { "...LeanRecheckWire": "..." }
+  }
+  ```
+  Reasons for in-band over state-store handles: (a) Phase 0
+  payloads are small (single-pipeline-run shapes top out at
+  low-kB JSON); (b) the JSON-over-TCP discipline (constraint C6 +
+  ADR-002) keeps every cross-stage payload directly inspectable /
+  teeable; (c) Workflow replay requires deterministic activity
+  inputs — state-store handles add a serialization indirection
+  that complicates replay debugging; (d) Phase 1+ swaps to
+  state-store handles when payload shape grows or when payloads
+  carry references to large external resources (raw FHIR
+  bundles, full ECG waveforms). Phase 0 in-band JSON is the
+  right call.
+- **Per-stage tracing.** Every activity is annotated with
+  `@tracing.span("workflow.<stage>")`-equivalent (`opentelemetry`
+  Python SDK; the harness already imports `tracing`-equivalent
+  via uvicorn). Spans link to the Dapr Workflow activity-id via
+  the SDK's automatic correlation. The kernel-side
+  `#[tracing::instrument(skip(req), fields(stage = "..."))]`
+  (ADR-019 §6) already emits matching span structure on the Rust
+  side, so the trace tree is end-to-end.
+- **`just dapr-pipeline` recipe.** Top-level orchestrator:
+  1. `just dapr-cluster-up` (8.4a's recipe) — placement +
+     scheduler.
+  2. `just py-service-dapr` — harness service under daprd
+     (background, pid recorded).
+  3. `just rs-service-dapr` — kernel service under daprd
+     (background, pid recorded).
+  4. `python -m cds_harness.workflow run-pipeline
+     --payload data/sample/icu-monitor-01.json
+     --guideline data/guidelines/contradictory-bound.txt`
+     drives the canonical end-to-end run.
+  5. Asserts the aggregated envelope contains
+     `verdict.breach_summary` non-empty (deduce stage active),
+     `trace.sat == false` (canonical contradictory guideline),
+     and `recheck.ok == true` (Lean re-check passed) — the same
+     three flags 8.3b2b's pipeline smoke already validates,
+     now composed under Workflow.
+  6. Tear down in reverse order; `dapr-cluster-down` last.
+- **End-to-end pytest smoke.** `python/tests/test_dapr_pipeline.py`:
+  one `@pytest.mark.skipif` gated test (gates: `.bin/dapr` +
+  `.bin/.dapr/.dapr/bin/{placement,scheduler}` + `.bin/z3` +
+  `.bin/cvc5` + `CDS_KIMINA_URL`). Spawns the cluster + both
+  sidecars in fixtures, drives the canonical pipeline through
+  the workflow runtime, asserts the same three flags as the
+  Justfile recipe, tears down via the SIGTERM-first cleanup
+  shape that 8.4a's warden refactor codifies. The pytest
+  variant is the CI-amenable shape; the Justfile recipe is the
+  developer-friendly shape.
+- **Gate.** `uv run pytest` green (target: 95 baseline + 1 new
+  end-to-end smoke = 96 pass); ruff clean; cargo test 153/153
+  unchanged from 8.4a; `just dapr-pipeline` end-to-end against
+  `data/guidelines/contradictory-bound.txt` returns
+  `verdict ∧ trace.sat=false ∧ recheck.ok=true`; manual run
+  on `data/guidelines/hypoxemia-trigger.txt` (consistent
+  guideline) returns `verdict ∧ trace.sat=true ∧
+  recheck.ok=true` — both canonical fixtures round-trip
+  end-to-end. `just env-verify` clean. **This closes Task 8.**
+
+### 4. SIGTERM-first warden — ratified, not deferred again
+
+ADR-014 §9 → ADR-015 §8 → ADR-016 §7 → ADR-018 §6 → ADR-019 §11 →
+ADR-020 §6 each rolled the production warden's SIGTERM-first
+escalation forward. **8.4a closes the deferral.** The reason the
+escalation lands in Task 8.4 specifically (and not earlier) is
+that Workflow + placement-bound features introduce long-running
+solver children that may hold non-trivial proof-state mid-flight;
+SIGKILL-only on those is acceptable at the unit-fixture level
+(8.3b1 / 8.3b2b's contradictory-bound traces are tens of
+milliseconds) but operationally hostile when a Workflow retry
+policy fires against a multi-second proof. The two-stage shape
+(SIGTERM + grace + SIGKILL) gives the solver a chance to flush
+partial state before being killed — same discipline as the
+narrowly-authorized `tests/common::sigterm_then_kill` helper for
+the daprd CLI (ADR-018 §6).
+
+### 5. Readiness probe — `/v1.0/healthz` is the new floor when
+cluster is up, `/v1.0/healthz/outbound` remains the floor when not
+
+8.4a may flip the readiness gate in `tests/common::wait_until_ready`
+from `/v1.0/healthz/outbound` to `/v1.0/healthz` if and only if
+all five existing daprd-driven integration tests
+(`tests/service_smoke.rs::dapr_sidecar_drives_*` x3 +
+`tests/service_pipeline_smoke.rs::dapr_sidecar_drives_*` x2)
+stay green when targeted at `/v1.0/healthz` against a cluster-up
+sidecar. Otherwise — keep `/v1.0/healthz/outbound` as the helper's
+floor (still works whether or not placement is up) and let 8.4b's
+Workflow smoke additionally pre-flight `/v1.0/healthz` after
+starting the cluster. The transition is documented in
+`tests/common.rs` doc-comment so a future session reading the
+helper can answer "why does this probe outbound and not the full
+healthz?" without grepping ADRs.
+
+### 6. Dapr Python SDK — taken in 8.4b, not deferred further
+
+ADR-017 §5 deferred the Dapr Python SDK. 8.4b reverses that
+decision **only for Workflow registration / replay / activity-id
+tracing** — the surfaces where the SDK provides materially more
+than `httpx`-over-daprd. Service-invocation calls inside activities
+remain plain `httpx` POSTs because (a) constraint C6 is satisfied
+by JSON-over-TCP without typed bindings, (b) the kernel-side
+endpoints expose a stable `{error, detail}` 422 envelope that maps
+cleanly to a 4-line `httpx.HTTPStatusError` decode, and (c)
+keeping the SDK surface narrow keeps the 8.4b session bounded.
+
+### 7. Cross-stage envelope — in-band JSON, not state-store handles
+
+Phase 0 takes the in-band JSON envelope per §3 above. ADR-016 §3's
+in-memory state store has `actorStateStore=true` already; nothing
+prevents 8.4b from using state-store handles, but the trade — a
+serialization indirection that complicates Workflow replay
+debugging — is net-negative for Phase 0 payload sizes. ADR-021 §3
+documents the decision; Phase 1+ revisits when payload shape grows.
+
+### 8. Plan §8 ordering note
+
+`8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9`.
+Sub-task progression remains strict per Plan §8 §"At any
+session" — no leapfrogging across the new boundary either.
+
+**Consequences.** Task 8.4a is sized to fit a single context window:
+one warden refactor (~30 lines net change to a 175-line file) +
+two new warden tests + three Justfile recipes (`placement-up`,
+`scheduler-up`, `dapr-cluster-up` + symmetric `*-down` aggregator)
++ optional one-line readiness-probe flip in
+`tests/common.rs`. Task 8.4b inherits a stable cluster bring-up
+contract + a hardened warden + the Phase 0 readiness gate, and
+delivers the Workflow harness as a self-contained Python package
+that closes Task 8 in its entirety. The end-to-end pipeline smoke
+becomes the polyglot integration that validates every ADR-001 to
+ADR-021 decision in a single recipe.
+
+**Alternatives rejected.**
+
+- **Single 8.4 session, accept the context overflow.** Has failed
+  six times already for the surrounding tasks (ADRs 016, 018, 019,
+  020). The cost of another mid-session context exhaustion is far
+  higher than the cost of one ADR + plan-row split.
+- **Three-way split (8.4a warden / 8.4b cluster recipes / 8.4c
+  Workflow).** Adds session overhead without a real reduction in
+  per-session scope: the warden refactor + the cluster recipes
+  share the same testing discipline (SIGTERM-then-grace-then-
+  SIGKILL escalation) and the same `nix` crate dependency
+  promotion, so they belong in one session. Two sub-tasks is the
+  right granularity.
+- **Defer SIGTERM-first warden to Phase 1.** Would mean amending
+  ADR-014 §9 to ratify SIGKILL-only as the permanent stance. The
+  six-time deferral has already been the right call until now;
+  but Workflow's retry-against-long-running-proof failure mode is
+  the operational pressure that finally tips the trade. Pushing
+  to Phase 1 would require a second pass through every solver
+  test fixture once the trade is reconsidered; better to take the
+  refactor now alongside the rest of Task 8's lifecycle work.
+- **Ship the Workflow harness in 8.4a alongside the warden
+  refactor.** Conflates Rust subprocess hygiene with Python
+  Workflow composition; doubles the testing surface (cargo +
+  pytest + integration smoke); reintroduces the context-overflow
+  pattern. Splitting along the language boundary keeps each
+  session's gate tractable.
+- **Reverse the order: ship Python Workflow first, then warden
+  refactor as 8.4b.** Workflow without placement+scheduler does
+  not run end-to-end (the WorkflowRuntime can't schedule
+  activities without a placement service). Workflow without
+  SIGTERM-first warden runs but can leak partial proof-state on
+  retry. Both gaps are addressable but make 8.4b's smoke less
+  meaningful. Foundation-first is the right ordering.
+- **State-store handles for the cross-stage envelope.** Adds a
+  serialization indirection; complicates Workflow replay
+  debugging; provides no Phase 0 benefit because payloads are
+  low-kB. Phase 1+ revisits when payload shape grows.
+- **Skip the Dapr Python SDK; do Workflow in pure `httpx`.** The
+  Python SDK's `@workflow` / `@activity` decorators + replay
+  semantics + automatic activity-id tracing are exactly what
+  Workflow is for. Hand-rolling them on top of `httpx` would
+  duplicate hundreds of lines from the SDK with no benefit. The
+  service-invocation surface stays on `httpx` (per ADR-017 §5
+  rationale) but Workflow runtime is the SDK's domain.
+- **Forgo per-stage tracing.** Operators need it to triage which
+  stage of a five-stage pipeline produced an anomalous result.
+  Tracing is non-optional for the Phase 0 close-out.
+- **Skip the `just dapr-pipeline` recipe; use the pytest only.**
+  Justfile orchestration is the developer-friendly shape;
+  pytest is the CI-friendly shape. Both are needed — neither
+  fully replaces the other.
+
+---

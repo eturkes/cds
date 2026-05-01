@@ -90,7 +90,19 @@ C6. All inter-process comms = JSON-over-TCP/IP and/or MCP.
 > external-dependency gate of the solve / recheck tests
 > (`.bin/z3`, `.bin/cvc5`, `CDS_KIMINA_URL`) cleanly separates from
 > the dependency-free `/v1/deduce` smoke + the foundation refactor.
-> ADR-020 captures the rationale and the per-sub-task gates.
+> ADR-020 captures the rationale and the per-sub-task gates. **Task
+> 8.4 was further split into 8.4a + 8.4b on 2026-05-01** for the same
+> reason: the original 8.4 scope bundled placement+scheduler bring-up
+> recipes + production SIGTERM-first warden escalation (deferred six
+> times — ADR-014 §9 → ADR-015 §8 → ADR-016 §7 → ADR-018 §6 →
+> ADR-019 §11 → ADR-020 §6) + readiness gate flip + a new Python
+> `cds_harness.workflow` Dapr Workflow package + Dapr Python SDK
+> introduction + aggregated cross-stage envelope + per-stage tracing
+> + `just dapr-pipeline` recipe + end-to-end pytest smoke close-out
+> — and the Rust-foundation vs. Python-composition boundary cleanly
+> separates the cluster bring-up + warden refactor from the Workflow
+> harness composition. ADR-021 captures the rationale and the
+> per-sub-task gates.
 
 | #     | Task                                                                                                          | Status   | Session output gate                                                                                                                  |
 | ----- | ------------------------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -107,12 +119,13 @@ C6. All inter-process comms = JSON-over-TCP/IP and/or MCP.
 | 8.3b1 | Rust kernel pipeline handlers — `/v1/deduce` + `/v1/solve` + `/v1/recheck` + `IntoResponse` lifts + unit tests | **DONE** | git commit `feat: complete Task 8.3b1 Rust kernel pipeline handlers`                                                                 |
 | 8.3b2a | Rust kernel `AppState` + `/v1/deduce` Dapr smoke — env-driven option resolution + dependency-free pipeline smoke | **DONE** | git commit `feat: complete Task 8.3b2a Rust kernel AppState + deduce Dapr smoke`                                                     |
 | 8.3b2b | Rust kernel `/v1/solve` + `/v1/recheck` Dapr smokes — gated on `.bin/z3`+`.bin/cvc5` and `CDS_KIMINA_URL`        | **DONE** | git commit `feat: complete Task 8.3b2b Rust kernel solve + recheck Dapr smokes`                                                     |
-| 8.4    | End-to-end Dapr Workflow — `ingest → translate → deduce → solve → recheck`                                     | pending  | End-to-end pipeline runs under Dapr against a canonical guideline; placement + scheduler up; per-stage tracing; flag round-trips.    |
+| 8.4a   | Dapr cluster bring-up + production SIGTERM-first warden — `placement-up` / `scheduler-up` recipes + warden two-stage shutdown + readiness gate flip | pending | `just dapr-cluster-up` + `dapr-cluster-status` print PIDs; `cargo test --workspace` green incl. 2 new warden cases (153 pass); `just rs-service-pipeline-smoke` still green; `just env-verify` clean. |
+| 8.4b   | End-to-end Dapr Workflow — `cds_harness.workflow` package + Dapr Python SDK + aggregated envelope + `just dapr-pipeline` + end-to-end pytest smoke | pending | `just dapr-pipeline` runs end-to-end against a canonical guideline; verification flag round-trips; per-stage tracing; pytest 96/96 incl. 1 new end-to-end smoke.                |
 | 9      | SvelteKit frontend — wire to live backend; render AST, Octagon, MUCs                                           | pending  | UI shows live trace from real dataset; verification flag round-trips.                                                                |
 
 **At any session:** select STRICTLY the lowest-numbered uncompleted
 task. No leapfrogging. Sub-tasks follow the same discipline —
-`8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4 < 9`.
+`8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9`.
 
 ## 9. Context-Governed Re-Entry Prompt (verbatim)
 
