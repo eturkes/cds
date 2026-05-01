@@ -609,6 +609,176 @@ rs-service-dapr:
             -- "{{ justfile_directory() }}/target/debug/cds-kernel-service"
 
 # =============================================================================
+# Dapr end-to-end Workflow pipeline (Task 8.4b)
+# =============================================================================
+# `just dapr-pipeline` brings up placement+scheduler, both Phase 0
+# sidecars (cds-harness + cds-kernel), and a `cds-workflow` sidecar that
+# hosts the Dapr Python SDK WorkflowRuntime. The orchestrator drives
+# ingest → translate → deduce → solve → recheck against the canonical
+# `data/guidelines/contradictory-bound.{txt,recorded.json}` fixture and
+# asserts `trace.sat == false` + `recheck.ok == true`. Reverse teardown
+# at exit. Per ADR-021 §3.
+
+DAPR_PIPELINE_PAYLOAD   := env_var_or_default('DAPR_PIPELINE_PAYLOAD',   'data/sample/icu-monitor-02.json')
+DAPR_PIPELINE_GUIDELINE := env_var_or_default('DAPR_PIPELINE_GUIDELINE', 'data/guidelines/contradictory-bound.txt')
+DAPR_PIPELINE_DOC_ID    := env_var_or_default('DAPR_PIPELINE_DOC_ID',    'contradictory-bound')
+DAPR_PIPELINE_ASSERT    := env_var_or_default('DAPR_PIPELINE_ASSERT',    '--assert-unsat')
+DAPR_PIPELINE_TIMEOUT_S := env_var_or_default('DAPR_PIPELINE_TIMEOUT_S', '600')
+
+# End-to-end Phase 0 Workflow run (Task 8.4b close-out). Requires .bin/dapr + slim runtime + .bin/{z3,cvc5} + reachable $CDS_KIMINA_URL.
+dapr-pipeline:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo="{{ justfile_directory() }}"
+    dapr_cli="$repo/.bin/dapr"
+    daprd="{{DAPR_DAPRD}}"
+    [ -x "$dapr_cli" ] && [ -x "$daprd" ] || \
+        { echo "dapr CLI / slim runtime missing — run \`just fetch-dapr\`"; exit 1; }
+    [ -x "$repo/.bin/z3" ] && [ -x "$repo/.bin/cvc5" ] || \
+        { echo "Z3 / cvc5 missing — run \`just fetch-bins\`"; exit 1; }
+    [ -n "${CDS_KIMINA_URL:-}" ] || \
+        { echo "CDS_KIMINA_URL unset — start Kimina (\`python -m server\` from the project-numina/kimina-lean-server checkout) and re-run with that URL exported."; exit 1; }
+
+    # Pre-build the kernel binary so the kernel sidecar starts fast.
+    cargo build --bin cds-kernel-service
+
+    mkdir -p target
+
+    # Per-sidecar pid + log paths.
+    py_pid="target/dapr-pipeline-harness.pid"
+    py_log="target/dapr-pipeline-harness.log"
+    rs_pid="target/dapr-pipeline-kernel.pid"
+    rs_log="target/dapr-pipeline-kernel.log"
+    wf_pid="target/dapr-pipeline-workflow.pid"
+    wf_log="target/dapr-pipeline-workflow.log"
+
+    # Reverse-order teardown — run on every exit path so we never leak.
+    cleanup() {
+        for pidfile in "$wf_pid" "$rs_pid" "$py_pid"; do
+            if [ -f "$pidfile" ]; then
+                pid=$(cat "$pidfile")
+                if kill -0 "$pid" 2>/dev/null; then
+                    kill -TERM "$pid" 2>/dev/null || true
+                    for _ in $(seq 1 50); do
+                        kill -0 "$pid" 2>/dev/null || break
+                        sleep 0.1
+                    done
+                    if kill -0 "$pid" 2>/dev/null; then
+                        kill -KILL "$pid" 2>/dev/null || true
+                    fi
+                fi
+                rm -f "$pidfile"
+            fi
+        done
+        just dapr-cluster-down >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT INT TERM
+
+    # 1. Placement + scheduler.
+    just dapr-cluster-up
+    # Pre-flight the cluster's full readiness gate. Workflow can't
+    # schedule activities until placement reports healthy.
+    for _ in $(seq 1 60); do
+        if curl -sf "http://127.0.0.1:{{DAPR_PLACEMENT_HZ}}/healthz" >/dev/null; then break; fi
+        sleep 0.5
+    done
+    for _ in $(seq 1 60); do
+        if curl -sf "http://127.0.0.1:{{DAPR_SCHEDULER_HZ}}/healthz" >/dev/null; then break; fi
+        sleep 0.5
+    done
+
+    # Reserve four ports per sidecar (app + dapr-http + dapr-grpc + metrics).
+    pick_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
+    py_app_port=$(pick_port); py_http=$(pick_port); py_grpc=$(pick_port); py_met=$(pick_port)
+    rs_app_port=$(pick_port); rs_http=$(pick_port); rs_grpc=$(pick_port); rs_met=$(pick_port)
+    wf_app_port=$(pick_port); wf_http=$(pick_port); wf_grpc=$(pick_port); wf_met=$(pick_port)
+
+    # 2. Harness sidecar (cds-harness).
+    CDS_HARNESS_HOST=127.0.0.1 CDS_HARNESS_PORT=$py_app_port \
+    nohup "$dapr_cli" run \
+        --app-id cds-harness \
+        --app-port "$py_app_port" \
+        --app-protocol http \
+        --dapr-http-port "$py_http" \
+        --dapr-grpc-port "$py_grpc" \
+        --metrics-port "$py_met" \
+        --runtime-path "{{DAPR_INSTALL_DIR}}" \
+        --resources-path "{{DAPR_RESOURCES_PATH}}" \
+        --config "{{DAPR_CONFIG_PATH}}" \
+        --log-level info \
+        -- uv run python -m cds_harness.service \
+        > "$py_log" 2>&1 < /dev/null &
+    echo $! > "$py_pid"
+
+    # 3. Kernel sidecar (cds-kernel).
+    CDS_KERNEL_HOST=127.0.0.1 CDS_KERNEL_PORT=$rs_app_port \
+    nohup "$dapr_cli" run \
+        --app-id cds-kernel \
+        --app-port "$rs_app_port" \
+        --app-protocol http \
+        --dapr-http-port "$rs_http" \
+        --dapr-grpc-port "$rs_grpc" \
+        --metrics-port "$rs_met" \
+        --runtime-path "{{DAPR_INSTALL_DIR}}" \
+        --resources-path "{{DAPR_RESOURCES_PATH}}" \
+        --config "{{DAPR_CONFIG_PATH}}" \
+        --log-level info \
+        -- "$repo/target/debug/cds-kernel-service" \
+        > "$rs_log" 2>&1 < /dev/null &
+    echo $! > "$rs_pid"
+
+    # Wait for both /v1.0/healthz to flip ready (placement-bound).
+    wait_ready() {
+        local url=$1 budget=${2:-60}
+        for _ in $(seq 1 $budget); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$url" || echo 000)
+            if [ "$code" = "200" ] || [ "$code" = "204" ]; then return 0; fi
+            sleep 0.5
+        done
+        echo "readiness wait timed out for $url"; return 1
+    }
+    wait_ready "http://127.0.0.1:${py_app_port}/healthz"
+    wait_ready "http://127.0.0.1:${rs_app_port}/healthz"
+    wait_ready "http://127.0.0.1:${py_http}/v1.0/healthz" 90
+    wait_ready "http://127.0.0.1:${rs_http}/v1.0/healthz" 90
+
+    # 4. Workflow sidecar (cds-workflow) — runs the orchestrator inside
+    # `dapr run` so the SDK's WorkflowRuntime can find the gRPC port.
+    nohup "$dapr_cli" run \
+        --app-id cds-workflow \
+        --dapr-http-port "$wf_http" \
+        --dapr-grpc-port "$wf_grpc" \
+        --metrics-port "$wf_met" \
+        --runtime-path "{{DAPR_INSTALL_DIR}}" \
+        --resources-path "{{DAPR_RESOURCES_PATH}}" \
+        --config "{{DAPR_CONFIG_PATH}}" \
+        --log-level info \
+        -- uv run python -m cds_harness.workflow run-pipeline \
+            --payload "{{DAPR_PIPELINE_PAYLOAD}}" \
+            --guideline "{{DAPR_PIPELINE_GUIDELINE}}" \
+            --doc-id "{{DAPR_PIPELINE_DOC_ID}}" \
+            --kimina-url "$CDS_KIMINA_URL" \
+            --z3-path "$repo/.bin/z3" \
+            --cvc5-path "$repo/.bin/cvc5" \
+            --timeout-s "{{DAPR_PIPELINE_TIMEOUT_S}}" \
+            --assert-recheck-ok \
+            {{DAPR_PIPELINE_ASSERT}} \
+        > "$wf_log" 2>&1 < /dev/null &
+    wf_runner=$!
+    echo $wf_runner > "$wf_pid"
+
+    # Block until the workflow runner exits; surface its status verbatim.
+    if wait "$wf_runner"; then
+        echo "✓ dapr-pipeline complete — see $wf_log for the aggregated envelope"
+        exit 0
+    else
+        rc=$?
+        echo "✗ dapr-pipeline failed (exit=$rc) — tail of $wf_log:"
+        tail -40 "$wf_log" || true
+        exit $rc
+    fi
+
+# =============================================================================
 # Frontend (bun + Vite + SvelteKit) — placeholder until Task 9
 # =============================================================================
 

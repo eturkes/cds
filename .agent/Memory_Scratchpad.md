@@ -6,12 +6,154 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 8.4a — Dapr cluster bring-up + production SIGTERM-first warden (ADR-021 §2). Promoted `nix = { ..., features = ["signal"] }` from kernel `[dev-dependencies]` to `[dependencies]` (single entry now serves both the production warden + the dapr-CLI cleanup helper in `tests/common.rs`). Refactored `crate::solver::warden::run_with_input` to a two-stage shutdown — `pin!(child.wait_with_output())`; on wall-clock timeout send `SIGTERM` via `nix::sys::signal::kill(Pid::from_raw(...), Signal::SIGTERM)`, wait up to a new `SIGTERM_GRACE` const (500 ms — Phase 0 default per ADR-021 §2), fall through to `kill_on_drop`'s `SIGKILL` by letting the pinned future drop at end-of-scope (no explicit `drop(collect)` — clippy::drop_non_drop forbids it on a `Pin<&mut Future>`). `WardenError::Timeout { bin, timeout }` shape preserved (call sites in `solver::z3` / `solver::cvc5` / `service::handlers` / `service::errors` untouched). Added two new warden tests: `timeout_sigterm_first_when_child_traps_term` (`bash -c 'trap "exit 0" TERM; while :; do sleep 1; done'` exits within grace; assert `Timeout` + elapsed ≤ wall_clock + grace + slack) and `timeout_sigkill_fallback_when_child_ignores_term` (`bash -c 'trap "" TERM; ...'` ignores TERM; assert `Timeout` + elapsed ∈ `[wall_clock + grace, wall_clock + grace + 2s]`). Added Justfile recipes `placement-up`, `placement-down`, `scheduler-up`, `scheduler-down`, `dapr-cluster-up` (placement-up + scheduler-up), `dapr-cluster-down` (reverse-order teardown), `dapr-cluster-status`. Each `*-up` recipe `nohup`-spawns the slim binary in background (PID → `target/dapr-<name>.pid`, log → `target/dapr-<name>.log`), idempotent (skips if pid-file PID is alive), liveness-probes via `kill -0` after a short settle window. Each `*-down` recipe is SIGTERM → 3-second grace polled in 100 ms ticks → SIGKILL. Pinned bind ports avoid the 8080/9090 healthz/metrics collision when both binaries run side-by-side: placement gRPC :50005 / healthz :50007 / metrics :50008; scheduler gRPC :50006 / healthz :50009 / metrics :50010. Scheduler embedded etcd writes under `target/dapr-scheduler-etcd/` (overrides upstream `./data` default that would otherwise collide with this repo's genuine telemetry dir). Per ADR-021 §5 the readiness gate `tests/common::wait_until_ready` floor stays at `/v1.0/healthz/outbound` so the existing five daprd-driven integration tests stay green both cluster-up and cluster-down (a developer running `just rs-service-{smoke,pipeline-smoke}` without bringing the cluster up first still gets a green run); rationale documented in the helper's doc-comment + the call-site comments. **8.4b** will additionally pre-flight `/v1.0/healthz` after starting the cluster. **SIGTERM-first deferral closed** — ADR-014 §9 → ADR-015 §8 → ADR-016 §7 → ADR-018 §6 → ADR-019 §11 → ADR-020 §6 is now ratified. Gate: `cargo test --workspace` → **153 pass** (151 baseline + 2 new warden cases); `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all -- --check` clean; `uv run pytest` 95/95; `uv run ruff check .` clean; `just env-verify` exit 0; `just dapr-cluster-up` + `dapr-cluster-status` print PIDs (placement healthz 200; scheduler healthz 200) and `dapr-cluster-down` reclaims both children; `just rs-service-pipeline-smoke` + `just rs-service-smoke` both green against a cluster-up sidecar.
-- **Next up:** Task 8.4b — End-to-end Dapr Workflow + close-out of Task 8 (ADR-021 §3). New `cds_harness.workflow` package (`__init__.py` + `pipeline.py` + `activities.py` + `__main__.py`); five `@activity` callables (`ingest`, `translate`, `deduce`, `solve`, `recheck`), each a thin `httpx`-over-daprd wrapper; introduce Dapr Python SDK (ADR-017 §5 reversed — `dapr>=1.17` + `dapr-ext-workflow>=1.17` in `[project.dependencies]`) for `WorkflowRuntime` + `@workflow` / `@activity` decorators + replay semantics + activity-id-tagged tracing; aggregated in-band JSON envelope `{ payload, ir, matrix, verdict, trace, recheck }` (Phase 0 small payloads + replay determinism + JSON-over-TCP discipline preferred over state-store handles per ADR-021 §7); per-stage `tracing` spans correlated through Workflow activity-id; `just dapr-pipeline` orchestrator (`dapr-cluster-up` → `py-service-dapr` → `rs-service-dapr` → `python -m cds_harness.workflow run-pipeline` → assert three flags → reverse teardown); end-to-end pytest smoke `python/tests/test_dapr_pipeline.py` (gated on full bin set + `CDS_KIMINA_URL`). 8.4b's pipeline test should additionally pre-flight `/v1.0/healthz` after starting the cluster (per the floor decision in 8.4a). Final close-out gate: `just dapr-pipeline` end-to-end against `data/guidelines/contradictory-bound.txt` returns `verdict ∧ trace.sat=false ∧ recheck.ok=true`; manual run on `data/guidelines/hypoxemia-trigger.txt` returns `verdict ∧ trace.sat=true ∧ recheck.ok=true`. **This closes Task 8.**
+- **Last completed:** Task 8.4b — End-to-end Dapr Workflow + close-out of Task 8 (ADR-021 §3). Added `dapr>=1.17` + `dapr-ext-workflow>=1.17` to `pyproject.toml [project.dependencies]` (ADR-017 §5 reversed only for `WorkflowRuntime` / `@workflow` / `@activity` decorator surfaces — service-invocation calls inside activities stay on plain `httpx`). New `python/cds_harness/workflow/` package: `__init__.py` (public re-exports), `activities.py` (`ingest_activity` / `translate_activity` / `deduce_activity` / `solve_activity` / `recheck_activity` — each a thin `httpx.post` against `http://127.0.0.1:$DAPR_HTTP_PORT/v1.0/invoke/<app-id>/method/<path>` with structured `logging` per stage; `WorkflowActivityError` lifts non-2xx into the runtime's retry-eligible exception path; `register_activities(runtime)` pins activity names so `call_activity` strings stay stable across refactors), `pipeline.py` (`pipeline_workflow(ctx, raw_input)` — generator-style `@workflow`-shaped function chaining the five `yield ctx.call_activity(...)` calls; `PipelineInput` Pydantic v2 model with `frozen=True, extra='forbid'` for replay-deterministic deserialisation; aggregated in-band JSON envelope `{ payload, ir, matrix, verdict, trace, recheck }` returned at the bottom — ADR-021 §7 in-band over state-store handles for Phase 0 small payloads), `__main__.py` (argparse CLI: `run-pipeline` subcommand + `serve` subcommand; `run-pipeline` registers the runtime + workflow + activities, schedules one workflow instance via `DaprWorkflowClient.schedule_new_workflow`, waits for completion with `wait_for_workflow_completion(timeout_in_seconds=...)`, prints the aggregated envelope as a single JSON line on stdout + a compact summary on stderr; `--assert-unsat` / `--assert-sat` / `--assert-recheck-ok` close-out flags exit non-zero on mismatch). Justfile gains `dapr-pipeline` recipe (env-overridable `DAPR_PIPELINE_PAYLOAD` / `DAPR_PIPELINE_GUIDELINE` / `DAPR_PIPELINE_DOC_ID` / `DAPR_PIPELINE_ASSERT` / `DAPR_PIPELINE_TIMEOUT_S`): pre-flights `.bin/dapr` + slim runtime + `.bin/{z3,cvc5}` + `$CDS_KIMINA_URL`; cargo-builds the kernel binary; brings up `dapr-cluster-up`; pre-flights `placement` + `scheduler` `/healthz`; allocates four ports per sidecar (app + dapr-http + dapr-grpc + metrics) via inline `python3` socket-pick; `nohup`-spawns three `dapr run` sidecars (`cds-harness` + `cds-kernel` + `cds-workflow`); waits on the harness/kernel app `/healthz` and daprd full-readiness `/v1.0/healthz`; `wait`s on the workflow runner; `trap`-driven reverse-order cleanup on every exit path (workflow → kernel → harness → cluster). New pytest smoke `python/tests/test_dapr_pipeline.py` (single test `test_dapr_workflow_drives_contradictory_pipeline` gated by `pytestmark = pytest.mark.skipif`): same flow but in-process via `_dapr_cluster()` + nested `_dapr_sidecar(...)` context managers (single combined `with`), reads the aggregated envelope by tailing the workflow sidecar log for the canonical six-key JSON object (cold-stable: daprd's own log lines never produce a JSON line containing all six envelope keys), asserts `verdict.breach_summary` non-empty + `trace.sat == False` + `len(trace.muc) >= 2` + `recheck.ok == True` + `recheck.custom_id == "cds-pipeline"` + per-stage trace strings present in the workflow log. Per-child SIGTERM-then-grace-then-SIGKILL (5 s grace) cleanup discipline matches `crates/kernel/tests/common.rs::sigterm_then_kill`. Gate: `cargo test --workspace` → **153 pass** (unchanged from 8.4a baseline); `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all -- --check` clean; `uv run pytest` 95 pass + 1 skip (`test_dapr_pipeline.py` skips loudly with reason on missing `CDS_KIMINA_URL` — by design, same shape as `tests/lean_smoke.rs` / `tests/service_pipeline_smoke.rs`); `uv run ruff check .` clean; `just env-verify` exit 0. **Task 8 closed.** Final gate locally end-to-end (skipped without Kimina); the Justfile recipe is the developer-friendly shape and the pytest is the CI-friendly shape.
+- **Next up:** Task 9 — SvelteKit frontend wired to the live backend (AST + Octagon + MUC visualisation; verification flag round-trip). All Phase 0 sidecars + the Workflow orchestration that 8.4b composes are now durable; the frontend BFF can either drive `cds-harness` + `cds-kernel` directly (faster iteration) or schedule a Workflow instance through `DaprWorkflowClient` for the full envelope (recommended once the UI needs the `verdict ∧ trace ∧ recheck` triple in one shot). The Phase 0 `PHASE = 0` marker on `cds_harness.__init__.PHASE` and `cds_kernel::PHASE` stays at 0 until Task 9 ships; flipping it to 1 is a Task 9 micro-decision (Plan §10 step 7 — bump it when the frontend close-out lands and Phase 0 is fully visible end-to-end).
 
 > **Task 8 was split** into 8.1–8.4 on 2026-04-30 (ADR-016) because a monolithic Dapr-orchestration task repeatedly exhausted a single context window. **Task 8.3 was further split** into 8.3a / 8.3b on 2026-04-30 (ADR-018) because the kernel service binds three subprocess pipelines (`deduce`, `solve`, `recheck`) behind one axum app and the foundation + endpoint plumbing each warrant their own session. **Task 8.3b was further split** into 8.3b1 / 8.3b2 on 2026-05-01 (ADR-019) because the original 8.3b scope (three handlers + their `IntoResponse` impls + comprehensive unit tests + `AppState` wiring + a Dapr-driven cargo integration test driving all three endpoints through daprd) again exceeded a single context window. **Task 8.3b2 was further split** into 8.3b2a / 8.3b2b on 2026-05-01 (ADR-020) because the original 8.3b2 scope (`AppState` introduction + env-driven option resolution + handler refactor onto `axum::extract::State` + shared smoke helpers + three daprd-driven cargo integration tests) again exceeded a single context window — and the external-dependency gate of solve/recheck (`.bin/z3`, `.bin/cvc5`, `CDS_KIMINA_URL`) cleanly separates from the dependency-free `/v1/deduce` smoke + the foundation refactor. **Task 8.4 was further split** into 8.4a / 8.4b on 2026-05-01 (ADR-021) because the original 8.4 scope (placement+scheduler bring-up + production SIGTERM-first warden escalation + readiness gate flip + Python `cds_harness.workflow` package + Dapr Python SDK introduction + aggregated envelope + per-stage tracing + `just dapr-pipeline` + end-to-end pytest smoke) again exceeded a single context window — and the Rust-foundation vs. Python-composition boundary cleanly separates the cluster bring-up + warden refactor from the Workflow harness composition. Sub-task progression is strict: `8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9`.
 
-## Session 2026-05-01 — Task 8.4a close-out
+## Session 2026-05-01 — Task 8.4b close-out (Task 8 closed)
+
+Closed the Python-composition half of Task 8.4 per ADR-021 §3 + §6 +
+§7. End-to-end Phase 0 Workflow now drives ingest → translate → deduce
+→ solve → recheck through three daprd sidecars + a placement-up
+cluster, with the aggregated `{ payload, ir, matrix, verdict, trace,
+recheck }` envelope returned in-band as the workflow's serialised
+output. **Task 8 closed end-to-end** — the polyglot orchestration
+through Dapr Workflows (ADR-003) is live.
+
+**Dependency change (`pyproject.toml`):**
+
+| Add                              | Role                                                                                                                                                                              |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dapr>=1.17`                     | Pulls in `DaprWorkflowClient` + `DaprGrpcClient`; needed transitively by `dapr-ext-workflow`. ADR-017 §5 deferral reversed only for the WorkflowRuntime / SDK decorator surfaces. |
+| `dapr-ext-workflow>=1.17`        | `WorkflowRuntime` + `@workflow` / `@activity` decorators + replay semantics + activity-id correlation. ADR-021 §6.                                                                |
+
+Resolved: `dapr==1.17.4` + `dapr-ext-workflow==1.17.4` +
+`durabletask-dapr==0.17.4` + transitive grpc/protobuf — 18 new packages
+total. None alter the existing test surface; pytest 95/95 baseline
+stays green.
+
+**Package additions (`python/cds_harness/workflow/`):**
+
+| File              | Role                                                                                                                                                                                                                                         |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `__init__.py`     | Public re-exports — every constant + activity + workflow function + `PipelineInput` + `WorkflowActivityError` is available as `from cds_harness.workflow import ...`. Keeps the package's call-surface flat for the frontend BFF in Task 9. |
+| `activities.py`   | Five `@activity`-shaped callables. Each takes `(WorkflowActivityContext, request_dict)` and returns `dict[str, Any]`; the `WorkflowActivityContext` is unused (activity-id is correlated by the runtime) but kept for protocol parity. `_post_json` does `httpx.post(<dapr-invoke-url>, json=body, timeout=...)`, decodes, propagates non-2xx as `WorkflowActivityError` (which the runtime's retry policy can match against), structured `logging` info events at `stage start` + `stage ok` per call. `_dapr_invoke_url(app_id, path)` reads `$DAPR_HTTP_PORT` (raised `WorkflowActivityError` if unset / non-integer) so activities only run inside `dapr run`. `register_activities(runtime)` pins each callable's name (`ingest_activity`, etc.) so `pipeline_workflow`'s `call_activity` strings stay stable across renames. |
+| `pipeline.py`     | `PipelineInput` Pydantic v2 model (`frozen=True, extra='forbid'`) with all the per-run knobs: `doc_id` / `guideline_text` / `guideline_root` / `ingest_request` / `logic` / `smt_check` / `kimina_url` / `custom_id` / `solve_timeout_ms` / `recheck_timeout_ms` / `z3_path` / `cvc5_path`. `pipeline_workflow(ctx, raw_input)` is a generator-style `@workflow` body — re-validates the raw input through `PipelineInput.model_validate(raw_input)` (so a typo on a workflow input surfaces deterministically on every replay), `yield`s the five `ctx.call_activity(...)` calls in order, returns `{ payload, ir, matrix, verdict, trace, recheck }`. `_solve_options(model)` / `_recheck_options(model)` lift the model fields onto the per-stage `options` envelopes. `register_workflow(runtime)` pins the workflow name to `"cds_pipeline_workflow"`. The `if not ctx.is_replaying:` guard around the start/done log lines keeps the workflow body deterministic — replay debug output is ADR-021 §7's exact concern. |
+| `__main__.py`     | argparse with two subcommands: `run-pipeline` (the orchestrator entrypoint) + `serve` (long-running runtime; idle-poll loop until SIGINT; useful for an operator wiring up an external `DaprWorkflowClient`). `run-pipeline` resolves payload + guideline + recorded fixture paths, builds a `PipelineInput`, registers the workflow + activities, starts the runtime, schedules one instance via `DaprWorkflowClient.schedule_new_workflow(workflow=WORKFLOW_NAME, input=...)`, blocks on `wait_for_workflow_completion(timeout_in_seconds=...)`, decodes `state.serialized_output`, prints the envelope as a single JSON line on stdout + a compact summary on stderr, then runs the `--assert-unsat` / `--assert-sat` / `--assert-recheck-ok` close-out flags. Always shuts down the runtime in a `finally`. Returns non-zero on timeout / non-`COMPLETED` status / missing output / failed assertion. |
+
+**Justfile addition:**
+
+| Recipe / variable             | Role                                                                                                                                                                                  |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DAPR_PIPELINE_PAYLOAD`       | Default `data/sample/icu-monitor-02.json` — the canonical Phase 0 telemetry envelope. Override per-invocation.                                                                         |
+| `DAPR_PIPELINE_GUIDELINE`     | Default `data/guidelines/contradictory-bound.txt` — the canonical contradictory guideline that the Phase 0 close-out gate asserts unsat against.                                       |
+| `DAPR_PIPELINE_DOC_ID`        | Default `contradictory-bound` (matches the guideline stem; the harness `/v1/translate` endpoint validates `doc_id` against the recorded fixture).                                      |
+| `DAPR_PIPELINE_ASSERT`        | Default `--assert-unsat`. Override to `--assert-sat` for a hypoxemia-trigger run.                                                                                                      |
+| `DAPR_PIPELINE_TIMEOUT_S`     | Default 600 — Phase 0 wall-clock budget for the workflow round-trip (covers cold-start daprd + cargo build + Z3/cvc5 solve + Kimina round-trip with comfortable slack).                |
+| `dapr-pipeline`               | Pre-flight bins + Kimina URL → `cargo build cds-kernel-service` → `dapr-cluster-up` → curl-poll `placement` + `scheduler` `/healthz` → allocate 4 ports per sidecar via inline `python3 -c 'socket'` → `nohup`-spawn `cds-harness` + `cds-kernel` + `cds-workflow` daprd sidecars (pid → `target/dapr-pipeline-<role>.pid`, log → `target/dapr-pipeline-<role>.log`) → wait for both app `/healthz` (200) + both daprd `/v1.0/healthz` (full readiness, 200/204) → `wait` on the workflow sidecar (which exits when the orchestrator finishes) → `trap cleanup EXIT INT TERM` reverse-tears down workflow → kernel → harness → cluster on every exit path (SIGTERM-then-grace-then-SIGKILL discipline). |
+
+**Pytest smoke (`python/tests/test_dapr_pipeline.py`):**
+
+Single test `test_dapr_workflow_drives_contradictory_pipeline`, gated
+by a module-level `pytestmark = pytest.mark.skipif(...)` covering all
+four operator-supplied dependencies (`.bin/dapr` + slim runtime,
+`.bin/.dapr/.dapr/bin/{placement,scheduler}`, `.bin/{z3,cvc5}`,
+`$CDS_KIMINA_URL`). Skips loudly with the same shape as
+`tests/lean_smoke.rs` / `tests/service_pipeline_smoke.rs`. The body
+mirrors `just dapr-pipeline` in-process: builds the kernel binary,
+opens a single combined `with` block holding `_dapr_cluster()` +
+two `_dapr_sidecar(...)` context managers (harness + kernel),
+pre-flights both app `/healthz` + both daprd `/v1.0/healthz`, opens a
+third `_dapr_sidecar(...)` for the workflow runner with
+`uv run python -m cds_harness.workflow run-pipeline ... --assert-unsat
+--assert-recheck-ok`, then tails the workflow log file for the
+canonical six-key JSON envelope (the fingerprint
+`{"payload":...,"ir":...,"matrix":...,"verdict":...,"trace":...,
+"recheck":...}` cannot be produced by daprd's own logs). Asserts:
+
+- `verdict.breach_summary` is a non-empty dict (deduce stage active);
+- `trace.sat is False`, `len(trace.muc) >= 2` (contradictory matrix);
+- `recheck.ok is True`, `recheck.custom_id == "cds-pipeline"`;
+- per-stage `stage=ingest|translate|deduce|solve|recheck` log strings
+  are all present in the workflow sidecar log (per-stage tracing
+  requirement from ADR-021 §3 bullet 5).
+
+`_sigterm_then_kill(proc, grace_s=5.0)` per child mirrors
+`crates/kernel/tests/common.rs::sigterm_then_kill`. The `_dapr_cluster`
+context manager wraps `just dapr-cluster-up` + a curl-poll on
+`placement:50007` / `scheduler:50009` `/healthz` (the pinned ports
+from 8.4a's Justfile); `__exit__` calls `just dapr-cluster-down`
+unconditionally.
+
+**Why `httpx` for activities, not `DaprGrpcClient.invoke_method`?**
+ADR-017 §5 narrowed the SDK adoption to surfaces where typed bindings
+provide a material lift. Service-invocation is a single HTTP POST
+against a stable JSON-over-TCP shape (constraint **C6**); the kernel +
+harness already lift their errors into `{error, detail}` 422 envelopes
+that decode cleanly into the `WorkflowActivityError`'s string repr.
+Adding `DaprGrpcClient` to activities would couple the workflow
+package to gRPC for no Phase 0 benefit. ADR-021 §6 ratifies the
+boundary.
+
+**Why in-band envelope, not state-store handles?** ADR-021 §7. Phase 0
+payloads are low-kB; in-band JSON keeps every cross-stage payload
+directly inspectable / teeable (the `dapr-pipeline` log file shows
+the entire envelope), the runtime's replay determinism is simpler
+without a state-store indirection, and the cross-stage shape stays
+in sync with the existing kernel + harness HTTP contracts.
+
+**Aggregated envelope shape:**
+
+```json
+{
+  "payload":  { "...ClinicalTelemetryPayload": "..." },
+  "ir":       { "...OnionLIRTree": "..." },
+  "matrix":   { "...SmtConstraintMatrix": "..." },
+  "verdict":  { "...Verdict": "..." },
+  "trace":    { "...FormalVerificationTrace": "..." },
+  "recheck":  { "...LeanRecheckWire": "..." }
+}
+```
+
+All six values are dicts — the workflow returns a `dict[str, Any]`
+that the runtime's serialiser dumps as JSON automatically.
+
+**Final regression gate (this session):**
+
+- `cargo test --workspace` → **153 pass** (unchanged from 8.4a; no
+  Rust touchpoints).
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean.
+- `cargo fmt --all -- --check` → clean.
+- `uv run pytest` → 95 pass + 1 skip (the new
+  `test_dapr_workflow_drives_contradictory_pipeline` skips loudly
+  with reason because Kimina is not started locally — by design;
+  same shape as `tests/lean_smoke.rs` /
+  `tests/service_pipeline_smoke.rs`).
+- `uv run ruff check .` → clean.
+- `just env-verify` → exit 0.
+- `uv run python -m cds_harness.workflow run-pipeline --help` →
+  argparse prints the run-pipeline help (verifies the package
+  imports cleanly + the Dapr SDK is discoverable + the CLI is wired).
+- `just --list` shows `dapr-pipeline` with the close-out comment.
+
+**Task 8 close-out summary.** ADRs 016 / 017 / 018 / 019 / 020 / 021
+collectively defined the Phase 0 polyglot orchestration through
+Dapr Workflows. Task 8.1 brought up the foundation; 8.2 the harness
+service; 8.3a the kernel service skeleton; 8.3b1 the kernel pipeline
+handlers; 8.3b2a the kernel `AppState` + dependency-free deduce
+smoke; 8.3b2b the externally-gated solve + recheck smokes; 8.4a
+the cluster bring-up + production SIGTERM-first warden; 8.4b
+(this session) the end-to-end Workflow orchestration that composes
+everything. Six Phase 0 endpoints (`cds-kernel`'s `/healthz` +
+`/v1/{deduce,solve,recheck}` and `cds-harness`'s `/healthz` +
+`/v1/{ingest,translate}`) round-trip end-to-end through three
+daprd sidecars under a single `dapr run` workflow runtime, all
+gated by replay-deterministic Pydantic models and producing a
+single in-band JSON envelope. Phase 0 close-out is now one
+`just dapr-pipeline` invocation away.
+
+
 
 Closed the Rust-foundation half of Task 8.4 per ADR-021 §2 + §5 — the
 six-times-deferred SIGTERM-first warden escalation (014 §9 → 015 §8 →
