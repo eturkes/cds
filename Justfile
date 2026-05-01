@@ -258,6 +258,207 @@ dapr-smoke:
         { echo "smoke fail: dapr did not shut down cleanly"; cat "$log"; exit 1; }
     echo "✓ dapr-smoke: cds-pubsub + cds-statestore loaded; workflow engine up; clean shutdown"
 
+# -----------------------------------------------------------------------------
+# Dapr cluster bring-up (Task 8.4a) — long-running placement + scheduler.
+# -----------------------------------------------------------------------------
+# Per ADR-021 §2: foreground daprd ran without these in 8.1–8.3 (placement
+# down meant `/v1.0/healthz` returned 500; the integration tests targeted
+# `/v1.0/healthz/outbound` which returns 204 once the sidecar's outbound
+# subsystem is reachable). Task 8.4a brings the cluster up so Workflow
+# (8.4b) can schedule activities. Pid-files live under `target/` so
+# `cargo clean` reclaims them; logs live alongside.
+#
+# Pinned bind ports avoid the 8080/9090 healthz/metrics collision that
+# occurs when both binaries default-bind side-by-side on a dev host:
+#   placement → gRPC :50005, healthz :50007, metrics :50008
+#   scheduler → gRPC :50006, healthz :50009, metrics :50010
+# Scheduler's embedded etcd writes under `target/dapr-scheduler-etcd/` —
+# overrides the upstream `./data` default that would otherwise collide
+# with this repo's genuine telemetry directory.
+
+DAPR_PLACEMENT_BIN   := DAPR_RUNTIME_DIR + "/bin/placement"
+DAPR_SCHEDULER_BIN   := DAPR_RUNTIME_DIR + "/bin/scheduler"
+DAPR_CLUSTER_DIR     := justfile_directory() + "/target"
+DAPR_PLACEMENT_PORT  := env_var_or_default('DAPR_PLACEMENT_PORT',  '50005')
+DAPR_PLACEMENT_HZ    := env_var_or_default('DAPR_PLACEMENT_HZ',    '50007')
+DAPR_PLACEMENT_MET   := env_var_or_default('DAPR_PLACEMENT_MET',   '50008')
+DAPR_SCHEDULER_PORT  := env_var_or_default('DAPR_SCHEDULER_PORT',  '50006')
+DAPR_SCHEDULER_HZ    := env_var_or_default('DAPR_SCHEDULER_HZ',    '50009')
+DAPR_SCHEDULER_MET   := env_var_or_default('DAPR_SCHEDULER_MET',   '50010')
+
+# Idempotently background-spawn the slim placement service.
+# Pid → target/dapr-placement.pid; log → target/dapr-placement.log.
+placement-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{DAPR_CLUSTER_DIR}}"
+    pidfile="{{DAPR_CLUSTER_DIR}}/dapr-placement.pid"
+    logfile="{{DAPR_CLUSTER_DIR}}/dapr-placement.log"
+    if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+        echo "placement already up: pid=$(cat "$pidfile") port={{DAPR_PLACEMENT_PORT}}"
+        exit 0
+    fi
+    [ -x "{{DAPR_PLACEMENT_BIN}}" ] || \
+        { echo "placement binary missing — run \`just fetch-dapr\`"; exit 1; }
+    rm -f "$pidfile"
+    nohup "{{DAPR_PLACEMENT_BIN}}" \
+        --port {{DAPR_PLACEMENT_PORT}} \
+        --healthz-port {{DAPR_PLACEMENT_HZ}} \
+        --metrics-port {{DAPR_PLACEMENT_MET}} \
+        --listen-address 127.0.0.1 \
+        --healthz-listen-address 127.0.0.1 \
+        --log-level info \
+        > "$logfile" 2>&1 < /dev/null &
+    pid=$!
+    echo $pid > "$pidfile"
+    # Liveness probe — placement should still be running after a beat.
+    sleep 0.4
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo "placement failed to start — see $logfile"
+        rm -f "$pidfile"
+        tail -20 "$logfile" || true
+        exit 1
+    fi
+    echo "✓ placement up: pid=$pid grpc={{DAPR_PLACEMENT_PORT}} healthz={{DAPR_PLACEMENT_HZ}} log=$logfile"
+
+# Stop the placement service (SIGTERM-then-grace-then-SIGKILL).
+placement-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pidfile="{{DAPR_CLUSTER_DIR}}/dapr-placement.pid"
+    if [ ! -f "$pidfile" ]; then
+        echo "placement not running (no pid-file)"
+        exit 0
+    fi
+    pid=$(cat "$pidfile")
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo "placement not running (stale pid $pid)"
+        rm -f "$pidfile"
+        exit 0
+    fi
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 1 30); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "placement ignored SIGTERM — escalating to SIGKILL"
+        kill -KILL "$pid" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+        done
+    fi
+    rm -f "$pidfile"
+    echo "✓ placement down (pid=$pid)"
+
+# Idempotently background-spawn the slim scheduler service.
+# Pid → target/dapr-scheduler.pid; log → target/dapr-scheduler.log;
+# embedded etcd data → target/dapr-scheduler-etcd/.
+scheduler-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{DAPR_CLUSTER_DIR}}"
+    pidfile="{{DAPR_CLUSTER_DIR}}/dapr-scheduler.pid"
+    logfile="{{DAPR_CLUSTER_DIR}}/dapr-scheduler.log"
+    etcddir="{{DAPR_CLUSTER_DIR}}/dapr-scheduler-etcd"
+    if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+        echo "scheduler already up: pid=$(cat "$pidfile") port={{DAPR_SCHEDULER_PORT}}"
+        exit 0
+    fi
+    [ -x "{{DAPR_SCHEDULER_BIN}}" ] || \
+        { echo "scheduler binary missing — run \`just fetch-dapr\`"; exit 1; }
+    rm -f "$pidfile"
+    mkdir -p "$etcddir"
+    nohup "{{DAPR_SCHEDULER_BIN}}" \
+        --port {{DAPR_SCHEDULER_PORT}} \
+        --healthz-port {{DAPR_SCHEDULER_HZ}} \
+        --metrics-port {{DAPR_SCHEDULER_MET}} \
+        --listen-address 127.0.0.1 \
+        --healthz-listen-address 127.0.0.1 \
+        --etcd-data-dir "$etcddir" \
+        --log-level info \
+        > "$logfile" 2>&1 < /dev/null &
+    pid=$!
+    echo $pid > "$pidfile"
+    # Scheduler boots a touch slower than placement (etcd quorum); give
+    # it a bit more headroom before declaring it live.
+    sleep 1.0
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo "scheduler failed to start — see $logfile"
+        rm -f "$pidfile"
+        tail -30 "$logfile" || true
+        exit 1
+    fi
+    echo "✓ scheduler up: pid=$pid grpc={{DAPR_SCHEDULER_PORT}} healthz={{DAPR_SCHEDULER_HZ}} log=$logfile"
+
+# Stop the scheduler service (SIGTERM-then-grace-then-SIGKILL).
+scheduler-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pidfile="{{DAPR_CLUSTER_DIR}}/dapr-scheduler.pid"
+    if [ ! -f "$pidfile" ]; then
+        echo "scheduler not running (no pid-file)"
+        exit 0
+    fi
+    pid=$(cat "$pidfile")
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo "scheduler not running (stale pid $pid)"
+        rm -f "$pidfile"
+        exit 0
+    fi
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 1 50); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "scheduler ignored SIGTERM — escalating to SIGKILL"
+        kill -KILL "$pid" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+        done
+    fi
+    rm -f "$pidfile"
+    echo "✓ scheduler down (pid=$pid)"
+
+# Bring up both placement + scheduler. Idempotent.
+dapr-cluster-up: placement-up scheduler-up
+    @echo "✓ dapr cluster up — see \`just dapr-cluster-status\`"
+
+# Tear down both (reverse order).
+dapr-cluster-down: scheduler-down placement-down
+    @echo "✓ dapr cluster down"
+
+# Print PIDs / ports / log paths for the placement + scheduler children.
+dapr-cluster-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    print_one() {
+        local name=$1 pidfile=$2 grpc=$3 hz=$4 logfile=$5
+        if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+            printf "  %-9s up   pid=%-7s grpc=%-5s healthz=%-5s log=%s\n" \
+                "$name" "$(cat "$pidfile")" "$grpc" "$hz" "$logfile"
+        elif [ -f "$pidfile" ]; then
+            printf "  %-9s STALE (pid %s gone)  log=%s\n" \
+                "$name" "$(cat "$pidfile")" "$logfile"
+        else
+            printf "  %-9s down\n" "$name"
+        fi
+    }
+    echo "::: dapr cluster status :::"
+    print_one placement \
+        "{{DAPR_CLUSTER_DIR}}/dapr-placement.pid" \
+        "{{DAPR_PLACEMENT_PORT}}" \
+        "{{DAPR_PLACEMENT_HZ}}" \
+        "{{DAPR_CLUSTER_DIR}}/dapr-placement.log"
+    print_one scheduler \
+        "{{DAPR_CLUSTER_DIR}}/dapr-scheduler.pid" \
+        "{{DAPR_SCHEDULER_PORT}}" \
+        "{{DAPR_SCHEDULER_HZ}}" \
+        "{{DAPR_CLUSTER_DIR}}/dapr-scheduler.log"
+
 # =============================================================================
 # Python (uv + ruff + pytest)
 # =============================================================================

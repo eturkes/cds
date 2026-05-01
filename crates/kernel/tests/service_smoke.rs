@@ -132,8 +132,10 @@ async fn dapr_sidecar_drives_healthz_through_service_invocation() {
         .map_err(|e| format!("app readiness: {e}"))?;
 
         // Sidecar readiness — Phase 0 placement is down (ADR-016 §6),
-        // so /v1.0/healthz/outbound (204) is the right gate. Task 8.4
-        // may flip this back to /v1.0/healthz once placement is up.
+        // so /v1.0/healthz/outbound (204) is the right gate. Task 8.4a
+        // (ADR-021 §5) kept this as the floor so the test stays green
+        // both cluster-up and cluster-down — see common::wait_until_ready
+        // for the rationale.
         wait_until_ready(
             &client,
             &format!("http://127.0.0.1:{}/v1.0/healthz/outbound", ports.http),

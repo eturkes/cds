@@ -48,6 +48,24 @@ pub fn pick_free_port() -> u16 {
 
 /// Wait until `url` responds with one of `accept_status`, or the deadline
 /// expires. Returns the final HTTP status on success.
+///
+/// ## Daprd readiness gate — `/v1.0/healthz/outbound` is the floor
+///
+/// All five daprd-driven integration tests (`tests/service_smoke.rs` x3 +
+/// `tests/service_pipeline_smoke.rs` x2) probe `/v1.0/healthz/outbound`
+/// rather than the full `/v1.0/healthz`. The reason: `outbound` returns
+/// 204 once the sidecar's outbound subsystem is reachable (independent of
+/// placement / scheduler readiness), whereas `healthz` returns 500 until
+/// placement is up.
+///
+/// Task 8.4a (ADR-021 §5) introduced `just dapr-cluster-up` to bring
+/// placement + scheduler online for Task 8.4b's Workflow harness, but
+/// **kept `outbound` as the readiness floor here** so the existing
+/// integration tests continue to work both cluster-up and cluster-down —
+/// a developer running `just rs-service-{smoke,pipeline-smoke}` without
+/// first bringing the cluster up still gets a green run. 8.4b's pipeline
+/// test additionally pre-flights `/v1.0/healthz` after starting the
+/// cluster.
 pub async fn wait_until_ready(
     client: &reqwest::Client,
     url: &str,

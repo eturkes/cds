@@ -32,12 +32,14 @@ axum               = { workspace = true }
 tower              = { workspace = true }
 tower-http         = { workspace = true }
 
-# Integration-test-only deps. `nix` is needed by the gated dapr sidecar
-# smoke (tests/service_smoke.rs) to send SIGTERM to the `dapr` CLI so
-# its grandchildren (daprd + the kernel binary) shut down gracefully
-# instead of being orphaned to PID 1 — SIGKILL on the immediate child
-# does not propagate. ADR-018 §6 captures the rationale.
-[dev-dependencies]
+# `nix` is the production-side syscall surface for the warden's
+# SIGTERM-first timeout escalation (ADR-021 §2 + §4 — promoted from
+# `[dev-dependencies]` in Task 8.4a after rolling forward through six
+# prior ADR deferrals: 014 §9 → 015 §8 → 016 §7 → 018 §6 → 019 §11 →
+# 020 §6). The same crate also serves the dapr-CLI cleanup helper in
+# `tests/common.rs` (ADR-018 §6 narrow auth), so a single dependency
+# entry covers both call sites; default-feature-disabled keeps the
+# surface to `signal` only.
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 
 [lints.rust]

@@ -6,10 +6,114 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 8.4 plan restructure (planning-only, ADR-021). Diagnosed that the inherited Task 8.4 scope — placement+scheduler bring-up recipes + production SIGTERM-first warden escalation (deferred six times) + readiness gate flip + a new Python `cds_harness.workflow` Dapr Workflow package + Dapr Python SDK introduction + aggregated cross-stage envelope + per-stage tracing + `just dapr-pipeline` recipe + end-to-end pytest smoke close-out — overflows a single context window under the same pattern that already forced Task 8 → 8.1–8.4 (ADR-016), 8.3 → 8.3a + 8.3b (ADR-018), 8.3b → 8.3b1 + 8.3b2 (ADR-019), and 8.3b2 → 8.3b2a + 8.3b2b (ADR-020). Split 8.4 along the natural Rust-foundation vs. Python-composition boundary into 8.4a (cluster bring-up + warden refactor + readiness gate) and 8.4b (Workflow harness + smoke close-out). ADR-021 codifies the per-sub-task contracts, gates, and alternatives rejected. No code, no dependencies, no test-suite changes this session. Final regression gate: `cargo test --workspace` → 151 pass; clippy/fmt clean; pytest 95/95; ruff clean; env-verify ✓ (2026-05-01, drift-check only).
-- **Next up:** Task 8.4a — Dapr cluster bring-up + production SIGTERM-first warden (ADR-021 §2). Three Justfile recipes (`placement-up`, `scheduler-up`, `dapr-cluster-up` + symmetric `*-down`); two-stage SIGTERM → grace → SIGKILL escalation in `crate::solver::warden::run_with_input` (promote `nix` from kernel `[dev-dependencies]` to `[dependencies]`); two new warden tests (`timeout_sigterm_first_when_child_traps_term` + `timeout_sigkill_fallback_when_child_ignores_term`); optional readiness probe flip in `tests/common::wait_until_ready` from `/v1.0/healthz/outbound` → `/v1.0/healthz` if all five existing daprd-driven integration tests stay green against a cluster-up sidecar.
+- **Last completed:** Task 8.4a — Dapr cluster bring-up + production SIGTERM-first warden (ADR-021 §2). Promoted `nix = { ..., features = ["signal"] }` from kernel `[dev-dependencies]` to `[dependencies]` (single entry now serves both the production warden + the dapr-CLI cleanup helper in `tests/common.rs`). Refactored `crate::solver::warden::run_with_input` to a two-stage shutdown — `pin!(child.wait_with_output())`; on wall-clock timeout send `SIGTERM` via `nix::sys::signal::kill(Pid::from_raw(...), Signal::SIGTERM)`, wait up to a new `SIGTERM_GRACE` const (500 ms — Phase 0 default per ADR-021 §2), fall through to `kill_on_drop`'s `SIGKILL` by letting the pinned future drop at end-of-scope (no explicit `drop(collect)` — clippy::drop_non_drop forbids it on a `Pin<&mut Future>`). `WardenError::Timeout { bin, timeout }` shape preserved (call sites in `solver::z3` / `solver::cvc5` / `service::handlers` / `service::errors` untouched). Added two new warden tests: `timeout_sigterm_first_when_child_traps_term` (`bash -c 'trap "exit 0" TERM; while :; do sleep 1; done'` exits within grace; assert `Timeout` + elapsed ≤ wall_clock + grace + slack) and `timeout_sigkill_fallback_when_child_ignores_term` (`bash -c 'trap "" TERM; ...'` ignores TERM; assert `Timeout` + elapsed ∈ `[wall_clock + grace, wall_clock + grace + 2s]`). Added Justfile recipes `placement-up`, `placement-down`, `scheduler-up`, `scheduler-down`, `dapr-cluster-up` (placement-up + scheduler-up), `dapr-cluster-down` (reverse-order teardown), `dapr-cluster-status`. Each `*-up` recipe `nohup`-spawns the slim binary in background (PID → `target/dapr-<name>.pid`, log → `target/dapr-<name>.log`), idempotent (skips if pid-file PID is alive), liveness-probes via `kill -0` after a short settle window. Each `*-down` recipe is SIGTERM → 3-second grace polled in 100 ms ticks → SIGKILL. Pinned bind ports avoid the 8080/9090 healthz/metrics collision when both binaries run side-by-side: placement gRPC :50005 / healthz :50007 / metrics :50008; scheduler gRPC :50006 / healthz :50009 / metrics :50010. Scheduler embedded etcd writes under `target/dapr-scheduler-etcd/` (overrides upstream `./data` default that would otherwise collide with this repo's genuine telemetry dir). Per ADR-021 §5 the readiness gate `tests/common::wait_until_ready` floor stays at `/v1.0/healthz/outbound` so the existing five daprd-driven integration tests stay green both cluster-up and cluster-down (a developer running `just rs-service-{smoke,pipeline-smoke}` without bringing the cluster up first still gets a green run); rationale documented in the helper's doc-comment + the call-site comments. **8.4b** will additionally pre-flight `/v1.0/healthz` after starting the cluster. **SIGTERM-first deferral closed** — ADR-014 §9 → ADR-015 §8 → ADR-016 §7 → ADR-018 §6 → ADR-019 §11 → ADR-020 §6 is now ratified. Gate: `cargo test --workspace` → **153 pass** (151 baseline + 2 new warden cases); `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all -- --check` clean; `uv run pytest` 95/95; `uv run ruff check .` clean; `just env-verify` exit 0; `just dapr-cluster-up` + `dapr-cluster-status` print PIDs (placement healthz 200; scheduler healthz 200) and `dapr-cluster-down` reclaims both children; `just rs-service-pipeline-smoke` + `just rs-service-smoke` both green against a cluster-up sidecar.
+- **Next up:** Task 8.4b — End-to-end Dapr Workflow + close-out of Task 8 (ADR-021 §3). New `cds_harness.workflow` package (`__init__.py` + `pipeline.py` + `activities.py` + `__main__.py`); five `@activity` callables (`ingest`, `translate`, `deduce`, `solve`, `recheck`), each a thin `httpx`-over-daprd wrapper; introduce Dapr Python SDK (ADR-017 §5 reversed — `dapr>=1.17` + `dapr-ext-workflow>=1.17` in `[project.dependencies]`) for `WorkflowRuntime` + `@workflow` / `@activity` decorators + replay semantics + activity-id-tagged tracing; aggregated in-band JSON envelope `{ payload, ir, matrix, verdict, trace, recheck }` (Phase 0 small payloads + replay determinism + JSON-over-TCP discipline preferred over state-store handles per ADR-021 §7); per-stage `tracing` spans correlated through Workflow activity-id; `just dapr-pipeline` orchestrator (`dapr-cluster-up` → `py-service-dapr` → `rs-service-dapr` → `python -m cds_harness.workflow run-pipeline` → assert three flags → reverse teardown); end-to-end pytest smoke `python/tests/test_dapr_pipeline.py` (gated on full bin set + `CDS_KIMINA_URL`). 8.4b's pipeline test should additionally pre-flight `/v1.0/healthz` after starting the cluster (per the floor decision in 8.4a). Final close-out gate: `just dapr-pipeline` end-to-end against `data/guidelines/contradictory-bound.txt` returns `verdict ∧ trace.sat=false ∧ recheck.ok=true`; manual run on `data/guidelines/hypoxemia-trigger.txt` returns `verdict ∧ trace.sat=true ∧ recheck.ok=true`. **This closes Task 8.**
 
 > **Task 8 was split** into 8.1–8.4 on 2026-04-30 (ADR-016) because a monolithic Dapr-orchestration task repeatedly exhausted a single context window. **Task 8.3 was further split** into 8.3a / 8.3b on 2026-04-30 (ADR-018) because the kernel service binds three subprocess pipelines (`deduce`, `solve`, `recheck`) behind one axum app and the foundation + endpoint plumbing each warrant their own session. **Task 8.3b was further split** into 8.3b1 / 8.3b2 on 2026-05-01 (ADR-019) because the original 8.3b scope (three handlers + their `IntoResponse` impls + comprehensive unit tests + `AppState` wiring + a Dapr-driven cargo integration test driving all three endpoints through daprd) again exceeded a single context window. **Task 8.3b2 was further split** into 8.3b2a / 8.3b2b on 2026-05-01 (ADR-020) because the original 8.3b2 scope (`AppState` introduction + env-driven option resolution + handler refactor onto `axum::extract::State` + shared smoke helpers + three daprd-driven cargo integration tests) again exceeded a single context window — and the external-dependency gate of solve/recheck (`.bin/z3`, `.bin/cvc5`, `CDS_KIMINA_URL`) cleanly separates from the dependency-free `/v1/deduce` smoke + the foundation refactor. **Task 8.4 was further split** into 8.4a / 8.4b on 2026-05-01 (ADR-021) because the original 8.4 scope (placement+scheduler bring-up + production SIGTERM-first warden escalation + readiness gate flip + Python `cds_harness.workflow` package + Dapr Python SDK introduction + aggregated envelope + per-stage tracing + `just dapr-pipeline` + end-to-end pytest smoke) again exceeded a single context window — and the Rust-foundation vs. Python-composition boundary cleanly separates the cluster bring-up + warden refactor from the Workflow harness composition. Sub-task progression is strict: `8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9`.
+
+## Session 2026-05-01 — Task 8.4a close-out
+
+Closed the Rust-foundation half of Task 8.4 per ADR-021 §2 + §5 — the
+six-times-deferred SIGTERM-first warden escalation (014 §9 → 015 §8 →
+016 §7 → 018 §6 → 019 §11 → 020 §6) and the new
+placement+scheduler bring-up recipes that 8.4b's Workflow harness
+needs to schedule activities. No Python touchpoints; no kernel
+endpoint changes; no schema changes. The Rust workspace + Justfile
+round-trip cleanly against both cluster-up and cluster-down sidecar
+states.
+
+**Code additions (`crates/kernel/src/solver/warden.rs`):**
+
+| Item                                        | Role                                                                                                                                                                                     |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pub const SIGTERM_GRACE: Duration`         | New: 500 ms grace window between `SIGTERM` and the `kill_on_drop` `SIGKILL` fallback. ADR-021 §2 tunable-in-source — preserves the call-surface (no grace param) so all existing solver / handler call sites keep their signatures. |
+| `run_with_input` — two-stage shutdown      | Refactor: capture `child.id()` before stdin write; `pin!(child.wait_with_output())` so we can keep the future after `tokio::time::timeout` expires; on first-stage timeout send `SIGTERM` via `nix::sys::signal::kill(Pid::from_raw(pid_i32), Signal::SIGTERM)` (ESRCH/EPERM ignored — child may have already exited racing with the timeout); second `tokio::time::timeout(SIGTERM_GRACE, collect.as_mut())` waits for graceful exit; either branch returns `WardenError::Timeout` (the wall-clock budget was exceeded — only the kill mechanism differs). The pinned future drops at end-of-scope, which drops its inner `Child`, which delivers `SIGKILL` via `kill_on_drop` on the SIGTERM-ignored path. No explicit `drop(collect)` — clippy::drop_non_drop forbids dropping a `Pin<&mut Future>`. |
+| `nix` runtime dependency                   | Promotion: `crates/kernel/Cargo.toml` moves `nix = { version = "0.31", default-features = false, features = ["signal"] }` from `[dev-dependencies]` to `[dependencies]`. Single entry now serves both the production warden + the dapr-CLI cleanup helper in `tests/common.rs` (ADR-018 §6 narrow auth, now superseded by ADR-021 §4 broader auth for the production path). |
+| Module doc-comment                         | Refresh: items 1–3 of the warden invariants now reference ADR-004 + ADR-021 §2 jointly. Item 2 explicitly documents the two-stage `SIGTERM → SIGTERM_GRACE → SIGKILL` shape. Item 1 (`kill_on_drop`) and item 3 (no signal handlers in worker tasks) carry through unchanged.                                                          |
+
+**Test additions (`crates/kernel/src/solver/warden.rs::tests`):**
+
+| Test                                               | Coverage                                                                                                                                                                |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `timeout_sigterm_first_when_child_traps_term`     | `/bin/bash -c 'trap "exit 0" TERM; while :; do sleep 1; done'` — child exits cleanly on SIGTERM. wall_clock=150 ms, grace=500 ms. Asserts `WardenError::Timeout` (budget exceeded) + elapsed ∈ `[wall_clock, wall_clock + SIGTERM_GRACE + 500 ms slack]`. Validates the SIGTERM-first stage. |
+| `timeout_sigkill_fallback_when_child_ignores_term` | `/bin/bash -c 'trap "" TERM; while :; do sleep 1; done'` — child masks TERM. wall_clock=150 ms, grace=500 ms. Asserts `WardenError::Timeout` + elapsed ∈ `[wall_clock + SIGTERM_GRACE, wall_clock + SIGTERM_GRACE + 2s]`. Validates the `kill_on_drop` SIGKILL fallback. |
+
+Both tests are hermetic on any Linux dev host (require `/bin/bash`).
+
+**Justfile additions (cluster bring-up block, after `dapr-smoke`):**
+
+| Recipe / variable                                 | Role                                                                                                                                                                                       |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `DAPR_PLACEMENT_BIN` / `DAPR_SCHEDULER_BIN`       | Resolve to `.bin/.dapr/.dapr/bin/{placement,scheduler}` (slim staging from `fetch-dapr`). |
+| `DAPR_CLUSTER_DIR`                                | `target/` — pid-files + log files live alongside cargo build output so `cargo clean` reclaims them. |
+| Pinned port vars                                   | `DAPR_PLACEMENT_PORT=50005` / `DAPR_PLACEMENT_HZ=50007` / `DAPR_PLACEMENT_MET=50008`; `DAPR_SCHEDULER_PORT=50006` / `DAPR_SCHEDULER_HZ=50009` / `DAPR_SCHEDULER_MET=50010`. The healthz/metrics defaults of 8080/9090 collide between the two binaries — explicit pins avoid that. All `env_var_or_default` so a developer can override per-invocation. |
+| `placement-up` / `scheduler-up`                    | `nohup`-spawn the binary in background, `--listen-address 127.0.0.1` to confine to localhost, `--healthz-listen-address 127.0.0.1` likewise, `--log-level info`. Pid file + log file under `target/`. Idempotent: if pid-file PID is alive, print "already up" and exit 0. After spawn, sleep brief settle window (placement 0.4 s; scheduler 1.0 s — etcd quorum boot is slower) and `kill -0` probe the PID; if dead, print log tail + exit 1. Scheduler additionally takes `--etcd-data-dir target/dapr-scheduler-etcd/` to override upstream `./data` default that would otherwise stomp this repo's genuine telemetry dir. |
+| `placement-down` / `scheduler-down`                | If pid-file absent or stale → no-op + cleanup. Else SIGTERM via `kill -TERM`; poll `kill -0` in 100 ms ticks for 3 s (placement) / 5 s (scheduler); on grace expiry SIGKILL via `kill -KILL`; remove pid-file. Print `✓ <name> down (pid=<pid>)` on success.                                                                       |
+| `dapr-cluster-up`                                  | Aggregator dependency: `placement-up scheduler-up`. Idempotent transitively.                                                                                                                                                                  |
+| `dapr-cluster-down`                                | Aggregator dependency: `scheduler-down placement-down` (reverse order).                                                                                                                                                                       |
+| `dapr-cluster-status`                              | Inline `print_one` bash function called twice (placement + scheduler). Printout per child: `up` (with pid + grpc + healthz + log path) or `STALE` (pid-file present but PID gone) or `down` (no pid-file). Useful operationally + for 8.4b's Workflow smoke pre-flight. |
+
+**Readiness gate floor — kept at `/v1.0/healthz/outbound` (ADR-021 §5).**
+The existing five daprd-driven integration tests
+(`tests/service_smoke.rs::dapr_sidecar_drives_*` x3 +
+`tests/service_pipeline_smoke.rs::dapr_sidecar_drives_*` x2) all
+target `/v1.0/healthz/outbound` (204) per ADR-017 §4 / ADR-018 §5
+because Phase 0 placement was down. ADR-021 §5 made the flip to
+`/v1.0/healthz` (full readiness, requires placement) **optional** in
+8.4a. Decision this session: **keep `outbound` as the floor.**
+Rationale:
+
+1. The existing tests pass green both cluster-up (verified this
+   session: 3/3 service_smoke + 2/2 service_pipeline_smoke against a
+   bring-up sidecar) and cluster-down (verified historically across
+   8.3a / 8.3b1 / 8.3b2a / 8.3b2b). Flipping to `/v1.0/healthz` would
+   make them require a cluster, regressing the developer ergonomics
+   of `just rs-service-{smoke,pipeline-smoke}`.
+2. 8.4b's Workflow pipeline test will pre-flight `/v1.0/healthz`
+   after starting the cluster — it's the only test that *needs*
+   placement to be up (Workflow can't schedule activities otherwise),
+   so the additional probe lives there.
+3. The doc-comment on `tests/common::wait_until_ready` now carries
+   the rationale + the 8.4a decision so a future session reading the
+   helper doesn't have to grep ADRs to understand "why outbound and
+   not healthz?"
+
+**Subprocess hygiene — production path now matches the test path.**
+Pre-8.4a, `tests/common::sigterm_then_kill` was the only SIGTERM-first
+shape in the repo (narrow auth, dapr-CLI only). 8.4a brings the
+production warden into the same discipline (`SIGTERM` first, grace,
+then `SIGKILL` via `kill_on_drop`). The `WardenError` API is unchanged
+so consumers (`solver::z3`, `solver::cvc5`, `service::handlers`,
+`service::errors`) need no edits. `tests/common::sigterm_then_kill`
+stays as-is because it kills *the dapr CLI itself* (which orchestrates
+its own grandchildren's termination) and not a single solver child.
+
+**Why 8.4a and not earlier?** Per ADR-021 §4: Workflow's
+retry-against-long-running-proof failure mode is the operational
+pressure that finally tips the trade. SIGKILL-only on a 2-clause
+contradictory-bound matrix (10s of ms) is fine; SIGKILL-only on a
+multi-second proof under Workflow retries leaks partial state. The
+two-stage shape gives cvc5 a chance to flush its Alethe stream
+on `SIGTERM`.
+
+**Final regression gate (this session, post-cluster-down):**
+
+- `cargo test --workspace` → **153 pass** (151 baseline + 2 new warden cases).
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean.
+- `cargo fmt --all -- --check` → clean.
+- `uv run pytest` → 95 pass.
+- `uv run ruff check .` → clean.
+- `just env-verify` → exit 0 (the `.bin/ empty` notice is a
+  pre-existing SIGPIPE quirk in the recipe under `pipefail`; the
+  recipe itself exits 0 because `fail=0` is the only signal).
+- `just dapr-cluster-up` + `dapr-cluster-status` print both PIDs +
+  ports; placement healthz 200; scheduler healthz 200.
+- `just rs-service-smoke` → 3/3 against cluster-up sidecar.
+- `just rs-service-pipeline-smoke` → 2/2 against cluster-up sidecar
+  (recheck skips loudly on missing `CDS_KIMINA_URL`, by design).
+- `just dapr-cluster-down` → both children reclaimed cleanly.
+
+8.4b's gate is the end-to-end pipeline smoke + the Task 8 close-out.
 
 ## Session 2026-05-01 — Task 8.4 plan restructure (planning-only)
 
