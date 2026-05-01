@@ -56,6 +56,11 @@ bun.lock.local
 frontend/build/
 frontend/dist/
 frontend/.svelte-kit/
+frontend/playwright-report/
+frontend/test-results/
+frontend/playwright/.cache/
+frontend/vite.config.ts.timestamp-*
+frontend/vite.config.js.timestamp-*
 
 # -- Lean 4 -------------------------------------------------------------
 **/build/

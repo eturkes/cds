@@ -779,44 +779,66 @@ dapr-pipeline:
     fi
 
 # =============================================================================
-# Frontend (bun + Vite + SvelteKit) — placeholder until Task 9
+# Frontend (bun + Vite + SvelteKit 2 + Svelte 5 runes + Tailwind 4) — Task 9.1
 # =============================================================================
+# Per ADR-022 §2: scaffolded via `sv create --template minimal --types ts`
+# with the official add-ons (eslint, prettier, tailwindcss, vitest, playwright).
+# Every recipe shells out to `bun run <script>` against frontend/package.json.
 
-ts-install:
-    @if [ -f frontend/package.json ]; then cd frontend && bun install; \
-     else echo "frontend not yet scaffolded — Task 9"; fi
+# Install (or re-install) JS deps from frontend/bun.lock. CI sets
+# BUN_CONFIG_FROZEN_LOCKFILE=true; local dev gets `bun install` semantics.
+frontend-install:
+    cd frontend && bun install
 
-ts-dev:
-    @if [ -f frontend/package.json ]; then cd frontend && bun run dev; \
-     else echo "frontend not yet scaffolded — Task 9"; fi
+# Vite dev server with HMR (no auto-open). Bound to 127.0.0.1:5173 to match
+# the BFF's daprd-port read convention in 9.2.
+frontend-dev:
+    cd frontend && bun run dev --host 127.0.0.1 --port 5173
 
-ts-build:
-    @if [ -f frontend/package.json ]; then cd frontend && bun run build; \
-     else echo "frontend not yet scaffolded — Task 9"; fi
+# Production build via @sveltejs/adapter-node → frontend/build/.
+frontend-build:
+    cd frontend && bun run build
 
-ts-lint:
-    @if [ -f frontend/package.json ]; then cd frontend && bun run lint; \
-     else echo "frontend not yet scaffolded — Task 9"; fi
+# Serve the production build on :4173. Used by the 9.3 Playwright E2E.
+frontend-preview:
+    cd frontend && bun run preview --host 127.0.0.1 --port 4173
 
-ts-test:
-    @if [ -f frontend/package.json ]; then cd frontend && bun test; \
-     else echo "frontend not yet scaffolded — Task 9"; fi
+# Prettier --check + ESLint flat config.
+frontend-lint:
+    cd frontend && bun run lint
+
+# Prettier --write across the project.
+frontend-format:
+    cd frontend && bun run format
+
+# svelte-check against tsconfig (strict + noUncheckedIndexedAccess).
+frontend-typecheck:
+    cd frontend && bun run check
+
+# Vitest unit tests (tombstone in 9.1; parity tripwire in 9.2).
+frontend-test:
+    cd frontend && bun run test:unit
+
+# Playwright E2E (tombstone in 9.1; live-cluster pipeline run in 9.3).
+# Auto-installs Chromium under ~/.cache/ms-playwright/ on first run.
+frontend-e2e:
+    cd frontend && bun run test:e2e
 
 # =============================================================================
 # Aggregates
 # =============================================================================
 
 # Lint every ecosystem (Rust + Python + TS).
-lint: rs-lint py-lint ts-lint
+lint: rs-lint py-lint frontend-lint
 
 # Format every ecosystem.
 format: rs-format py-format
 
 # Run every test suite.
-test: rs-test py-test ts-test
+test: rs-test py-test frontend-test
 
 # Build every artifact.
-build: rs-build ts-build
+build: rs-build frontend-build
 
 # CI-equivalent gate.
 ci: env-verify lint test
@@ -842,7 +864,7 @@ run-kernel:
 
 run-harness: py-ingest
 
-run-frontend: ts-dev
+run-frontend: frontend-dev
 
 # Convenience: print the active Re-Entry Prompt for the human operator.
 re-entry-prompt:

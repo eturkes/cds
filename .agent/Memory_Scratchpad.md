@@ -6,10 +6,189 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 9 plan restructure (planning-only) — split monolithic Task 9 into atomic sub-tasks 9.1 / 9.2 / 9.3 along the natural three-axis boundary (toolchain-foundation / wire-contract+transport / visualizers+close-out). ADR-022 captures the rationale, the locked JS/TS toolchain (SvelteKit 2 + Svelte 5 runes + Vite 7 + TS 5.7+ + Tailwind 4 + ESLint 9 flat config + Prettier 3 + Playwright 1.51+ + Bun 1.3.x + Vitest 3), the visualizer-library policy (hand-rolled SVG + Svelte 5 reactivity, no D3 / Plotly / svelte-flow / Chart.js until a hard limit), the BFF transport policy (direct service-invocation through daprd, Workflow-via-`DaprWorkflowClient` deferred to Phase 1), the schema-mirror policy (hand-written TS + a vitest parity tripwire round-tripping cargo golden fixtures, no `schemars` JSON-Schema codegen), the PHASE marker semantics (0 → 1 flip lands at 9.3 close — when the UI demonstrates Plan §1's "Phase 0 = headless engine + stakeholder visualizer" definition end-to-end), the per-sub-task contracts (9.1 scaffolding + Justfile + tombstone Playwright; 9.2 six TS schema mirrors + `+server.ts` BFF + `frontend-bff-smoke` recipe; 9.3 four Svelte 5 visualizer components + Playwright E2E + PHASE flip), and the alternatives rejected (single Task 9 session; two-way split; pre-emptive four-way split; `schemars` codegen pipeline; D3 / Plotly / svelte-flow visualizer libraries; Workflow-via-`DaprWorkflowClient` BFF; BFF embedded in a Python service; skip canonical BFF smoke; skip schema parity tripwire; defer PHASE flip to Phase 1). Plan §8 row 9 split into rows 9.1 / 9.2 / 9.3; ordering note now `8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9.1 < 9.2 < 9.3`. No code, no dependency manifest changes, no test-suite changes this session. Regression-only gate (verify no drift): `cargo test --workspace` 153 pass (unchanged from 8.4b); `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all -- --check` clean; `uv run pytest` 95 pass + 1 skip; `uv run ruff check .` clean; `just env-verify` exit 0.
-- **Next up:** Task 9.1 — Frontend foundation. SvelteKit 2 + Svelte 5 (runes) + Vite 7 + TypeScript 5.7+ strict + Tailwind CSS 4 (with `@tailwindcss/vite`) + ESLint 9 (flat config) + Prettier 3 + Playwright 1.51+ tombstone + Vitest 3. Scaffold under `frontend/` (currently a `.gitkeep`-only directory) using the modern `sv create` CLI (successor to the deprecated `npm create svelte@latest`); single placeholder `+page.svelte`; new Justfile block `frontend-*` (install / dev / build / preview / lint / format / typecheck / test / e2e). No Rust / Python touchpoints; cargo + pytest baselines stay green.
+- **Last completed:** Task 9.1 — Frontend foundation. Scaffolded `frontend/` from a `.gitkeep`-only directory via the modern `bunx sv create --template minimal --types ts --add eslint prettier tailwindcss=plugins:none vitest=usages:unit playwright --install bun frontend` (Svelte CLI v0.15.2 — the successor to the deprecated `npm create svelte@latest`). Resolved versions: SvelteKit 2.57.0 + Svelte 5.55.2 (runes mode forced repo-wide via `svelte.config.js`) + Vite 8.0.7 + TypeScript 6.0.2 + Tailwind 4.2.2 (via `@tailwindcss/vite` plugin — no `tailwind.config.js`, no `postcss.config.js`, Lightning CSS handles vendor prefixes) + ESLint 10.2.0 (flat config) + Prettier 3.8.1 + Playwright 1.59.1 + Vitest 4.1.5 + svelte-check 4.4.6. All resolved versions ≥ ADR-022 §2 minimums per Plan §10 step 5 modernity persistence (ESLint 10 ≥ 9, Vite 8 ≥ 7, TS 6 ≥ 5.7, Vitest 4 ≥ 3). Locked-in modifications post-scaffold: swapped `@sveltejs/adapter-auto` (no Phase 0 hosted environment to detect) for `@sveltejs/adapter-node` 5.5.4 so `bun run build` emits a non-empty `frontend/build/` (BFF in 9.2 needs server-side `+server.ts` routes); flipped the test scripts from `npm run` chains to `bun run` chains (`test:unit` = `vitest run`, `test:e2e` = `playwright install chromium && playwright test`); added `noUncheckedIndexedAccess` + `noImplicitOverride` to `tsconfig.json`; replaced the demo SvelteKit homepage with a single `+page.svelte` rendering "Phase 0 — Neurosymbolic CDS" placeholder; deleted the demo `/demo` routes + the vitest-examples + the `.vscode/` scaffold dir; wrote one Vitest tombstone (`src/lib/tombstone.spec.ts` — `expect(1+1).toBe(2)`) and one Playwright tombstone (`e2e/tombstone.e2e.ts` — same shape, no `page` fixture) with a `webServer`-less `playwright.config.ts` (Chromium-only project, headless, `testDir: 'e2e'`, `testMatch: '**/*.e2e.ts'`); committed `bun.lock` (text-based; modern bun 1.3.x emits `bun.lock`, not the older `bun.lockb`); added `frontend/bunfig.toml` (registry pinned + telemetry off); added Justfile recipe block `frontend-*` (install / dev / build / preview / lint / format / typecheck / test / e2e — every recipe a single-line `cd frontend && bun run <script>`); flipped the aggregator targets `lint` / `test` / `build` from `ts-*` to `frontend-*` and `run-frontend` from `ts-dev` to `frontend-dev`; added five new entries to root `.gitignore` for Playwright + Vite-timestamp artifacts. Final 9.1 gate: `just frontend-build` exits 0 with `frontend/build/{client,server,handler.js,index.js,env.js,shims.js}` populated; `just frontend-typecheck` 322 files / 0 errors / 0 warnings; `just frontend-lint` clean (Prettier check + ESLint flat); `just frontend-test` 1/1 pass (Vitest tombstone); `just frontend-e2e` 1/1 pass (Playwright tombstone, Chromium auto-fetched into `~/.cache/ms-playwright/`); `cargo test --workspace` 153 pass (unchanged from 8.4b); `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all -- --check` clean; `uv run pytest` 95 pass + 1 skip (Kimina-gated); `uv run ruff check .` clean; `just env-verify` exit 0. Frontend is fully wired but consumes no live backend yet — that lands in 9.2.
+- **Next up:** Task 9.2 — TS schema mirrors + BFF + canonical smoke. Six TS schema modules under `frontend/src/lib/schemas/` mirroring the Phase 0 Rust source-of-truth (`telemetry.ts` + `onion.ts` + `smt.ts` + `verdict.ts` + `trace.ts` + `recheck.ts` + `pipeline.ts` + `index.ts` barrel) + SvelteKit `+server.ts` BFF routes (`/api/{ingest,translate,deduce,solve,recheck}`) proxying through daprd at `http://127.0.0.1:${process.env.DAPR_HTTP_PORT_*}/v1.0/invoke/<app-id>/method/v1/<path>` with HTTP 422 `{error,detail}` lift to a typed `BackendError` exception + per-stage `console.info` tracing + a `vitest` schema parity tripwire (`frontend/src/lib/schemas/parity.test.ts`) decoding every `crates/schemas/tests/fixtures/*.json` golden through the TS parsers + a new `frontend-bff-smoke` Justfile recipe driving the canonical `contradictory-bound` pipeline through the BFF against a live cluster. **No visualizers in 9.2.** ADR-022 §3 captures the contract.
 
 > **Task 8 was split** into 8.1–8.4 on 2026-04-30 (ADR-016) because a monolithic Dapr-orchestration task repeatedly exhausted a single context window. **Task 8.3 was further split** into 8.3a / 8.3b on 2026-04-30 (ADR-018) because the kernel service binds three subprocess pipelines (`deduce`, `solve`, `recheck`) behind one axum app and the foundation + endpoint plumbing each warrant their own session. **Task 8.3b was further split** into 8.3b1 / 8.3b2 on 2026-05-01 (ADR-019) because the original 8.3b scope (three handlers + their `IntoResponse` impls + comprehensive unit tests + `AppState` wiring + a Dapr-driven cargo integration test driving all three endpoints through daprd) again exceeded a single context window. **Task 8.3b2 was further split** into 8.3b2a / 8.3b2b on 2026-05-01 (ADR-020) because the original 8.3b2 scope (`AppState` introduction + env-driven option resolution + handler refactor onto `axum::extract::State` + shared smoke helpers + three daprd-driven cargo integration tests) again exceeded a single context window — and the external-dependency gate of solve/recheck (`.bin/z3`, `.bin/cvc5`, `CDS_KIMINA_URL`) cleanly separates from the dependency-free `/v1/deduce` smoke + the foundation refactor. **Task 8.4 was further split** into 8.4a / 8.4b on 2026-05-01 (ADR-021) because the original 8.4 scope (placement+scheduler bring-up + production SIGTERM-first warden escalation + readiness gate flip + Python `cds_harness.workflow` package + Dapr Python SDK introduction + aggregated envelope + per-stage tracing + `just dapr-pipeline` + end-to-end pytest smoke) again exceeded a single context window — and the Rust-foundation vs. Python-composition boundary cleanly separates the cluster bring-up + warden refactor from the Workflow harness composition. **Task 9 was further split** into 9.1 / 9.2 / 9.3 on 2026-05-01 (ADR-022) because the original Task 9 scope (first-time JS/TS toolchain introduction + six TS schema mirrors + SvelteKit `+server.ts` BFF + canonical happy-path smoke + four Svelte 5 visualizer components + Playwright + the Phase 0 → Phase 1 marker flip) was structurally larger than every prior Phase 0 task and the natural three-axis boundary (toolchain-foundation / wire-contract+transport / visualizers+close-out) cleanly separates the green-field scaffold from the BFF contract from the UI close-out. Sub-task progression is strict: `8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9.1 < 9.2 < 9.3`.
+
+## Session 2026-05-01 — Task 9.1 close-out (Frontend foundation)
+
+Closed the toolchain-and-scaffolding axis of ADR-022 §2. The repo now
+carries its first JS/TS surface: a SvelteKit 2 + Svelte 5 (runes) +
+Vite 8 + TS 6 + Tailwind 4 + ESLint 10 (flat) + Prettier 3 +
+Playwright 1.59 + Vitest 4 stack under `frontend/`, wired through
+nine `frontend-*` Justfile recipes that the 9.2 BFF + 9.3 visualizer
+sessions consume. No backend touchpoints — cargo + pytest baselines
+unchanged.
+
+**Scaffold path.** `bunx sv create --template minimal --types ts
+--add eslint prettier 'tailwindcss=plugins:none' 'vitest=usages:unit'
+playwright --install bun frontend` (Svelte CLI v0.15.2, the modern
+successor to the deprecated `npm create svelte@latest`). The
+`--add` + per-add-on default-skips form is the canonical
+non-interactive 2026 invocation; `--no-add-ons` is mutually
+exclusive with `--add` (CLI rejects the combo). All five official
+add-ons resolve cleanly through bun in a single shot — no second
+pass needed.
+
+**Resolved stack (all ≥ ADR-022 §2 minimums per Plan §10 step 5
+modernity persistence).**
+
+| Package                       | Resolved | ADR-022 minimum |
+| ----------------------------- | -------- | --------------- |
+| `@sveltejs/kit`               | 2.57.0   | 2.x             |
+| `svelte`                      | 5.55.2   | 5.x (runes)     |
+| `vite`                        | 8.0.7    | 7+              |
+| `typescript`                  | 6.0.2    | 5.7+            |
+| `tailwindcss`                 | 4.2.2    | 4               |
+| `@tailwindcss/vite`           | 4.2.2    | matches         |
+| `eslint`                      | 10.2.0   | 9 (flat)        |
+| `prettier`                    | 3.8.1    | 3               |
+| `@playwright/test`            | 1.59.1   | 1.51+           |
+| `vitest`                      | 4.1.5    | 3               |
+| `svelte-check`                | 4.4.6    | n/a             |
+| `typescript-eslint`           | 8.58.1   | n/a             |
+| `eslint-plugin-svelte`        | 3.17.0   | n/a             |
+| `prettier-plugin-svelte`      | 3.5.1    | n/a             |
+| `prettier-plugin-tailwindcss` | 0.7.2    | n/a             |
+| `@sveltejs/adapter-node`      | 5.5.4    | (added below)   |
+
+ESLint 10 keeps the flat-config-only contract that ESLint 9 introduced
+(no breaking change on the user surface). Vite 8 / TS 6 / Vitest 4
+each are above the floors locked by ADR-022 — modernity persistence
+locks in the higher resolved versions.
+
+**Post-scaffold modifications.**
+
+- **`@sveltejs/adapter-auto` → `@sveltejs/adapter-node` 5.5.4.**
+  `adapter-auto` is for hosted environments (Vercel / Cloudflare /
+  Netlify / etc.); Phase 0 ships self-hosted, so auto-detection
+  finds nothing and `bun run build` lands no `frontend/build/`
+  output (only `.svelte-kit/output/`). The contracted gate ("`just
+  frontend-build` exits 0 with a non-empty `frontend/build/`")
+  required a real adapter. `adapter-node` emits
+  `frontend/build/{client,server,handler.js,index.js,env.js,shims.js}`
+  runnable as `node build/`, which 9.2's BFF (`+server.ts` proxy
+  routes through daprd) needs anyway.
+- **`package.json` script chains: `npm run` → `bun run`.** The
+  scaffold defaulted to `"test": "npm run test:unit -- --run && npm
+  run test:e2e"` which would call `npm` (not on PATH per ADR-007's
+  bun-only lock). Flipped to `"test": "bun run test:unit && bun run
+  test:e2e"`; `"test:unit": "vitest run"` (single-shot, not watch);
+  `"test:e2e": "playwright install chromium && playwright test"`
+  (idempotent Chromium auto-fetch into `~/.cache/ms-playwright/`).
+- **`tsconfig.json` strict-flag additions.** Added
+  `"noUncheckedIndexedAccess": true` + `"noImplicitOverride": true`
+  alongside the existing `"strict": true`. The
+  `noUncheckedIndexedAccess` flag matters for 9.2's BFF
+  (`process.env.DAPR_HTTP_PORT_*` reads return `string | undefined`
+  instead of silently `string`).
+- **Single placeholder `+page.svelte`.** Replaces the scaffold's
+  "Welcome to SvelteKit" demo page. Renders "Phase 0 / Neurosymbolic
+  CDS" headline + a one-line abstract pointing at the 9.3 visualizer
+  scope. Tailwind classes only — no custom theme tokens until 9.3
+  needs them.
+- **Demo dir purge.** Deleted `frontend/src/routes/demo/` (the
+  scaffold's demo + Playwright-demo routes), `frontend/src/lib/
+  vitest-examples/` (the scaffold's `greet.ts` example), and
+  `frontend/.vscode/` (IDE-specific opt-in not part of the project
+  contract). The frontend now has exactly: a `+layout.svelte`
+  importing `layout.css` (which is `@import 'tailwindcss';`),
+  a `+page.svelte` placeholder, an `app.html`, an `app.d.ts`, a
+  `lib/index.ts` barrel, and a `lib/assets/favicon.svg`.
+- **Tombstones.** `frontend/src/lib/tombstone.spec.ts` is the
+  Vitest tombstone (`expect(1+1).toBe(2)` inside a `describe`/`it`
+  block) — proves the runner is wired without depending on real
+  fixtures. `frontend/e2e/tombstone.e2e.ts` is the Playwright
+  tombstone (`expect(1+1).toBe(2)` inside a `test()` body that
+  takes no `page` fixture, so it doesn't navigate to a URL —
+  Chromium still launches, but no Vite server is needed). Both
+  tombstones get replaced with real cases in 9.2 (parity tripwire)
+  and 9.3 (E2E pipeline).
+- **`playwright.config.ts` rewrite.** Dropped the scaffold's
+  `webServer: { command: 'npm run build && npm run preview' }`
+  (the 9.1 tombstone doesn't need a server) and the `testMatch:
+  '**/*.e2e.{ts,js}'` glob (we use `e2e/` dir + `**/*.e2e.ts`
+  match). Added a single Chromium-only project (`devices['Desktop
+  Chrome']`) with `headless: true` — Phase 0 doesn't need
+  cross-browser. 9.3 will reintroduce `webServer` against
+  `frontend-preview` when the live BFF is being driven.
+- **`bunfig.toml` (new).** Pins the npm registry + disables Bun's
+  telemetry per ADR-007 §6 spirit (local-first provisioning).
+  Frozen-lockfile lives as an env opt-in (`BUN_CONFIG_FROZEN_LOCKFILE
+  =true`) for CI rather than a global pin so a developer can still
+  edit `package.json` locally without `--no-frozen-lockfile`.
+
+**Justfile addition (new `frontend-*` recipe block, replacing the
+old `ts-*` placeholder block):**
+
+| Recipe                | Body                                                                                                                          |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `frontend-install`    | `cd frontend && bun install`                                                                                                  |
+| `frontend-dev`        | `cd frontend && bun run dev --host 127.0.0.1 --port 5173`                                                                     |
+| `frontend-build`      | `cd frontend && bun run build`                                                                                                |
+| `frontend-preview`    | `cd frontend && bun run preview --host 127.0.0.1 --port 4173`                                                                 |
+| `frontend-lint`       | `cd frontend && bun run lint` (Prettier --check + ESLint flat config)                                                         |
+| `frontend-format`     | `cd frontend && bun run format`                                                                                                |
+| `frontend-typecheck`  | `cd frontend && bun run check` (svelte-kit sync + svelte-check)                                                                |
+| `frontend-test`       | `cd frontend && bun run test:unit` (vitest run)                                                                                |
+| `frontend-e2e`        | `cd frontend && bun run test:e2e` (playwright install chromium && playwright test)                                             |
+
+The `lint` / `test` / `build` aggregator targets at the bottom of
+the Justfile flipped from `ts-lint` / `ts-test` / `ts-build` to
+`frontend-lint` / `frontend-test` / `frontend-build`. The
+`run-frontend` placeholder flipped from `ts-dev` to `frontend-dev`.
+
+**`.gitignore` additions (root).** Five new entries under the
+"TypeScript / Bun / SvelteKit / Vite" block: `frontend/playwright-
+report/`, `frontend/test-results/`, `frontend/playwright/.cache/`,
+`frontend/vite.config.{ts,js}.timestamp-*`. The frontend-local
+`.gitignore` (generated by `sv create`) covers the rest
+(`node_modules`, `/.svelte-kit`, `/build`, `.env*`, etc.) — both
+gitignores are active and complementary.
+
+**Lockfile note.** Modern bun (1.3.x verified by `just env-verify`)
+emits `bun.lock` (text JSON-ish, ~60 KiB), not the older binary
+`bun.lockb`. ADR-022 §2 said "bun.lockb only" — `bun.lock` is the
+2026 successor with the same semantics; per Plan §10 step 5 we lock
+in what bun emits.
+
+**Tailwind 4 setup confirmed.** No `tailwind.config.js` (Tailwind 4
+reads CSS-side `@theme` blocks); no `postcss.config.js` /
+`autoprefixer` (Lightning CSS handles vendor prefixes); only the
+`@tailwindcss/vite` plugin in `vite.config.ts` + a single
+`src/routes/layout.css` containing `@import 'tailwindcss';`. The
+manual `frontend-dev` smoke confirmed Tailwind 4.2.4 emits
+`--color-slate-*` custom properties + `oklch()` colour values into
+the served HTML.
+
+**Final 9.1 gate (this session):**
+
+- `cd frontend && bun install` → 30 packages installed (incl.
+  `@sveltejs/adapter-node` add post-scaffold), no warnings.
+- `just frontend-typecheck` → 322 files, 0 errors, 0 warnings.
+- `just frontend-lint` → Prettier check clean + ESLint flat clean.
+- `just frontend-build` → `frontend/build/{client,server,handler.js,
+  index.js,env.js,shims.js}` populated; "Using @sveltejs/adapter-node
+  ✔ done".
+- `just frontend-test` → 1/1 pass (Vitest tombstone, ~250 ms).
+- `just frontend-e2e` → 1/1 pass (Playwright Chromium tombstone,
+  ~570 ms; first run auto-fetched Chromium 147.0.7727.15 + ffmpeg-
+  1011 + chrome-headless-shell 1217 into `~/.cache/ms-playwright/`,
+  ~370 MiB total — subsequent runs reuse the cache).
+- Manual `bun run dev --host 127.0.0.1 --port 5173` smoke: GET / →
+  200 with the placeholder page + Tailwind-rendered slate
+  palette inlined as `<style data-sveltekit>`.
+- `cargo test --workspace` → **153 pass** (unchanged from 8.4b — no
+  Rust touchpoints).
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean.
+- `cargo fmt --all -- --check` → clean.
+- `uv run pytest` → 95 pass + 1 skip (Kimina-gated, by design).
+- `uv run ruff check .` → clean.
+- `just env-verify` → exit 0.
+
+9.2's gate is the six TS schema mirrors + the BFF contract + the
+`frontend-bff-smoke` recipe end-to-end against a live cluster.
 
 ## Session 2026-05-01 — Task 9 plan restructure (planning-only)
 

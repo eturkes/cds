@@ -1,0 +1,6 @@
+[install]
+# Local-first provisioning. CI overrides via `BUN_CONFIG_FROZEN_LOCKFILE=true`.
+registry = "https://registry.npmjs.org"
+
+[telemetry]
+disabled = true
