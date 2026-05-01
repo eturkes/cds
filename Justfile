@@ -357,12 +357,24 @@ CDS_KIMINA_URL := env_var_or_default('CDS_KIMINA_URL', '')
 rs-lean:
     CDS_KIMINA_URL={{CDS_KIMINA_URL}} cargo test --package cds-kernel --test lean_smoke -- --nocapture
 
-# Run the kernel service smoke gate (Task 8.3a): standalone HTTP +
-# gated Dapr sidecar driving /healthz through service invocation.
-# The sidecar half skips with a loud notice if .bin/dapr / slim
-# runtime are missing; run `just fetch-dapr` to populate.
+# Run the kernel service smoke gate (Task 8.3a + 8.3b2a): standalone
+# HTTP + gated Dapr sidecar driving /healthz and /v1/deduce through
+# service invocation. The sidecar halves skip with a loud notice if
+# .bin/dapr / slim runtime are missing; run `just fetch-dapr` to populate.
 rs-service-smoke:
     cargo test --package cds-kernel --test service_smoke -- --nocapture --test-threads=1
+
+# Run the kernel pipeline smoke gate (Task 8.3b2b): gated Dapr sidecar
+# driving /v1/solve and /v1/recheck through service invocation. The
+# /v1/solve test skips loudly without `.bin/z3` + `.bin/cvc5` (run
+# `just fetch-bins`); the /v1/recheck test additionally skips without
+# `CDS_KIMINA_URL` set (start Kimina via `python -m server` from the
+# project-numina/kimina-lean-server checkout, then re-run with the URL
+# exported). Closes the 8.3b daprd round-trip — six Phase 0 endpoints
+# (kernel /healthz + /v1/{deduce,solve,recheck}; harness /healthz +
+# /v1/{ingest,translate}) under their respective sidecars.
+rs-service-pipeline-smoke:
+    CDS_KIMINA_URL={{CDS_KIMINA_URL}} cargo test --package cds-kernel --test service_pipeline_smoke -- --nocapture --test-threads=1
 
 # Bind addresses for the Phase 0 kernel service (Task 8.3a). 8082 is
 # the default — the harness service holds 8081 (ADR-017 §1) so both
