@@ -6,10 +6,149 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 9.3 — Visualizers + Phase 0 close-out. **Phase 0 closed.** Closed the visualization-and-close-out axis of ADR-022 §4 in a single session (no mid-flight 9.3a/9.3b split required). Five new `frontend/src/lib/` modules: `stores/highlight.svelte.ts` (`$state` rune store exposing `getHighlightedSpan` / `getPulseToken` / `pulseHighlight` — the `.svelte.ts` extension is mandatory for runes outside `.svelte` files), `components/AstTree.svelte` (Svelte 5 self-import recursion via `import Self from './AstTree.svelte'` — `<svelte:self>` is deprecated in Svelte 5; per-node collapse via local `$state(false)`; `title` tooltip with `${doc_id} bytes ${start}-${end}`; MUC highlight via Tailwind `bg-rose-100 ring-rose-300` when `atom:${doc_id}:${start}-${end}` ∈ `trace.muc`; cross-component pulse via `:global(.cds-pulse)` keyframe re-triggered through `pulseEl.classList.remove(...) → offsetWidth → add(...)` so the second click re-pulses), `components/Octagon.svelte` (hand-rolled SVG `<rect>` over the projected `±x ±y ≤ c` bounds for the selected canonical-vital pair; `presentVitals(verdict)` filters to keys with finite `low<high`; current sample as `<circle fill-sky-600>` from the last-sample marker; module-script export of `CANONICAL_VITALS` + `projectBox` + `presentVitals` + `Box` + `CanonicalVital` keeps the helpers unit-testable), `components/MucViewer.svelte` (clickable `<button>` per entry; visual feedback via `class:bg-rose-100={highlighted === entry}` reading `getHighlightedSpan()`), `components/VerificationTrace.svelte` (sat/unsat pill banner with three `data-state` modes — `pending` / `sat` / `unsat`; Lean recheck pill `pending` / `ok` / `error`; `<details>/<summary>` collapsible Alethe proof preview capped at 50 lines via `proof.split('\n').slice(0, 50)`). The new `+page.svelte` replaces the 9.1 placeholder: telemetry+guideline+recorded-root form (defaults reproduce the canonical `contradictory-bound` fixture inline so a fresh load is one button-click from a full pipeline run) → "Run pipeline" button driving `/api/ingest → /api/translate → /api/deduce → /api/solve → /api/recheck` in sequence under a single `$state<State>` rune holding `{payload, ir, matrix, verdict, trace, recheck, stages, runId}` → per-stage badge row + inline error surfacing → verification trace banner → AST tree (left) | Octagon (right) → MUC viewer (bottom). Strictly-typed: errors lift to a stage-local `{status: 'error', message}` carrying the BFF's lifted `detail` envelope. Playwright E2E `frontend/e2e/pipeline.e2e.ts` self-skips when `CDS_E2E_BASE_URL` is unset (so `just frontend-e2e` exits clean without cluster prerequisites) and otherwise asserts every stage badge `data-status=ok` + `sat-pill` `data-state=unsat` + `recheck-pill` `data-state=ok` + `data-testid=muc-entry` count == 2 + `[data-testid=ast-node][data-muc=true]` count == 2 + `octagon-svg` visible + first-MUC click pulses the corresponding AST node. Tombstone `e2e/tombstone.e2e.ts` deleted. New Justfile recipe `frontend-pipeline-smoke` (operator-runnable, gated on `.bin/dapr` + slim runtime + `.bin/{z3,cvc5}` + `CDS_KIMINA_URL` + `bun`) mirrors `frontend-bff-smoke` cluster bring-up + adapter-node BFF + `bunx playwright install chromium` then runs `bunx playwright test e2e/pipeline.e2e.ts` against the live cluster with `CDS_E2E_BASE_URL=http://127.0.0.1:${bff_port}` exported. **PHASE flip:** `cds_kernel::PHASE` 0 → 1 (lib.rs constant + `phase_zero_is_active` test renamed to `phase_one_is_active`); `cds_harness.__init__.PHASE` 0 → 1 (module constant + docstring refresh + `test_phase_zero_is_active` renamed to `test_phase_one_is_active`). README "Running Phase 0 end-to-end" section added pointing at `frontend-bff-smoke` (9.2) + `frontend-pipeline-smoke` (9.3) + interactive `frontend-dev` workflow; Phase 0 roadmap table flipped to all-DONE with the explicit "Phase 0 closed at 9.3" close-out paragraph. Final 9.3 gate: `just frontend-typecheck` 348 files / 0 errors / 0 warnings; `just frontend-lint` clean; `just frontend-test` 5/5 pass (parity tripwire unchanged); `just frontend-build` clean (server entries unchanged + `_page.svelte.js` 24.84 kB / gzip 6.08 kB — full visualizer composition); `just frontend-e2e` 1 skipped (self-skip when `CDS_E2E_BASE_URL` unset, as designed); `cargo test --workspace` **153 pass** (unchanged from 9.2 — only the PHASE constant + its in-crate test name changed); `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all -- --check` clean; `uv run pytest` 95 pass + 1 skip (Kimina-gated); `uv run ruff check .` clean; `just env-verify` exit 0; `just frontend-pipeline-smoke` pre-flight surfaces a clear actionable error when `CDS_KIMINA_URL` is unset (matches `dapr-pipeline` + `frontend-bff-smoke` shape). Manual `bun run preview` smoke confirms `/` returns 200 with all key tokens (`Pipeline visualizer`, `run-button`, `sat-pill`, `stage-badge-ingest`).
-- **Next up:** **Phase 1.** Phase 0 is closed. Plan §1 enumerates the deferred Phase 1 scope: live FHIR streaming, distributed cloud microservices, and ZKSMT post-quantum proof attestation. A Phase 1 plan restructure session is the next checklist item — there is no incremental task in §8 to pick up.
+- **Last completed:** Phase 1 plan restructure (ADR-024). Opened Phase 1 with a three-axis split (FHIR / cloud / ZKSMT) drawn from Plan §1's deferred scope. **No code changes** — Plan + ADR + Scratchpad + README only; cargo + pytest + frontend baselines stay green by construction (Markdown-only edits, env-verify passes). Plan §1 extended ("Phase 0 closed at Task 9.3 / Phase 1 open at Task 10.1"); Plan §5 C1 refined to phase-conditional ("genuine clinical data only — Phase 0: local CSV/JSON; Phase 1: FHIR R5 server connectivity (Task 10) plus existing CSV/JSON path retained"); Plan §6 acquired a "Phase 1 stack additions (deferred per-axis ADR)" mini-table; Plan §8 split into `### 8.1 Phase 0 (Closed)` (existing all-DONE table preserved verbatim) + `### 8.2 Phase 1 (Open)` (12 PLANNED rows for Tasks 10.1 / 10.2 / 10.3 / 10.4 / 11.1 / 11.2 / 11.3 / 11.4 / 12.1 / 12.2 / 12.3 / 12.4); Plan §8 strict-ordering chain extended `… < 9.3 < 10.1 < … < 12.4`. ADR-024 records the structural decision + per-axis architectural-lock ADR deferral (ADR-025 FHIR / ADR-026 cloud / ADR-027 ZKSMT at each axis's first sub-task) + the deferred PHASE flip 1 → 2 to Task 12.4 close-out (mirrors ADR-023 §7's "flip at last task of phase" discipline). README §1 acquired a one-sentence Phase 0-closed / Phase 1-open framing; README §7 split into `### 7.1 Phase 0 (Closed)` (existing roadmap table preserved) + `### 7.2 Phase 1 (Open)` (new 12-row PLANNED table for Tasks 10.1–12.4).
+- **Next up:** **Task 10.1 — FHIR R5 server bootstrap + canonical `Observation` fixture set + Python / Rust client lib selection.** Lands ADR-025 locking the FHIR R5 server impl (HAPI / Firely / Microsoft / etc.), Python client (`fhir.resources` etc.), Rust client (`fhirbolt` etc.), and the `Observation`-resource → `ClinicalTelemetryPayload` mapping shape. Bound by Plan §10 step 4 web-search at decision time (`"State of the art FHIR R5 server 2026"` + `"State of the art Python FHIR client 2026"` + `"State of the art Rust FHIR client 2026"`).
 
-> **Task 8 was split** into 8.1–8.4 on 2026-04-30 (ADR-016) because a monolithic Dapr-orchestration task repeatedly exhausted a single context window. **Task 8.3 was further split** into 8.3a / 8.3b on 2026-04-30 (ADR-018) because the kernel service binds three subprocess pipelines (`deduce`, `solve`, `recheck`) behind one axum app and the foundation + endpoint plumbing each warrant their own session. **Task 8.3b was further split** into 8.3b1 / 8.3b2 on 2026-05-01 (ADR-019) because the original 8.3b scope (three handlers + their `IntoResponse` impls + comprehensive unit tests + `AppState` wiring + a Dapr-driven cargo integration test driving all three endpoints through daprd) again exceeded a single context window. **Task 8.3b2 was further split** into 8.3b2a / 8.3b2b on 2026-05-01 (ADR-020) because the original 8.3b2 scope (`AppState` introduction + env-driven option resolution + handler refactor onto `axum::extract::State` + shared smoke helpers + three daprd-driven cargo integration tests) again exceeded a single context window — and the external-dependency gate of solve/recheck (`.bin/z3`, `.bin/cvc5`, `CDS_KIMINA_URL`) cleanly separates from the dependency-free `/v1/deduce` smoke + the foundation refactor. **Task 8.4 was further split** into 8.4a / 8.4b on 2026-05-01 (ADR-021) because the original 8.4 scope (placement+scheduler bring-up + production SIGTERM-first warden escalation + readiness gate flip + Python `cds_harness.workflow` package + Dapr Python SDK introduction + aggregated envelope + per-stage tracing + `just dapr-pipeline` + end-to-end pytest smoke) again exceeded a single context window — and the Rust-foundation vs. Python-composition boundary cleanly separates the cluster bring-up + warden refactor from the Workflow harness composition. **Task 9 was further split** into 9.1 / 9.2 / 9.3 on 2026-05-01 (ADR-022) because the original Task 9 scope (first-time JS/TS toolchain introduction + six TS schema mirrors + SvelteKit `+server.ts` BFF + canonical happy-path smoke + four Svelte 5 visualizer components + Playwright + the Phase 0 → Phase 1 marker flip) was structurally larger than every prior Phase 0 task and the natural three-axis boundary (toolchain-foundation / wire-contract+transport / visualizers+close-out) cleanly separates the green-field scaffold from the BFF contract from the UI close-out. Sub-task progression is strict: `8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9.1 < 9.2 < 9.3`.
+> **Phase 0 → Phase 1 transition.** Phase 0 closed at Task 9.3 (visualizers + PHASE 0 → 1 flip). Phase 1 opens at Task 10.1 with three axis-aligned super-tasks 10 / 11 / 12 (FHIR / cloud / ZKSMT). The strict §8 ordering rule selects `10.1 < 10.2 < 10.3 < 10.4 < 11.1 < 11.2 < 11.3 < 11.4 < 12.1 < 12.2 < 12.3 < 12.4`. The PHASE constants stay at 1 across Phase 1 and flip 1 → 2 at Task 12.4 close-out. ADR-024 records the axis split + the per-axis ADR deferral (ADR-025 / 026 / 027 land at first sub-task of each axis, not here).
+
+## Session 2026-05-02 — Phase 1 plan restructure (ADR-024)
+
+Opened Phase 1 with a three-axis split (FHIR / cloud / ZKSMT) drawn
+from Plan §1's deferred scope. **No code changes.** Plan + ADR +
+Scratchpad + README only; cargo + pytest + frontend baselines stay
+green by construction (Markdown-only edits, `just env-verify` passes
+green at session start).
+
+**ADR-024 — Phase 1 plan opening** records:
+
+- **Three super-tasks 10 / 11 / 12**, each with sub-tasks 10.1–10.4 /
+  11.1–11.4 / 12.1–12.4 covering foundation → integration → close-
+  out. Mid-flight sub-task splits anticipated and follow Phase 0
+  precedent (ADR-016 / 018 / 019 / 020 / 021 / 022 — each split
+  lands its own ADR).
+- **Per-axis architectural-lock ADRs deferred to first sub-task** —
+  ADR-025 (FHIR R5 server impl + client libs at Task 10.1), ADR-026
+  (Kubernetes / Dapr helm / observability stack at Task 11.1),
+  ADR-027 (ZK toolchain at Task 12.1). Plan §6 stack additions are
+  listed as "deferred per-axis ADR" until each settles. Pre-locking
+  now would violate Plan §10 step 4's mandatory `"State of the art
+  [tool type] 2026"` web-search at decision time.
+- **Plan §5 C1 phase-conditional refinement** — "Live ingestion uses
+  genuine clinical data only — Phase 0: local CSV/JSON in `data/`;
+  Phase 1: FHIR R5 server connectivity (Task 10) plus the existing
+  local CSV/JSON path retained for regression". C2–C6 unchanged. The
+  substantive constraint (no synthetic / no fabricated data) is
+  unchanged; only the source-shape acquires a phase-aware second
+  clause.
+- **PHASE constants stay at 1** across all Phase 1 sub-tasks; flip
+  1 → 2 lands at Task 12.4 close-out (`cds_kernel::PHASE` constant +
+  `cds_harness.__init__.PHASE` constant + the matching
+  `phase_one_is_active` test rename to `phase_two_is_active`).
+  Mirrors ADR-023 §7's "flip at last task of phase" discipline.
+- **Three-axis super-task numbering** — 10 = FHIR streaming; 11 =
+  distributed cloud; 12 = ZKSMT. Strict §8 ordering selects depth-
+  first within an axis then across (10.x → 11.x → 12.x). Deliberate
+  axis swap requires a single-line edit to the §8 ordering note;
+  Phase 0 had no such swaps but the flexibility is recorded for
+  future use.
+- **No code changes in this restructure session.** Plan + ADR +
+  Scratchpad + README only.
+
+**Plan.md edits:**
+
+| Section  | Change                                                                                                                                                                                                                                                                                                                                                            |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| §1       | Extended with "Phase 0 closed at Task 9.3 / Phase 1 open at Task 10.1" framing + ADR-024 cross-reference.                                                                                                                                                                                                                                                       |
+| §5 (C1)  | Refined to phase-conditional clause — "genuine clinical data only — Phase 0: local CSV/JSON; Phase 1: FHIR R5 server connectivity (Task 10) plus existing CSV/JSON path retained for regression (ADR-024 §3)". C2–C6 unchanged.                                                                                                                                  |
+| §6       | "Phase 1 stack additions (deferred per-axis ADR)" mini-table appended below the Phase 0 lock — FHIR R5 (HAPI / Firely / Microsoft + Python `fhir.resources` + Rust `fhirbolt`) at ADR-025 / Task 10.1; Kubernetes / `kind` / Dapr helm / OTel / Prometheus / Grafana at ADR-026 / Task 11.1; ZK toolchain at ADR-027 / Task 12.1. Phase 0 stack rows unchanged.   |
+| §8       | Split into `### 8.1 Phase 0 (Closed)` (existing note + table preserved verbatim) and `### 8.2 Phase 1 (Open)` (new note + 12-row task table). Trailing strict-ordering line extended: `… < 9.3 < 10.1 < 10.2 < 10.3 < 10.4 < 11.1 < 11.2 < 11.3 < 11.4 < 12.1 < 12.2 < 12.3 < 12.4`.                                                                                |
+
+**README.md edits:**
+
+| Section | Change                                                                                                                                                                                                                                                                                                                                                                       |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| §1      | One-sentence Phase 0-closed / Phase 1-open framing append + ADR-024 cross-reference.                                                                                                                                                                                                                                                                                          |
+| §7      | Renamed "Phase 0 MVP Roadmap" → "Roadmap"; subsections `### 7.1 Phase 0 (Closed)` (existing all-DONE table + close-out paragraph preserved) and `### 7.2 Phase 1 (Open)` (new framing paragraph noting the per-axis ADR deferral + 12-row PLANNED-status table for Tasks 10.1–12.4).                                                                                            |
+
+(README §9 Contributing left unchanged — the "Phase 0 closed; once
+Phase 1+ opens, CONTRIBUTING.md will be added" framing is now
+slightly stale but a CONTRIBUTING.md is not part of this restructure
+session's scope; will land if/when an external contribution policy is
+authored, which is independent of the Phase 1 axis work.)
+
+**ADL append:** ADR-024 only. ADR-025 / 026 / 027 land at first
+sub-task of each axis (10.1 / 11.1 / 12.1).
+
+**Why three super-tasks, not five.** ADR-024 alternatives §2 closed
+this. FHIRcast is a sub-task within the FHIR axis (10.3) — it's a
+collaborative-session event protocol layered on the FHIR R5 base, not
+a separate architectural commitment. Observability is a sub-task
+within the cloud axis (11.3) — it's a Kubernetes-native concern
+co-deployed with the services. Splitting either out into its own
+super-task would force cross-axis re-numbering for no architectural
+benefit. Phase 0's Task 8 (Dapr orchestration) was a valid single-
+axis super-task because Dapr is one architectural component; Phase 1's
+three axes are three separate architectural commitments — so three
+super-tasks, not one and not five.
+
+**Why per-axis ADRs deferred to first sub-task.** ADR-024 alternatives
+§3 closed this. Plan §10 step 4 (mandatory `"State of the art [tool
+type] 2026"` web-search at decision time) binds tool selection to the
+moment of decision. ADR-024 opens Phase 1 structurally; the FHIR R5
+server impl, the Kubernetes / `kind` / Dapr helm versions, and the
+ZK toolchain are all search-pending. Pre-locking Risc0 vs SP1 vs
+Halo2 vs PLONK now would be unfounded guessing without the search.
+Mirrors the Phase 0 precedent (ADR-016 locked Dapr 1.17 at Task 8.1
+opening, not at Task 1).
+
+**Why C1 refinement, not new C7.** ADR-024 alternatives §4–5 closed
+this. C1 is the substantive constraint ("genuine clinical data
+only"); FHIR R5 expands the source shape, not the substantive
+constraint. A new C7 ("FHIR sources read-only") would duplicate
+information and dilute the substantive C1 invariant. Refining C1
+keeps the constraint count at 6 and the substantive content
+unchanged.
+
+**Why PHASE flip deferred to 12.4, not 11.4.** ADR-024 alternatives
+§6 closed this. Mirrors ADR-023 §7's "flip at last task of phase"
+discipline. Flipping at 11.4 (cloud close-out) would mark Phase 1
+closed before the ZKSMT axis lands; deferring to a Phase 2 plan-
+restructure session would leave the constants stale across the
+migration window.
+
+**Why this restructure session edits Plan + README + ADL + Scratchpad,
+not Memory_Scratchpad alone.** ADR-024 alternatives §8 closed this.
+The restructure changes the canonical task selector for every
+subsequent Re-Entry session; the Plan must reflect that. Memory_
+Scratchpad alone is not authoritative for §8 selection.
+
+**Final regression gate (Markdown-only — no code touched):**
+
+| Gate                                                    | Result                                                                                                         |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `just env-verify`                                        | exit 0 (verified at session start: `uv 0.11.8` + `cargo 1.95` + `rustc 1.95` + `bun 1.3.13` + `just 1.50` + `git 2.47` + `curl 8.14`; `.bin/` populated) |
+| `cargo test --workspace`                                | unchanged from 9.3 close-out (153 pass — no Rust touchpoints)                                                  |
+| `cargo clippy --workspace --all-targets -- -D warnings` | unchanged (no Rust touchpoints)                                                                                |
+| `cargo fmt --all -- --check`                            | unchanged                                                                                                      |
+| `uv run pytest`                                         | unchanged (95 pass + 1 skip — no Python touchpoints)                                                            |
+| `uv run ruff check .`                                   | unchanged                                                                                                      |
+| `just frontend-typecheck`                               | unchanged (348 files / 0 errors / 0 warnings — no frontend touchpoints)                                         |
+| `just frontend-lint`                                    | unchanged                                                                                                      |
+| `just frontend-test`                                    | unchanged (5/5 pass)                                                                                            |
+| `just frontend-build`                                   | unchanged                                                                                                      |
+| `just frontend-e2e`                                     | unchanged (1 skipped, by design)                                                                                |
+
+**Files added / modified:**
+
+```
+M  .agent/Plan.md                              # §1 / §5 / §6 / §8 updates per ADR-024 §1–5
+M  .agent/Architecture_Decision_Log.md         # +ADR-024 (Phase 1 plan opening, axis split)
+M  .agent/Memory_Scratchpad.md                 # this block + active-task pointer
+M  README.md                                   # §1 single-sentence Phase 1 framing + §7 rename + Phase 1 sub-table
+```
+
+No code touched. Phase 1 opens here; the next Re-Entry Prompt session
+executes Task 10.1 (FHIR R5 server bootstrap + ADR-025).
 
 ## Session 2026-05-01 — Task 9.3 close-out (Visualizers + Phase 0 close-out)
 

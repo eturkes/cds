@@ -2784,3 +2784,180 @@ close-out, distinct from the §10 contingency that did not trigger.
   triggered; the single-session execution closed the contract.
 
 ---
+
+## ADR-024 — Phase 1 plan opening (FHIR + cloud + ZKSMT axis split)
+
+**Status:** Accepted (Phase 1 opening)
+**Date:** 2026-05-02
+
+**Context.** Phase 0 closed at Task 9.3 (ADR-023). Plan §1 enumerated
+three deferred Phase 1 axes — live FHIR streaming, distributed cloud
+microservices, and ZKSMT post-quantum proof attestation — without yet
+committing to an atomic-task decomposition. The Phase 0 atomic-task
+discipline (Plan §8: lowest-numbered uncompleted task per session, no
+leapfrogging, mid-flight splits as needed) carries forward; Phase 1
+needs an opening structure that respects that discipline while
+accommodating three architecturally-independent axes that were
+deliberately pushed out of Phase 0's vertical slice. ADR-001 (polyglot
+stack), ADR-002 (JSON-over-TCP/IP + MCP), ADR-003 (Dapr orchestration),
+ADR-004 (subprocess warden), and ADR-006 (SMT / proof chain) all
+extend cleanly to Phase 1; the Phase 0 hard constraints C1–C6 hold
+across phases with one phase-conditional refinement (C1, see Decision
+§3 below). PHASE constants flipped 0 → 1 at Task 9.3 close-out
+(ADR-023 §7); the next flip 1 → 2 lands at Phase 1 close-out (Task
+12.4). This ADR opens Phase 1 structurally; per-axis tool selections
+land at each axis's first sub-task ADR.
+
+**Decision.**
+
+1. **Three-axis Phase 1 split with axis-aligned super-tasks.** Phase 1
+   has three super-tasks numbered 10 / 11 / 12, each carrying its own
+   atomic-task family. Strict Plan §8 ordering (lowest-numbered
+   uncompleted task first) holds across and within axes; mid-flight
+   sub-task splits are anticipated and follow the Phase 0 precedent
+   (ADR-016 / 018 / 019 / 020 / 021 / 022 — each split landed its own
+   ADR).
+
+   - **Task 10 — FHIR R5 streaming ingestion.** Extends the Phase 0
+     local CSV/JSON ingestion path (ADR-011) with HL7 FHIR R5 server
+     connectivity. Sub-tasks: **10.1** FHIR R5 server bootstrap +
+     canonical `Observation` fixture set + Python / Rust client lib
+     selection (locked at ADR-025); **10.2** FHIR Subscriptions
+     topic-based streaming → harness ingest path; **10.3** FHIRcast
+     collaborative-session events (patient-open / patient-close)
+     routed through Dapr pub/sub; **10.4** end-to-end FHIR-streaming
+     → canonical `contradictory-bound` smoke + axis close-out.
+
+   - **Task 11 — Distributed cloud microservices.** Migrates the
+     Phase 0 self-hosted Dapr cluster (ADR-016) to Kubernetes per
+     ADR-003's stated Phase 1 plan. Sub-tasks: **11.1** Kubernetes
+     manifests + `kind` local cluster bootstrap + Dapr helm chart
+     pin (locked at ADR-026); **11.2** Phase 0 services
+     (cds-harness + cds-kernel + frontend BFF) deployed onto
+     Kubernetes; **11.3** OpenTelemetry collector + Prometheus +
+     Grafana + Dapr metrics scrape; **11.4** cloud-deployed
+     `contradictory-bound` smoke + axis close-out.
+
+   - **Task 12 — ZKSMT post-quantum proof attestation.** Adds
+     zero-knowledge proof attestations over the SMT verification
+     traces emitted by Task 6's solver chain. Sub-tasks: **12.1**
+     ZK toolchain selection (web-search Risc0 / SP1 / Halo2 / PLONK
+     2026 SOTA per Plan §10 step 4) + `zk_kernel/` crate stub +
+     ADR-027; **12.2** SMT-trace fixed-size witness serialization +
+     extraction; **12.3** prove + verify round-trip on the canonical
+     `contradictory-bound` fixture; **12.4** ZK attestation as
+     optional `Formal_Verification_Trace.zk_attestation` field +
+     Phase 1 close-out (PHASE 1 → 2 + full integration smoke +
+     README Phase 1 roadmap → DONE).
+
+2. **Per-axis architectural-lock ADRs deferred to first sub-task.**
+   Following the Phase 0 precedent (ADR-016 for Dapr 1.17, ADR-022
+   for SvelteKit), each axis lands its own architectural-lock ADR
+   at its first sub-task: **ADR-025** (FHIR R5 server impl + client
+   libs at Task 10.1), **ADR-026** (Kubernetes / Dapr helm /
+   observability stack at Task 11.1), **ADR-027** (ZK toolchain at
+   Task 12.1). The Plan §6 stack additions are listed as "deferred
+   to per-axis ADRs" until each settles. Pre-locking now would
+   violate Plan §10 step 4 (mandatory `"State of the art [tool
+   type] 2026"` web-search at the moment of decision, not at the
+   structural opening).
+
+3. **C1 phase-conditional refinement.** Plan §5 C1 is refined to
+   "Live ingestion uses **genuine clinical data only** — Phase 0:
+   local CSV/JSON in `data/`; Phase 1: FHIR R5 server connectivity
+   (Task 10) plus the existing local CSV/JSON path retained for
+   regression". The substantive constraint (no synthetic / no
+   fabricated data) is unchanged; the source-shape acquires a
+   phase-aware second clause. C2 / C3 / C4 / C5 / C6 unchanged.
+   Phase 1's distributed-cloud and ZKSMT axes do not invalidate any
+   C-constraint.
+
+4. **PHASE constants stay at 1 across all Phase 1 sub-tasks.** They
+   flipped 0 → 1 at Task 9.3 close-out (ADR-023 §7) and flip 1 → 2
+   at Task 12.4 close-out, in the same `cds_kernel::PHASE` constant
+   + `cds_harness.__init__.PHASE` constant + the matching
+   `phase_one_is_active` test rename to `phase_two_is_active`. No
+   incremental flips inside Phase 1.
+
+5. **README split.** The Phase 0 MVP Roadmap heading at README §7
+   becomes a generic "Roadmap" section with two subsections:
+   **Phase 0 (Closed)** carrying the existing all-DONE Phase 0 task
+   table, and **Phase 1 (Open)** carrying a new PLANNED-status
+   table for Tasks 10 / 11 / 12 + sub-tasks. README §1 epistemic
+   framing acquires a single sentence noting the phase transition.
+   README §4 stack table acquires a "Phase 1 additions (deferred
+   per-axis)" stub row.
+
+6. **No code changes in this restructure session.** Plan + ADR +
+   Scratchpad + README only. The cargo + pytest + frontend
+   regression baselines stay green by construction (Markdown-only).
+
+**Consequences.**
+
+- Phase 1 has a discoverable atomic-task structure usable by the
+  next Re-Entry Prompt session — Task 10.1 (FHIR foundation) is the
+  next-uncompleted task selected by Plan §8's strict-ordering rule.
+- Each axis admits independent progression in principle; the strict-
+  ordering rule prefers depth-first (10.x → 11.x → 12.x) but a
+  deliberate axis swap requires only a single-line edit to the §8
+  ordering note. Phase 0 had no such swaps; mention recorded for
+  future flexibility.
+- Mid-flight sub-task splits will likely surface in Tasks 10.1,
+  11.1, and 12.1 (the foundation sub-tasks of each axis carry the
+  largest unknowns); each split lands its own ADR following Phase 0
+  precedent.
+- ADR-027 (Task 12.1) carries the largest research-stage uncertainty
+  — the ZK toolchain selection binds the rest of the ZKSMT axis.
+  Plan §10 step 4 web-search at decision time mitigates the risk.
+- Scope discipline: this ADR opens Phase 1 only. Phase 2 (whenever
+  scoped) gets its own opening ADR. The ADL stays append-only;
+  ADR-024 is not amended by Phase 1 sub-task ADRs.
+
+**Alternatives rejected.**
+
+- **Single Phase 1 super-task with linear sub-tasks 10.1–10.N.**
+  Conflates three architecturally-independent axes; defeats the
+  parallel-team-readiness benefit of axis-aligned super-tasks.
+  Phase 0's Task 8 (Dapr orchestration) was a valid single-axis
+  super-task because Dapr is one architectural component; Phase 1's
+  three axes are three separate architectural commitments.
+- **Five axes (split FHIR into ingestion + FHIRcast; split cloud
+  into K8s + observability + ingress).** Over-decomposition; each
+  axis still fits a 4-sub-task family. FHIRcast is a sub-task
+  within the FHIR axis (10.3); observability is a sub-task within
+  the cloud axis (11.3). Pulling either out as its own super-task
+  would force cross-axis re-numbering for no architectural benefit.
+- **Per-axis architectural lock pre-decided in this ADR.**
+  Premature; the Plan §10 step 4 web-search discipline mandates a
+  fresh `"State of the art [tool type] 2026"` search at the moment
+  of decision (the relevant sub-task), not at the opening ADR.
+  Pre-locking Risc0 vs SP1 vs Halo2 vs PLONK now would be
+  unfounded guessing without the search.
+- **Skip the C1 refinement; treat FHIR as a Phase 1 stack addition
+  only.** Leaves Plan §5 C1 stale ("local CSV/JSON only") across
+  the migration window. Refining C1 is the smallest atomic edit
+  that keeps the constraint semantically truthful in Phase 1.
+- **New C7 ("FHIR sources read-only") instead of C1 refinement.**
+  C1 is the substantive constraint ("genuine clinical data only");
+  FHIR R5 expands the source shape, not the substantive constraint.
+  A new C7 would duplicate information and dilute the substantive
+  C1 invariant. Refining C1 keeps the constraint count at 6 and
+  the substantive content unchanged.
+- **PHASE flip 1 → 2 at Task 11.4 (cloud close-out) instead of
+  12.4 (ZKSMT close-out).** Would mark Phase 1 as closed before
+  the ZKSMT axis lands, leaving the marker stale across that
+  window. Phase 0 anchored the flip to the *last* task (9.3
+  visualizer close-out, not e.g. 9.2 BFF close-out); Phase 1
+  mirrors that discipline at 12.4.
+- **PHASE flip 1 → 2 deferred to a Phase 2 plan-restructure
+  session.** Symmetric to ADR-023 §7's rejected alternative;
+  deferred phase markers leave the constants stale across the
+  migration window. Flipping at 12.4 close-out keeps the marker
+  semantically truthful.
+- **Phase 1 plan restructure recorded in Memory_Scratchpad only,
+  no Plan §8 / README / ADR edits.** The restructure changes the
+  canonical task selector for every subsequent Re-Entry session;
+  the Plan must reflect that. The Memory_Scratchpad alone is not
+  authoritative for §8 selection.
+
+---

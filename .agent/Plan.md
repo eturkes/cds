@@ -6,7 +6,7 @@
 
 ## 1. Vision (compressed)
 
-Backend pipeline. Input: unstructured clinical guidelines + continuous physiological telemetry. Output: mathematically-rigorous, machine-checkable safe care pathways. Phase 0 = headless engine + stakeholder visualizer (vertical slice). Phase 1+ deferred: FHIR streaming, distributed cloud, ZKSMT.
+Backend pipeline. Input: unstructured clinical guidelines + continuous physiological telemetry. Output: mathematically-rigorous, machine-checkable safe care pathways. **Phase 0 closed at Task 9.3** — headless engine + stakeholder visualizer round-tripping the canonical `contradictory-bound` fixture against a live Dapr cluster. **Phase 1 open at Task 10.1** — FHIR R5 streaming ingestion + distributed-cloud (Kubernetes) microservice deployment + ZKSMT post-quantum proof attestation, decomposed across three axis-aligned super-tasks 10 / 11 / 12 per ADR-024.
 
 ## 2. Epistemic constraints (binding)
 
@@ -37,7 +37,7 @@ Backend pipeline. Input: unstructured clinical guidelines + continuous physiolog
 
 ## 5. Hard constraints (NON-NEGOTIABLE)
 
-C1. Live ingestion uses genuine local datasets only (CSV/JSON in repo).
+C1. Live ingestion uses **genuine clinical data only** — Phase 0: local CSV/JSON in `data/`; Phase 1: FHIR R5 server connectivity (Task 10) plus the existing local CSV/JSON path retained for regression (ADR-024 §3).
 C2. All unstructured text → OnionL JSON before any solver / deductive engine touches it.
 C3. SMT solver evaluates the entire constraint matrix before yielding the validity flag.
 C4. Every contradiction triggers topological mapping back to its offending textual node (MUC → `source_span`).
@@ -57,6 +57,16 @@ C6. All inter-process comms = JSON-over-TCP/IP and/or MCP.
 | Lint                  | `ruff`, `clippy + rustfmt`, `eslint + prettier`                     |
 | Task runner           | `just` (`Justfile` at root)                                         |
 
+**Phase 1 stack additions** (deferred to per-axis ADRs at first
+sub-task; selection bound by Plan §10 step 4 web-search at decision
+time, not pre-locked here):
+
+| Phase 1 axis                                | Open candidates (search-pending)                                                        | Locked at        |
+| ------------------------------------------- | --------------------------------------------------------------------------------------- | ---------------- |
+| FHIR R5 streaming (Task 10)                 | FHIR R5 server impl (HAPI / Firely / Microsoft / etc.); Python client (`fhir.resources` etc.); Rust client (`fhirbolt` etc.); FHIR Subscriptions topic delivery; FHIRcast pub/sub | Task 10.1 ADR-025 |
+| Distributed cloud microservices (Task 11)   | Kubernetes (`kind` local); Dapr helm chart pin; OpenTelemetry collector; Prometheus / Grafana                                                                          | Task 11.1 ADR-026 |
+| ZKSMT post-quantum attestation (Task 12)    | ZK toolchain (Risc0 / SP1 / Halo2 / PLONK 2026 SOTA)                                                                                                                    | Task 12.1 ADR-027 |
+
 ## 7. Subprocess defense-in-depth
 
 - Rust subprocess warden owns every external solver/Lean child.
@@ -65,6 +75,8 @@ C6. All inter-process comms = JSON-over-TCP/IP and/or MCP.
 - Verification work isolated in async process pools. Worker comms = message-passing only. No UNIX-signal handlers in worker threads.
 
 ## 8. Atomic-task checklist
+
+### 8.1 Phase 0 (Closed)
 
 > **Note.** Task 8 (originally a single line) was split into four atomic
 > sub-sessions on 2026-04-30 because a monolithic Dapr-orchestration
@@ -143,9 +155,44 @@ C6. All inter-process comms = JSON-over-TCP/IP and/or MCP.
 | 9.2    | TS schema mirrors + BFF + canonical smoke — six TS schemas + `+server.ts` routes + `frontend-bff-smoke` Justfile recipe + parity tripwire           | **DONE** | git commit `feat: complete Task 9.2 TS schema mirrors + BFF + canonical smoke`                                                       |
 | 9.3    | Visualizers + Phase 0 close-out — AST tree + Octagon + MUC viewer + verification trace + Playwright E2E + PHASE 0 → 1 flip                          | **DONE** | git commit `feat: complete Task 9.3 Visualizers + Phase 0 close-out` — **Phase 0 closed**                                                  |
 
+### 8.2 Phase 1 (Open)
+
+> **Note.** Phase 1 opens with three axes — FHIR streaming, distributed
+> cloud, and ZKSMT post-quantum attestation — drawn from Plan §1's
+> deferred scope. Each axis is structurally larger than any single
+> Phase 0 super-task; the same atomic-session discipline holds. Tasks
+> 10 / 11 / 12 are the three super-tasks, each with sub-tasks
+> 10.1–10.4 / 11.1–11.4 / 12.1–12.4 covering foundation → integration
+> → close-out. Mid-flight sub-task splits (e.g., 10.1a / 10.1b) follow
+> the Phase 0 precedent (ADR-016 / 018 / 019 / 020 / 021 / 022) — each
+> split lands its own ADR. Per-axis architectural locks land at each
+> axis's first sub-task: ADR-025 (FHIR R5 server impl + client libs),
+> ADR-026 (Kubernetes / Dapr helm / observability), ADR-027 (ZK
+> toolchain). The PHASE constants stay at 1 across all Phase 1 sub-
+> tasks and flip 1 → 2 at Task 12.4 close-out (mirrors ADR-023 §7's
+> "flip at last task of phase" discipline). ADR-024 captures the
+> structural decision; the four "Alternatives rejected" entries
+> (single-axis super-task, five-axis split, pre-locked tools, new C7)
+> document the discarded options.
+
+| #     | Task                                                                                                                                                            | Status       | Session output gate                                                                                       |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------- |
+| 10.1  | FHIR foundation — FHIR R5 server bootstrap + canonical `Observation` fixture set + Python / Rust client lib selection (ADR-025)                                  | **TODO**     | git commit `feat: complete Task 10.1 FHIR foundation`                                                     |
+| 10.2  | FHIR Subscriptions streaming — topic-based subscription delivery → harness ingest path                                                                          | **TODO**     | git commit `feat: complete Task 10.2 FHIR Subscriptions streaming`                                        |
+| 10.3  | FHIRcast collaborative-session events — patient-open / patient-close routed through Dapr pub/sub                                                                 | **TODO**     | git commit `feat: complete Task 10.3 FHIRcast pub/sub`                                                    |
+| 10.4  | FHIR streaming axis close-out — end-to-end FHIR → canonical `contradictory-bound` smoke                                                                          | **TODO**     | git commit `feat: complete Task 10.4 FHIR streaming close-out`                                            |
+| 11.1  | Cloud foundation — Kubernetes manifests + `kind` local cluster bootstrap + Dapr helm chart pin (ADR-026)                                                         | **TODO**     | git commit `feat: complete Task 11.1 Cloud foundation`                                                    |
+| 11.2  | Cloud service deployment — Phase 0 services (cds-harness + cds-kernel + frontend BFF) → Kubernetes                                                               | **TODO**     | git commit `feat: complete Task 11.2 Cloud service deployment`                                            |
+| 11.3  | Cloud observability — OpenTelemetry collector + Prometheus + Grafana + Dapr metrics scrape                                                                       | **TODO**     | git commit `feat: complete Task 11.3 Cloud observability`                                                 |
+| 11.4  | Cloud axis close-out — cloud-deployed `contradictory-bound` smoke against `kind`                                                                                  | **TODO**     | git commit `feat: complete Task 11.4 Cloud close-out`                                                     |
+| 12.1  | ZK toolchain selection — Risc0 / SP1 / Halo2 / PLONK 2026 SOTA web-search + `zk_kernel/` crate stub (ADR-027)                                                    | **TODO**     | git commit `feat: complete Task 12.1 ZK toolchain selection`                                              |
+| 12.2  | ZKSMT witness gen — fixed-size SMT-trace serialization + witness extraction                                                                                      | **TODO**     | git commit `feat: complete Task 12.2 ZKSMT witness gen`                                                   |
+| 12.3  | ZKSMT prove + verify — round-trip on canonical `contradictory-bound` fixture                                                                                      | **TODO**     | git commit `feat: complete Task 12.3 ZKSMT prove + verify`                                                |
+| 12.4  | ZKSMT pipeline integration + Phase 1 close-out — `Formal_Verification_Trace.zk_attestation` field + PHASE 1 → 2 + full integration smoke + README Phase 1 → DONE | **TODO**     | git commit `feat: complete Task 12.4 ZKSMT close-out + Phase 1 closed` — **Phase 1 closed**               |
+
 **At any session:** select STRICTLY the lowest-numbered uncompleted
 task. No leapfrogging. Sub-tasks follow the same discipline —
-`8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9.1 < 9.2 < 9.3`.
+`8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9.1 < 9.2 < 9.3 < 10.1 < 10.2 < 10.3 < 10.4 < 11.1 < 11.2 < 11.3 < 11.4 < 12.1 < 12.2 < 12.3 < 12.4`.
 
 ## 9. Context-Governed Re-Entry Prompt (verbatim)
 

@@ -2,7 +2,7 @@
 
 > A research-grade backend pipeline that ingests unstructured clinical guidelines and continuous physiological telemetry, **autoformalizes** them into mathematical constraints, and runs **deductive verification** to emit mathematically-rigorous, *safe* care pathways.
 
-This repository hosts the **Phase 0 Vertical-Slice MVP**. The MVP is a headless execution engine wired to a stakeholder-facing visualizer that renders the autoformalization, abstract-interpretation, and SMT-verification pipeline in real time. Massive enterprise FHIR streaming, distributed cloud microservices, and zero-knowledge post-quantum attestation (ZKSMT) are explicitly **out of scope** for Phase 0 and are deferred to Phase 1+.
+This repository hosted the **Phase 0 Vertical-Slice MVP** — a headless execution engine wired to a stakeholder-facing visualizer that renders the autoformalization, abstract-interpretation, and SMT-verification pipeline in real time. **Phase 0 closed at Task 9.3.** The repository is now in **Phase 1**, which extends the vertical slice with HL7 FHIR R5 streaming ingestion, distributed-cloud (Kubernetes) microservice deployment, and ZKSMT post-quantum proof attestation. See §7 for the live roadmap; `.agent/Architecture_Decision_Log.md` ADR-024 captures the Phase 1 axis split.
 
 ---
 
@@ -162,7 +162,9 @@ The page renders the OnionL IR tree (left), the Octagon abstract domain
 
 ---
 
-## 7. Phase 0 MVP Roadmap
+## 7. Roadmap
+
+### 7.1 Phase 0 (Closed)
 
 | Task | Title                                                            | Status |
 | ---- | ---------------------------------------------------------------- | ------ |
@@ -178,8 +180,30 @@ The page renders the OnionL IR tree (left), the Octagon abstract domain
 
 **Phase 0 closed at Task 9.3.** The stakeholder visualizer round-trips
 the canonical `contradictory-bound` flow against a live Dapr cluster,
-demonstrating the Plan §1 success criterion. Phase 1+ scope (FHIR
-streaming, distributed cloud, ZKSMT) opens with its own roadmap.
+demonstrating the Plan §1 success criterion.
+
+### 7.2 Phase 1 (Open)
+
+Phase 1 extends the Phase 0 vertical slice across three architecturally-
+independent axes per ADR-024. Per-axis tool selections are **not**
+pre-locked here; each axis lands its own architectural-lock ADR
+(ADR-025 / 026 / 027) at its first sub-task, bound by the
+`.agent/Plan.md` §10 step 4 web-search discipline at decision time.
+
+| Task | Title                                                                                                                                  | Status |
+| ---- | -------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| 10.1 | FHIR foundation — FHIR R5 server bootstrap + canonical `Observation` fixtures + Python / Rust client lib selection (ADR-025)            | **PLANNED** |
+| 10.2 | FHIR Subscriptions streaming → harness ingest                                                                                           | **PLANNED** |
+| 10.3 | FHIRcast collaborative-session events via Dapr pub/sub                                                                                  | **PLANNED** |
+| 10.4 | FHIR streaming axis close-out — end-to-end `contradictory-bound` smoke                                                                  | **PLANNED** |
+| 11.1 | Cloud foundation — Kubernetes manifests + `kind` cluster bootstrap + Dapr helm chart pin (ADR-026)                                       | **PLANNED** |
+| 11.2 | Phase 0 services → Kubernetes deployment                                                                                                | **PLANNED** |
+| 11.3 | Cloud observability — OpenTelemetry + Prometheus + Grafana + Dapr metrics scrape                                                         | **PLANNED** |
+| 11.4 | Cloud axis close-out — cloud-deployed `contradictory-bound` smoke against `kind`                                                         | **PLANNED** |
+| 12.1 | ZK toolchain selection — Risc0 / SP1 / Halo2 / PLONK 2026 SOTA web-search + `zk_kernel/` crate stub (ADR-027)                            | **PLANNED** |
+| 12.2 | ZKSMT witness gen — fixed-size SMT-trace serialization + witness extraction                                                              | **PLANNED** |
+| 12.3 | ZKSMT prove + verify — round-trip on canonical `contradictory-bound` fixture                                                              | **PLANNED** |
+| 12.4 | ZKSMT pipeline integration + Phase 1 close-out — `zk_attestation` field + PHASE 1 → 2                                                     | **PLANNED** |
 
 Each task is executed in its **own atomic session** under the *Context-Governed Re-Entry Protocol* documented in `.agent/Plan.md`.
 
