@@ -1,0 +1,463 @@
+{
+  "resourceType": "Bundle",
+  "id": "icu-monitor-01",
+  "type": "collection",
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:icu01-t0-hr",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "icu01-t0-hr",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "vital-signs",
+                "display": "Vital Signs"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "8867-4",
+              "display": "Heart rate"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pseudo-abc123"
+        },
+        "effectiveDateTime": "2026-04-29T12:55:00.000000Z",
+        "valueQuantity": {
+          "value": 72.5,
+          "unit": "/min",
+          "system": "http://unitsofmeasure.org",
+          "code": "/min"
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:icu01-t0-spo2",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "icu01-t0-spo2",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "vital-signs",
+                "display": "Vital Signs"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "2708-6",
+              "display": "Oxygen saturation in Arterial blood"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pseudo-abc123"
+        },
+        "effectiveDateTime": "2026-04-29T12:55:00.000000Z",
+        "valueQuantity": {
+          "value": 98.0,
+          "unit": "%",
+          "system": "http://unitsofmeasure.org",
+          "code": "%"
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:icu01-t0-sbp",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "icu01-t0-sbp",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "vital-signs",
+                "display": "Vital Signs"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "8480-6",
+              "display": "Systolic blood pressure"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pseudo-abc123"
+        },
+        "effectiveDateTime": "2026-04-29T12:55:00.000000Z",
+        "valueQuantity": {
+          "value": 128.0,
+          "unit": "mm[Hg]",
+          "system": "http://unitsofmeasure.org",
+          "code": "mm[Hg]"
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:icu01-t0-dbp",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "icu01-t0-dbp",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "vital-signs",
+                "display": "Vital Signs"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "8462-4",
+              "display": "Diastolic blood pressure"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pseudo-abc123"
+        },
+        "effectiveDateTime": "2026-04-29T12:55:00.000000Z",
+        "valueQuantity": {
+          "value": 82.0,
+          "unit": "mm[Hg]",
+          "system": "http://unitsofmeasure.org",
+          "code": "mm[Hg]"
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:icu01-t0-temp",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "icu01-t0-temp",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "vital-signs",
+                "display": "Vital Signs"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "8310-5",
+              "display": "Body temperature"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pseudo-abc123"
+        },
+        "effectiveDateTime": "2026-04-29T12:55:00.000000Z",
+        "valueQuantity": {
+          "value": 36.7,
+          "unit": "Cel",
+          "system": "http://unitsofmeasure.org",
+          "code": "Cel"
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:icu01-t0-rr",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "icu01-t0-rr",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "vital-signs",
+                "display": "Vital Signs"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "9279-1",
+              "display": "Respiratory rate"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pseudo-abc123"
+        },
+        "effectiveDateTime": "2026-04-29T12:55:00.000000Z",
+        "valueQuantity": {
+          "value": 16.0,
+          "unit": "/min",
+          "system": "http://unitsofmeasure.org",
+          "code": "/min"
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:icu01-t1-hr",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "icu01-t1-hr",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "vital-signs",
+                "display": "Vital Signs"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "8867-4",
+              "display": "Heart rate"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pseudo-abc123"
+        },
+        "effectiveDateTime": "2026-04-29T12:55:01.000000Z",
+        "valueQuantity": {
+          "value": 73.0,
+          "unit": "/min",
+          "system": "http://unitsofmeasure.org",
+          "code": "/min"
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:icu01-t1-spo2",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "icu01-t1-spo2",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "vital-signs",
+                "display": "Vital Signs"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "2708-6",
+              "display": "Oxygen saturation in Arterial blood"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pseudo-abc123"
+        },
+        "effectiveDateTime": "2026-04-29T12:55:01.000000Z",
+        "valueQuantity": {
+          "value": 98.0,
+          "unit": "%",
+          "system": "http://unitsofmeasure.org",
+          "code": "%"
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:icu01-t1-sbp",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "icu01-t1-sbp",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "vital-signs",
+                "display": "Vital Signs"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "8480-6",
+              "display": "Systolic blood pressure"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pseudo-abc123"
+        },
+        "effectiveDateTime": "2026-04-29T12:55:01.000000Z",
+        "valueQuantity": {
+          "value": 127.0,
+          "unit": "mm[Hg]",
+          "system": "http://unitsofmeasure.org",
+          "code": "mm[Hg]"
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:icu01-t1-dbp",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "icu01-t1-dbp",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "vital-signs",
+                "display": "Vital Signs"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "8462-4",
+              "display": "Diastolic blood pressure"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pseudo-abc123"
+        },
+        "effectiveDateTime": "2026-04-29T12:55:01.000000Z",
+        "valueQuantity": {
+          "value": 82.0,
+          "unit": "mm[Hg]",
+          "system": "http://unitsofmeasure.org",
+          "code": "mm[Hg]"
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:icu01-t1-temp",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "icu01-t1-temp",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "vital-signs",
+                "display": "Vital Signs"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "8310-5",
+              "display": "Body temperature"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pseudo-abc123"
+        },
+        "effectiveDateTime": "2026-04-29T12:55:01.000000Z",
+        "valueQuantity": {
+          "value": 36.7,
+          "unit": "Cel",
+          "system": "http://unitsofmeasure.org",
+          "code": "Cel"
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:icu01-t1-rr",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "icu01-t1-rr",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "vital-signs",
+                "display": "Vital Signs"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "9279-1",
+              "display": "Respiratory rate"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/pseudo-abc123"
+        },
+        "effectiveDateTime": "2026-04-29T12:55:01.000000Z",
+        "valueQuantity": {
+          "value": 16.0,
+          "unit": "/min",
+          "system": "http://unitsofmeasure.org",
+          "code": "/min"
+        }
+      }
+    }
+  ]
+}

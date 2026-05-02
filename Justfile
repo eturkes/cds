@@ -57,6 +57,11 @@ env-verify:
     else
         echo "  .bin/ empty (run: just fetch-bins)"
     fi
+    if [ -x "{{ justfile_directory() }}/.bin/.hfs/hfs" ]; then
+        echo "  .bin/.hfs/ present (Phase 1 FHIR R5 server staged)"
+    else
+        echo "  .bin/.hfs/ empty (run: just fetch-fhir — Phase 1 FHIR axis only)"
+    fi
     [ "$fail" = "0" ] || { echo "Required tooling missing — see above."; exit 1; }
     echo "✓ environment verified"
 
@@ -154,6 +159,207 @@ fetch-lean:
     ln -sf "$ELAN_HOME/bin/lean" "{{ justfile_directory() }}/.bin/lean"
     ln -sf "$ELAN_HOME/bin/lake" "{{ justfile_directory() }}/.bin/lake"
     "{{ justfile_directory() }}/.bin/lean" --version
+
+# =============================================================================
+# FHIR R5 — Helios FHIR Server (Phase 1, Task 10.1)
+# =============================================================================
+# Per ADR-025: Rust-native HeliosSoftware/hfs v0.1.47 staged under
+# .bin/.hfs/. Embedded SQLite under target/hfs-state/. Bound at
+# 127.0.0.1:8080; FHIR base = http://127.0.0.1:8080/fhir/R5/. The
+# 770MB tarball is heavy — `fetch-fhir` is NOT in `bootstrap` (mirrors
+# `fetch-lean`'s opt-in precedent). Operators run `just fetch-fhir`
+# explicitly when they need a live FHIR server.
+
+FHIR_VERSION          := env_var_or_default('FHIR_VERSION', '0.1.47')
+FHIR_OS               := env_var_or_default('FHIR_OS',      'unknown-linux-gnu')
+FHIR_ARCH             := env_var_or_default('FHIR_ARCH',    'x86_64')
+FHIR_PORT             := env_var_or_default('FHIR_PORT',    '8080')
+FHIR_INSTALL_DIR      := justfile_directory() + "/.bin/.hfs"
+FHIR_BIN              := FHIR_INSTALL_DIR + "/hfs"
+FHIR_STATE_DIR        := justfile_directory() + "/target/hfs-state"
+FHIR_PIDFILE          := justfile_directory() + "/target/hfs.pid"
+FHIR_LOGFILE          := justfile_directory() + "/target/hfs.log"
+# sha256 of hfs-0.1.47-x86_64-unknown-linux-gnu.tar.gz (pinned at decision time)
+FHIR_SHA256           := env_var_or_default('FHIR_SHA256',  'ce0558056ed50ce7b7e029ce1b5cd3f22c4faef7e78995c0e4fda3453ea37a18')
+
+# Idempotently stage the Helios FHIR R5 server binary under .bin/.hfs/.
+# Verifies sha256 against the pinned digest. Skips if already present.
+fetch-fhir:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{FHIR_INSTALL_DIR}}"
+    if [ -x "{{FHIR_BIN}}" ]; then
+        echo "hfs already present in .bin/.hfs/"
+        "{{FHIR_BIN}}" --version 2>&1 | head -1 || true
+        exit 0
+    fi
+    asset="hfs-{{FHIR_VERSION}}-{{FHIR_ARCH}}-{{FHIR_OS}}.tar.gz"
+    url="https://github.com/HeliosSoftware/hfs/releases/download/v{{FHIR_VERSION}}/${asset}"
+    echo "→ fetching Helios FHIR Server v{{FHIR_VERSION}} ({{FHIR_ARCH}}-{{FHIR_OS}})"
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    curl -fsSL "$url" -o "$tmp/$asset"
+    actual_sha=$(sha256sum "$tmp/$asset" | awk '{print $1}')
+    if [ "$actual_sha" != "{{FHIR_SHA256}}" ]; then
+        echo "sha256 mismatch for $asset"
+        echo "  expected: {{FHIR_SHA256}}"
+        echo "  actual:   $actual_sha"
+        exit 1
+    fi
+    tar -xzf "$tmp/$asset" -C "$tmp"
+    bin_path=$(find "$tmp" -type f -name hfs -perm -u+x | head -1)
+    [ -n "$bin_path" ] || { echo "no executable 'hfs' in tarball"; exit 1; }
+    install -m 0755 "$bin_path" "{{FHIR_BIN}}"
+    "{{FHIR_BIN}}" --version 2>&1 | head -1 || true
+
+# Print FHIR server status: pid, port, log, capability statement summary.
+fhir-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -x "{{FHIR_BIN}}" ]; then
+        echo "hfs binary missing — run \`just fetch-fhir\`"
+        exit 0
+    fi
+    if [ -f "{{FHIR_PIDFILE}}" ] && kill -0 "$(cat "{{FHIR_PIDFILE}}")" 2>/dev/null; then
+        pid=$(cat "{{FHIR_PIDFILE}}")
+        echo "hfs up: pid=$pid port={{FHIR_PORT}} log={{FHIR_LOGFILE}}"
+        meta_url="http://127.0.0.1:{{FHIR_PORT}}/fhir/R5/metadata"
+        if curl -fsS "$meta_url" -o /dev/null 2>/dev/null; then
+            echo "  metadata: $meta_url ✓"
+        else
+            echo "  metadata: $meta_url unreachable"
+        fi
+    else
+        echo "hfs not running (no pid-file or stale)"
+    fi
+    echo "state: {{FHIR_STATE_DIR}}"
+
+# Wipe FHIR runtime state (pid + log + embedded SQLite). Preserves .bin/.hfs/.
+fhir-clean:
+    rm -rf "{{FHIR_STATE_DIR}}" "{{FHIR_PIDFILE}}" "{{FHIR_LOGFILE}}"
+    @echo "✓ fhir clean (run \`just fhir-server-up\` to repopulate state)"
+
+# Idempotently background-spawn the Helios FHIR R5 server.
+# Pid → target/hfs.pid; log → target/hfs.log; state → target/hfs-state/.
+# Liveness probe: GET /fhir/R5/metadata (FHIR CapabilityStatement).
+fhir-server-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ justfile_directory() }}/target" "{{FHIR_STATE_DIR}}"
+    if [ -f "{{FHIR_PIDFILE}}" ] && kill -0 "$(cat "{{FHIR_PIDFILE}}")" 2>/dev/null; then
+        echo "hfs already up: pid=$(cat "{{FHIR_PIDFILE}}") port={{FHIR_PORT}}"
+        exit 0
+    fi
+    [ -x "{{FHIR_BIN}}" ] || { echo "hfs missing — run \`just fetch-fhir\`"; exit 1; }
+    rm -f "{{FHIR_PIDFILE}}"
+    nohup "{{FHIR_BIN}}" \
+        --port {{FHIR_PORT}} \
+        --bind 127.0.0.1 \
+        --data-dir "{{FHIR_STATE_DIR}}" \
+        > "{{FHIR_LOGFILE}}" 2>&1 < /dev/null &
+    pid=$!
+    echo $pid > "{{FHIR_PIDFILE}}"
+    # Liveness probe — server should accept a metadata GET within 5s.
+    meta_url="http://127.0.0.1:{{FHIR_PORT}}/fhir/R5/metadata"
+    for _ in $(seq 1 50); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "hfs failed to start — see {{FHIR_LOGFILE}}"
+            rm -f "{{FHIR_PIDFILE}}"
+            tail -20 "{{FHIR_LOGFILE}}" || true
+            exit 1
+        fi
+        if curl -fsS "$meta_url" -o /dev/null 2>/dev/null; then
+            echo "✓ hfs up: pid=$pid port={{FHIR_PORT}} metadata=$meta_url log={{FHIR_LOGFILE}}"
+            exit 0
+        fi
+        sleep 0.1
+    done
+    echo "hfs started but metadata endpoint never responded — see {{FHIR_LOGFILE}}"
+    tail -20 "{{FHIR_LOGFILE}}" || true
+    exit 1
+
+# Stop the FHIR server (SIGTERM-then-grace-then-SIGKILL).
+fhir-server-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f "{{FHIR_PIDFILE}}" ]; then
+        echo "hfs not running (no pid-file)"
+        exit 0
+    fi
+    pid=$(cat "{{FHIR_PIDFILE}}")
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo "hfs not running (stale pid $pid)"
+        rm -f "{{FHIR_PIDFILE}}"
+        exit 0
+    fi
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 1 30); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "hfs ignored SIGTERM — escalating to SIGKILL"
+        kill -KILL "$pid" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+        done
+    fi
+    rm -f "{{FHIR_PIDFILE}}"
+    echo "✓ hfs down (pid=$pid)"
+
+# End-to-end FHIR foundation smoke (Task 10.1 close-out gate).
+# Brings hfs up, POSTs the canonical icu-monitor-02 Observation Bundle
+# to /fhir/R5/Observation (one entry at a time), GETs each back, asserts
+# round-trip, tears the server down. Gated on .bin/.hfs/hfs presence —
+# skips with informational message if absent (mirrors rs-solver's
+# .bin/z3 gate). The `bash -lc` frame keeps `set -e` and trap-based
+# teardown coherent across the up/POST/GET/down cycle.
+fhir-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -x "{{FHIR_BIN}}" ]; then
+        echo "skip: hfs not staged at {{FHIR_BIN}} (run \`just fetch-fhir\` first)"
+        exit 0
+    fi
+    just fhir-server-up
+    cleanup() { just fhir-server-down >/dev/null 2>&1 || true; }
+    trap cleanup EXIT
+    base="http://127.0.0.1:{{FHIR_PORT}}/fhir/R5"
+    fixture="{{ justfile_directory() }}/data/fhir/icu-monitor-02.observations.json"
+    [ -f "$fixture" ] || { echo "fixture missing: $fixture"; exit 1; }
+    # Round-trip every entry: POST → capture server-assigned id → GET → assert.
+    n=$(uv run python -c "import json; print(len(json.load(open('$fixture'))['entry']))")
+    echo "→ smoke: round-tripping $n Observations through $base"
+    for i in $(seq 0 $((n-1))); do
+        obs=$(uv run python -c "import json; print(json.dumps(json.load(open('$fixture'))['entry'][$i]['resource']))")
+        loc=$(curl -fsS -o /dev/null -w '%{redirect_url}\n' \
+            -X POST "$base/Observation" \
+            -H 'Content-Type: application/fhir+json' \
+            -H 'Accept: application/fhir+json' \
+            --data "$obs" || true)
+        # Some servers reply with a 201 + Location header; others embed the
+        # assigned id in the response body. Fall back to a body-id parse.
+        if [ -z "$loc" ]; then
+            body=$(curl -fsS -X POST "$base/Observation" \
+                -H 'Content-Type: application/fhir+json' \
+                -H 'Accept: application/fhir+json' \
+                --data "$obs")
+            assigned=$(printf '%s' "$body" | uv run python -c \
+                "import json, sys; print(json.loads(sys.stdin.read()).get('id', ''))")
+            [ -n "$assigned" ] || { echo "smoke fail: server did not assign an id"; exit 1; }
+            curl -fsS "$base/Observation/$assigned" -o /dev/null \
+                -H 'Accept: application/fhir+json' || \
+                { echo "smoke fail: GET /Observation/$assigned"; exit 1; }
+            echo "  ✓ entry $i → id=$assigned"
+        else
+            assigned=$(echo "$loc" | sed 's|.*/Observation/\([^/]*\)/.*|\1|')
+            curl -fsS "$base/Observation/$assigned" -o /dev/null \
+                -H 'Accept: application/fhir+json' || \
+                { echo "smoke fail: GET $loc"; exit 1; }
+            echo "  ✓ entry $i → id=$assigned"
+        fi
+    done
+    echo "✓ fhir-smoke: $n Observations round-tripped through $base"
 
 # =============================================================================
 # Dapr 1.17 — slim self-hosted polyglot orchestration (Phase 0, Task 8)

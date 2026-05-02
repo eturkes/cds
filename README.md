@@ -192,7 +192,7 @@ pre-locked here; each axis lands its own architectural-lock ADR
 
 | Task | Title                                                                                                                                  | Status |
 | ---- | -------------------------------------------------------------------------------------------------------------------------------------- | ------ |
-| 10.1 | FHIR foundation — FHIR R5 server bootstrap + canonical `Observation` fixtures + Python / Rust client lib selection (ADR-025)            | **PLANNED** |
+| 10.1 | FHIR foundation — FHIR R5 server bootstrap + canonical `Observation` fixtures + Python / Rust client lib selection (ADR-025)            | **DONE** |
 | 10.2 | FHIR Subscriptions streaming → harness ingest                                                                                           | **PLANNED** |
 | 10.3 | FHIRcast collaborative-session events via Dapr pub/sub                                                                                  | **PLANNED** |
 | 10.4 | FHIR streaming axis close-out — end-to-end `contradictory-bound` smoke                                                                  | **PLANNED** |

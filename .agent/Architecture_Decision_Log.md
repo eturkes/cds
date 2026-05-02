@@ -2961,3 +2961,370 @@ land at each axis's first sub-task ADR.
   authoritative for §8 selection.
 
 ---
+
+## ADR-025 — FHIR R5 stack lock (Helios server + `fhir.resources` + `fhirbolt` candidate + Observation→ClinicalTelemetryPayload mapping)
+
+**Status:** Accepted (Phase 1 — Task 10.1 architectural lock)
+**Date:** 2026-05-02
+
+**Context.** ADR-024 §1 opened Phase 1 with the FHIR streaming axis
+(Task 10) and deferred the FHIR-stack architectural lock to this ADR
+per Plan §10 step 4 (mandatory `"State of the art [tool type] 2026"`
+web-search at decision time). Plan §6 listed open candidates: FHIR R5
+server impl (HAPI / Firely / Microsoft / etc.); Python client
+(`fhir.resources` etc.); Rust client (`fhirbolt` etc.); FHIR
+Subscriptions topic delivery; FHIRcast pub/sub. Task 10.1 must lock
+(a) the local FHIR R5 server, (b) the Python FHIR client lib, (c) the
+Rust FHIR client/types lib, and (d) the canonical FHIR R5
+`Observation` → `ClinicalTelemetryPayload` mapping shape.
+
+Web-searches executed at decision time:
+- `"State of the art FHIR R5 server 2026 self-hosted reference implementation"`
+- `"State of the art Python FHIR R5 client library 2026 fhir.resources"`
+- `"State of the art Rust FHIR R5 client crate 2026 fhirbolt"`
+
+Findings:
+- **FHIR R5 server.** Open-source candidates: HAPI FHIR JPA Server
+  (Java/Spring, Apache 2.0, requires JDK 17+); Microsoft fhir-server
+  (.NET, MIT, requires SQL Server / Cosmos DB); Medplum (Node.js +
+  Postgres); Aidbox (commercial); HealthIntersections fhirserver
+  (Pascal — reference but explicitly "not optimised for hosting/
+  supporting very large repositories efficiently"); HeliosSoftware/hfs
+  (Rust-native, MIT, R4/R4B/R5/R6 via feature flags, embedded SQLite
+  default + optional Postgres / Elasticsearch / S3, v0.1.47 published
+  2026-03-04).
+- **Python FHIR client.** Candidates: `fhir.resources` (nazrulworld;
+  Pydantic V2-based, R5 default since v7.0, MIT/BSD-3-Clause; minimum
+  fhir-core 1.1.5 as of January 2026); SMART-on-FHIR `fhirclient`
+  (older, no Pydantic V2); Google `fhir-py` (BigQuery-focused).
+- **Rust FHIR client/types.** Candidates: `fhirbolt`
+  (lschmierer/fhirbolt; serde-based R4/R4B/R5; experimental but
+  lightweight); `fhir-sdk` (FlixCoder/fhir-sdk; full REST client +
+  builder pattern); `fhir-resource-r5` (R5-only model lib); Helios's
+  own `helios-fhir` types crate (multi-version feature flags tightly
+  coupled to its server release matrix).
+- **Caveats.** FHIR R5 is HL7's "trial-use" release with breaking
+  changes vs R4; R6 is anticipated to make widely-used resources
+  normative (locking R5's changes). The CDS framework deliberately
+  commits to R5 per ADR-024 §1; migrating to R6 is a coordinated
+  edit deferred to a future ADR when R6 ships.
+
+**Decision.**
+
+1. **FHIR R5 server: `HeliosSoftware/hfs` v0.1.47** (Helios FHIR
+   Server, Rust-native, MIT, embedded SQLite default). Rationale:
+   leverages the existing Rust toolchain (no JDK / .NET runtime
+   addition); embedded SQLite eliminates external-DB dependency;
+   pre-compiled Linux x86_64 release tarball available for `.bin/`
+   staging (ADR-008 pattern); MIT license is compatible with the
+   project's Apache-2.0 WITH LLVM-exception. Pinned at v0.1.47
+   (latest as of 2026-03-04). Asset:
+   `hfs-0.1.47-x86_64-unknown-linux-gnu.tar.gz`
+   (sha256
+   `ce0558056ed50ce7b7e029ce1b5cd3f22c4faef7e78995c0e4fda3453ea37a18`).
+   Staged as `.bin/.hfs/hfs` via `just fetch-fhir`. Bound to
+   `127.0.0.1:8080` by default; FHIR base URL =
+   `http://127.0.0.1:8080/fhir/R5/`. Storage = embedded SQLite under
+   `target/hfs-state/` (mirrors `target/dapr-scheduler-etcd/`
+   precedent). The 770MB compressed tarball is an accepted ADR-008
+   trade-off; `fetch-fhir` is *not* added to `bootstrap` (operators
+   opt in, mirroring `fetch-lean`'s precedent — both are heavy single-
+   purpose toolchains).
+
+2. **Python FHIR client: `fhir.resources>=8.0`** (Pydantic V2-based,
+   R5 default since v7.0+, MIT/BSD-3-Clause). Rationale: aligns with
+   Phase 0's existing Pydantic V2 schema discipline (ADR-010 §2-3);
+   R5 default since v7.0 means
+   `from fhir.resources.observation import Observation` resolves to
+   the R5 model without explicit version pin; the `model_config =
+   ConfigDict(extra="forbid")` discipline carries over (ADR-010 §7;
+   `fhir.resources` does not freeze its models — Phase 1 ingestion
+   adapter wraps each parsed resource with a frozen
+   `ClinicalTelemetryPayload` envelope on the harness boundary).
+   Added as a runtime dependency in `pyproject.toml`.
+
+3. **Rust FHIR client/types: `fhirbolt` locked as candidate; addition
+   to `Cargo.toml` deferred to first kernel-side consumer (Task 10.4
+   close-out, expected).** The kernel does not yet need a FHIR types
+   crate — Phase 1's ingestion path is FHIR server → Python harness
+   (Task 10.2 Subscriptions) → canonical `ClinicalTelemetryPayload`
+   envelope → kernel via existing JSON-over-TCP. The kernel speaks
+   only `ClinicalTelemetryPayload` in 10.1–10.3; no FHIR types cross
+   the kernel boundary in those sub-tasks. Locking the candidate now
+   keeps the choice committed; deferring the workspace dep avoids
+   compiling an unused crate graph (multi-MB build cost). Reopen if
+   `fhir-sdk`'s REST client capabilities prove better-aligned to a
+   kernel-side direct-FHIR-ingestion path that surfaces in 10.4 or
+   Task 11/12. Helios's `helios-fhir` types crate is explicitly
+   *rejected* as the Rust types lib because its multi-version feature
+   flag matrix is tightly coupled to the Helios server's release
+   cadence — `fhirbolt`'s single-version-clean R5 default is the
+   cleaner contract.
+
+4. **Observation → `ClinicalTelemetryPayload` mapping shape.**
+
+   - **Vital-key projection.** FHIR R5 `Observation.code` carries a
+     LOINC `Coding`; the Phase 0 canonical-vital allowlist
+     (`CANONICAL_VITALS` in Python `cds_harness.ingest.canonical` +
+     Rust `cds_kernel::canonical`) maps each vital to a LOINC code.
+     **Locked mapping table** (Phase 1 ingestion adapter consumes
+     it):
+
+     | `vital_key`            | LOINC code | Display                     | UCUM unit |
+     | ---------------------- | ---------- | --------------------------- | --------- |
+     | `diastolic_mmhg`       | 8462-4     | Diastolic blood pressure    | `mm[Hg]`  |
+     | `heart_rate_bpm`       | 8867-4     | Heart rate                  | `/min`    |
+     | `respiratory_rate_bpm` | 9279-1     | Respiratory rate            | `/min`    |
+     | `spo2_percent`         | 2708-6     | Oxygen saturation in blood  | `%`       |
+     | `systolic_mmhg`        | 8480-6     | Systolic blood pressure     | `mm[Hg]`  |
+     | `temp_celsius`         | 8310-5     | Body temperature            | `Cel`     |
+
+     The mapping is hand-maintained in `data/fhir/README.md` plus a
+     hand-mirrored Python dict `LOINC_BY_VITAL` consumed by the
+     parity test (§7 below). Adding a canonical vital is a
+     coordinated edit across `CANONICAL_VITALS` (Phase 0 — Python +
+     Rust), this LOINC table (Phase 1), and any new fixtures —
+     treat as ADR-grade per ADR-011's existing canonical-vital
+     extension policy.
+
+   - **Value projection.** `Observation.valueQuantity.value`
+     (decimal) → `samples[i].vitals[vital_key]` (float).
+     `Observation.valueQuantity.code` (UCUM) is asserted against the
+     locked unit per row above; mismatched units raise
+     `IngestError` (deferred to Task 10.2 — the parity test in 10.1
+     asserts the fixtures already declare the correct UCUM units).
+
+   - **Wall-clock projection.** `Observation.effectiveDateTime`
+     (FHIR R5 `dateTime`, accepts variable sub-second precision)
+     → `samples[i].wall_clock` (RFC 3339 with `Z` suffix, ADR-010
+     §5). Microsecond-precision input from the Phase 0 CSV
+     (`.000000Z`) round-trips through FHIR `dateTime` cleanly.
+
+   - **Monotonic projection.** No FHIR field maps cleanly. The
+     harness assigns `samples[i].monotonic_ns` from the bundle's
+     ordering: the first sample anchors at the bundle's earliest
+     `effectiveDateTime` parsed to nanoseconds since epoch;
+     subsequent samples carry strictly-increasing monotonic_ns
+     derived from their `effectiveDateTime` deltas (with a +1ns
+     tie-break for duplicate timestamps — preserves the ADR-011
+     "duplicate `monotonic_ns` is a hard ingestion error" invariant
+     by deduplicating at translation time). Locked at this ADR;
+     the harness implementation lands in Task 10.2.
+
+   - **Subject + provenance.** `Observation.subject.reference` (e.g.
+     `Patient/pseudo-abc123`) → `source.patient_id`;
+     `Observation.identifier[0].value` (if present) →
+     `source.case_id`; `Observation.meta.source` URL →
+     `source.fhir_base_url` (Phase 1 addition; non-breaking — the
+     existing `source` schema accepts unknown fields under the
+     ADR-010 §7 forbid policy via a coordinated schema bump if
+     needed; for 10.1 the parity test only asserts the LOINC + value
+     + dateTime + subject fields).
+
+   - **Bundle wrapping.** A canonical `ClinicalTelemetryPayload` is
+     constructed from one `Bundle.type = "collection"` of
+     Observations sharing the same `subject.reference`. Multi-
+     patient bundles raise `IngestError` (Phase 1 invariant — one
+     payload per patient). Empty bundles raise `IngestError`. The
+     Bundle's `id` is preserved as a fingerprint in
+     `source.bundle_id` (informational).
+
+   - **Events deferral.** `Observation` does not carry the Phase 0
+     `events` sidecar (e.g. `manual_bp_cuff_inflate`). FHIRcast
+     (Task 10.3) is the natural carrier for collaborative-session
+     events; for 10.1 the fixtures omit events and document the
+     deferral in `data/fhir/README.md`. Phase 0's local CSV/JSON
+     ingestion path retains events full-fidelity per ADR-024 §3 C1
+     refinement.
+
+5. **Justfile FHIR recipes (Task 10.1 deliverable).**
+
+   - Constants: `FHIR_VERSION = "0.1.47"`, `FHIR_OS = "unknown-linux-gnu"`,
+     `FHIR_ARCH = "x86_64"`, `FHIR_PORT = "8080"`,
+     `FHIR_INSTALL_DIR = .bin/.hfs`, `FHIR_BIN = .bin/.hfs/hfs`,
+     `FHIR_STATE_DIR = target/hfs-state`,
+     `FHIR_SHA256 = ce0558056ed50ce7b7e029ce1b5cd3f22c4faef7e78995c0e4fda3453ea37a18`
+     (pinned digest of v0.1.47 Linux x86_64 tarball).
+   - `fetch-fhir` — idempotent fetch of the pinned tarball; verifies
+     sha256; unpacks to `.bin/.hfs/`. Skips if `FHIR_BIN` already
+     present. Mirrors `fetch-dapr` shape.
+   - `fhir-server-up` — backgrounded `nohup hfs --port {{FHIR_PORT}}`
+     with pid → `target/hfs.pid`, log → `target/hfs.log`. Liveness
+     probe on `http://127.0.0.1:{{FHIR_PORT}}/fhir/R5/metadata`
+     (FHIR `CapabilityStatement`); 2s timeout. Mirrors
+     `placement-up` pattern (ADR-021).
+   - `fhir-server-down` — SIGTERM-then-grace-then-SIGKILL on the pid
+     (mirrors `placement-down`).
+   - `fhir-status` — print PID + port + log path + 1-line summary
+     of the `metadata` capability statement (curl + grep).
+   - `fhir-clean` — wipe `target/hfs.*` and `target/hfs-state/`
+     (preserves `.bin/.hfs/` — that is `fetch-fhir`'s domain).
+   - `fhir-smoke` — bring server up; POST each Observation in
+     `data/fhir/icu-monitor-02.observations.json` to
+     `/fhir/R5/Observation`; GET each back via the server-assigned
+     id; assert round-trip; tear server down. **Gated** on
+     `[ -x .bin/.hfs/hfs ]` (skip with informational message if
+     missing — mirrors `rs-solver`'s `.bin/z3`/`.bin/cvc5` gate).
+   - `bootstrap` chain: `fetch-fhir` is **not** added — operators
+     opt in (matches `fetch-lean`'s precedent). The Plan §10 step 1
+     env-verify mention of `.bin/.hfs/` is informational; absence
+     does not fail env-verify.
+   - `env-verify` adds a single informational line:
+     `.bin/.hfs/ present` / `.bin/.hfs/ empty (run: just fetch-fhir)`.
+
+6. **Canonical Observation fixture set (`data/fhir/`).**
+
+   - `data/fhir/icu-monitor-01.observations.json` — FHIR R5 `Bundle`
+     of `Observation` resources mirroring
+     `data/sample/icu-monitor-01.csv` (canonical Phase 0 ICU
+     monitor sample). 12 entries (2 timestamps × 6 vitals — first
+     two CSV rows × all six canonical vitals).
+   - `data/fhir/icu-monitor-02.observations.json` — `Bundle`
+     mirroring `data/sample/icu-monitor-02.json` (the Phase 0 hypoxia
+     escalation sample). 4 entries (2 samples × 2 vitals = HR + SpO2,
+     direct mirror of the JSON).
+   - `data/fhir/README.md` — documents the LOINC mapping table +
+     fixture-add procedure + events deferral (Task 10.3 FHIRcast).
+   - **Phase 0 path retained.** `data/sample/*.csv` + `*.json`
+     continue to drive the existing harness ingest path (ADR-024 §3
+     C1 refinement). The FHIR fixtures are **parallel**, not
+     replacing.
+
+7. **Python parity test (`python/tests/test_fhir_fixtures.py`).**
+   Parses both `data/fhir/*.observations.json` Bundles via
+   `fhir.resources.bundle.Bundle` and asserts: (a) Bundle type =
+   `collection`; (b) every entry resource is an `Observation`; (c)
+   every `Observation.code.coding[0].system == "http://loinc.org"`;
+   (d) every LOINC `code` is in the locked `LOINC_BY_VITAL` table
+   above; (e) every `Observation.subject.reference` resolves to a
+   single patient per Bundle; (f) every `Observation.valueQuantity.value`
+   is a finite decimal; (g) every `Observation.effectiveDateTime`
+   parses as RFC 3339 with `Z` suffix; (h) every
+   `Observation.valueQuantity.code` matches the locked UCUM unit.
+   Uses a hand-mirrored Python dict
+   `LOINC_BY_VITAL = {"diastolic_mmhg": ("8462-4", "mm[Hg]"),
+   "heart_rate_bpm": ("8867-4", "/min"),
+   "respiratory_rate_bpm": ("9279-1", "/min"),
+   "spo2_percent": ("2708-6", "%"),
+   "systolic_mmhg": ("8480-6", "mm[Hg]"),
+   "temp_celsius": ("8310-5", "Cel")}` — drift from
+   `CANONICAL_VITALS` is caught by membership equality
+   (`set(LOINC_BY_VITAL) == set(CANONICAL_VITALS)`). The dict lives
+   in `python/cds_harness/ingest/loinc.py` (new module) for reuse
+   by Task 10.2's harness adapter.
+
+8. **No Cargo workspace changes.** `fhirbolt` is *not* added to
+   `Cargo.toml` in this sub-task. Locked as the candidate; addition
+   deferred to first kernel-side consumer. Avoids unused-dep build
+   cost in 10.1–10.3.
+
+9. **No PHASE flip.** Stays at 1; flip 1 → 2 locked at Task 12.4
+   close-out per ADR-024 §4.
+
+**Consequences.**
+
+- The Phase 1 FHIR axis has a discoverable foundation: server choice
+  locked + bootstrap recipes wired; canonical fixtures + LOINC
+  mapping documented; Python client added with parity test. Tasks
+  10.2 / 10.3 / 10.4 inherit a working server-bootstrap path +
+  parity-tested fixtures + locked LOINC table.
+- `.bin/.hfs/hfs` is a 770MB local-first cache (heavy but bounded;
+  ADR-008 trade-off). Operators who don't need a live FHIR server
+  skip `just fetch-fhir`; CI baselines do not require it (parity
+  test reads the fixture JSON directly through `fhir.resources`).
+- `fhirbolt` is locked as the Rust types candidate but deferred —
+  10.1 does not exercise the Rust FHIR boundary; the kernel speaks
+  only `ClinicalTelemetryPayload` until 10.4 (or later).
+- The LOINC mapping table is now part of the Phase 1 boundary
+  contract — adding a canonical vital is a coordinated edit across
+  `CANONICAL_VITALS` (Python + Rust), `LOINC_BY_VITAL` (Python
+  harness), this ADR's table, and the FHIR fixtures.
+- The Observation → ClinicalTelemetryPayload mapping shape is the
+  contract for Tasks 10.2 (Subscriptions) and 10.3 (FHIRcast). Both
+  inherit it.
+- Events ingestion is deferred to FHIRcast (10.3); the Phase 0
+  events path on local CSV/JSON is retained per ADR-024 §3 (C1
+  refinement).
+- Re-Entry Prompt selects Task 10.2 (FHIR Subscriptions streaming)
+  next; the strict §8.2 ordering rule is preserved.
+
+**Alternatives rejected.**
+
+- **HAPI FHIR JPA Server (Java/Spring).** Mature, R4/R5 support,
+  Apache 2.0. Rejected: (a) requires JDK 17+ — adds ~300MB JDK
+  toolchain to `.bin/` for one dep; (b) Spring Boot fat-JAR is heavy
+  + slow to start; (c) HAPI's Java API is not natively callable from
+  the Rust kernel — would need IPC even at 10.4, when Rust-side
+  consumption matters. Helios's Rust-native server keeps the
+  in-process option open for a future kernel-side direct ingestion
+  path.
+- **Microsoft fhir-server (.NET).** Cloud-native (Azure-ready) but
+  requires SQL Server / Cosmos DB — adds a heavy infra dep beyond
+  the runtime. Reopen at Task 11.x if Azure becomes the deployment
+  target; premature here.
+- **Medplum (Node.js + Postgres).** Postgres is a hard dep — heavy.
+  bun is already in scope (frontend, Phase 0) but Medplum adds
+  Node.js's ecosystem on top. Reopen if a future sub-task brings
+  Postgres in for other reasons.
+- **Aidbox.** Commercial license (free for dev, paid for production).
+  The research-prototype framing bars production-grade commercial
+  dependencies.
+- **HealthIntersections fhirserver (Pascal).** Reference but
+  explicitly "not optimised for hosting/supporting very large
+  repositories efficiently"; Pascal toolchain is also outside
+  scope.
+- **Defer FHIR server selection to 10.2.** Plan §8 row 10.1
+  explicitly scopes the lock here. Deferring would leave 10.2
+  without a server to subscribe against.
+- **Skip ADR-025; pin versions in pyproject.toml/Cargo.toml only.**
+  Three architectural locks (server + Python client + Rust client)
+  + a mapping shape contract justify a dedicated ADR. Mirrors
+  ADR-016 (Dapr 1.17 lock at Task 8.1 opening).
+- **Add `fhirbolt` to `Cargo.toml` in 10.1.** Premature — no Rust
+  consumer exists. Adding an unused workspace dep grows the build
+  surface for no Phase 1.1 benefit.
+- **Use Helios's `helios-fhir` types crate as the Rust client.**
+  Multi-version feature flag matrix is tightly coupled to the
+  server's release cadence; `fhirbolt`'s single-version-clean R5
+  default is cleaner. Reopen if `helios-fhir` ships a slimmer
+  R5-only feature set.
+- **Bundle the FHIR server as a Rust workspace dep instead of a
+  `.bin/` binary.** Would force every kernel build to compile the
+  full Helios server crate graph (multi-MB compile time, kernel bin
+  size grows). Server runs as an out-of-process binary per ADR-008;
+  kernel speaks only `ClinicalTelemetryPayload`.
+- **No canonical Observation fixture set; let the FHIR server's
+  seed data drive 10.2/10.3.** Phase 0 deliberately landed
+  canonical SAT/UNSAT fixtures; Phase 1 must carry equivalent
+  canonical FHIR fixtures to keep parity.
+- **Single fixture (only one of the two ICU monitor samples).**
+  Skipping either would leave a Phase 0 canonical sample untested
+  for FHIR ingestion. Two fixtures matches the Phase 0 sample
+  count.
+- **Encode `events` as a custom FHIR extension on Observation.**
+  Custom extensions are non-standard; FHIRcast (10.3) is the
+  standard carrier for collaborative-session events. The deferral
+  is documented; the Phase 0 events path is retained per ADR-024
+  §3.
+- **Map `monotonic_ns` from a custom FHIR extension instead of
+  bundle-ordering.** Custom extension is non-standard. Bundle
+  ordering + +1ns tie-break for duplicate timestamps is
+  deterministic and standard-compatible.
+- **Add `fetch-fhir` to the default `bootstrap` chain.** 770MB is
+  too heavy for unconditional bootstrap; matches `fetch-lean`'s
+  opt-in precedent.
+- **Make `.bin/.hfs/` absence a hard `env-verify` failure.** Would
+  break dev workflows that don't need a live FHIR server (most of
+  10.1's parity-test gate, Phase 0 baselines, frontend dev). Treat
+  as informational only.
+- **Pin `fhir.resources<8` for stability.** v8 is the current
+  major as of 2026; Phase 1 will run for many sessions and any
+  upstream breaking change is a coordinated Phase 1 edit anyway.
+  `>=8` is the correct floor.
+- **`schemars` JSON-Schema codegen for the FHIR client types.**
+  ADR-022 §8 set the precedent — hand-written + parity tripwire
+  over codegen. Same logic for FHIR types: `fhir.resources` is
+  vendor-maintained; a generated layer adds a build dep for no
+  Phase 1 benefit.
+
+---

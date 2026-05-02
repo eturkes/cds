@@ -14,6 +14,7 @@ dependencies = [
     "httpx>=0.28",
     "dapr>=1.17",
     "dapr-ext-workflow>=1.17",
+    "fhir.resources>=8.0",
 ]
 
 [project.optional-dependencies]

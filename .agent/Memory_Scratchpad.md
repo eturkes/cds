@@ -6,10 +6,141 @@
 
 ## Active task pointer
 
-- **Last completed:** Phase 1 plan restructure (ADR-024). Opened Phase 1 with a three-axis split (FHIR / cloud / ZKSMT) drawn from Plan §1's deferred scope. **No code changes** — Plan + ADR + Scratchpad + README only; cargo + pytest + frontend baselines stay green by construction (Markdown-only edits, env-verify passes). Plan §1 extended ("Phase 0 closed at Task 9.3 / Phase 1 open at Task 10.1"); Plan §5 C1 refined to phase-conditional ("genuine clinical data only — Phase 0: local CSV/JSON; Phase 1: FHIR R5 server connectivity (Task 10) plus existing CSV/JSON path retained"); Plan §6 acquired a "Phase 1 stack additions (deferred per-axis ADR)" mini-table; Plan §8 split into `### 8.1 Phase 0 (Closed)` (existing all-DONE table preserved verbatim) + `### 8.2 Phase 1 (Open)` (12 PLANNED rows for Tasks 10.1 / 10.2 / 10.3 / 10.4 / 11.1 / 11.2 / 11.3 / 11.4 / 12.1 / 12.2 / 12.3 / 12.4); Plan §8 strict-ordering chain extended `… < 9.3 < 10.1 < … < 12.4`. ADR-024 records the structural decision + per-axis architectural-lock ADR deferral (ADR-025 FHIR / ADR-026 cloud / ADR-027 ZKSMT at each axis's first sub-task) + the deferred PHASE flip 1 → 2 to Task 12.4 close-out (mirrors ADR-023 §7's "flip at last task of phase" discipline). README §1 acquired a one-sentence Phase 0-closed / Phase 1-open framing; README §7 split into `### 7.1 Phase 0 (Closed)` (existing roadmap table preserved) + `### 7.2 Phase 1 (Open)` (new 12-row PLANNED table for Tasks 10.1–12.4).
-- **Next up:** **Task 10.1 — FHIR R5 server bootstrap + canonical `Observation` fixture set + Python / Rust client lib selection.** Lands ADR-025 locking the FHIR R5 server impl (HAPI / Firely / Microsoft / etc.), Python client (`fhir.resources` etc.), Rust client (`fhirbolt` etc.), and the `Observation`-resource → `ClinicalTelemetryPayload` mapping shape. Bound by Plan §10 step 4 web-search at decision time (`"State of the art FHIR R5 server 2026"` + `"State of the art Python FHIR client 2026"` + `"State of the art Rust FHIR client 2026"`).
+- **Last completed:** Task 10.1 — FHIR foundation (ADR-025). Phase 1 FHIR axis architectural lock landed: **HeliosSoftware/hfs v0.1.47** (Rust-native MIT FHIR R5 server, embedded SQLite default; sha256-pinned Linux x86_64 tarball ~770MB) staged via `just fetch-fhir` under `.bin/.hfs/`; **`fhir.resources>=8.0`** added as Python harness dep (Pydantic V2-based, R5 default since v7.0 — resolved to v8.2.0 + fhir-core 1.1.8); **`fhirbolt`** locked as Rust client/types candidate but Cargo addition deferred to first kernel-side consumer (Task 10.4 expected). LOINC mapping table locked: `diastolic_mmhg→8462-4`, `heart_rate_bpm→8867-4`, `respiratory_rate_bpm→9279-1`, `spo2_percent→2708-6`, `systolic_mmhg→8480-6`, `temp_celsius→8310-5` — exposed as `cds_harness.ingest.loinc.LOINC_BY_VITAL` (Python) with parity-asserted equality to `CANONICAL_VITALS`. Canonical Observation fixtures shipped under `data/fhir/`: `icu-monitor-01.observations.json` (Bundle of 12 — 2 timestamps × 6 vitals, mirrors `data/sample/icu-monitor-01.csv`), `icu-monitor-02.observations.json` (Bundle of 4 — 2 timestamps × 2 vitals, 1:1 mirror of `data/sample/icu-monitor-02.json`), `data/fhir/README.md` documenting the LOINC table + events deferral. Justfile recipes added: `fetch-fhir` (sha256-verified install), `fhir-server-up` / `fhir-server-down` (SIGTERM-then-grace-then-SIGKILL with `target/hfs.pid` + `target/hfs.log` + `target/hfs-state/` embedded SQLite), `fhir-status` (capability statement probe), `fhir-clean`, `fhir-smoke` (gated on `.bin/.hfs/hfs` — round-trips `icu-monitor-02` Observations through `/fhir/R5/Observation` POST/GET). `env-verify` acquired a single informational line for `.bin/.hfs/`. `bootstrap` chain unchanged — `fetch-fhir` is opt-in (mirrors `fetch-lean`). Python parity test `python/tests/test_fhir_fixtures.py` (16 cases): Bundle.type=collection, every entry is Observation, every coding.system=http://loinc.org, LOINC ∈ locked table, UCUM unit matches, RFC 3339 with Z suffix, single-patient bundle, status=final, category=vital-signs. Final gate: `uv run pytest -q` → 111+1 pass (16 new + 1 Kimina-skipped); `uv run ruff check .` clean; `cargo test --workspace --lib --bins` → 130+3 pass; `cargo clippy --workspace --all-targets -- -D warnings` clean; `just env-verify` clean. **No PHASE flip** (1 → 2 deferred to Task 12.4 per ADR-024 §4). **No Cargo workspace changes** (`fhirbolt` locked-but-not-added).
+- **Next up:** **Task 10.2 — FHIR Subscriptions streaming → harness ingest.** Wires the Helios FHIR R5 server's Subscriptions topic-based delivery (FHIR R5 R5 backport-compatible) into the Python harness's `cds_harness.ingest` adapter so a server-pushed `Observation` Bundle round-trips through the canonical `ClinicalTelemetryPayload` envelope and exits the existing Phase 0 deductive pipeline. Inherits the locked LOINC table (ADR-025 §4) + Justfile recipes + Observation fixtures from 10.1; expected to extend `cds_harness.ingest` with a `FHIRSubscriptionAdapter` and add a `fhir-pipeline-smoke` Justfile recipe gated on `.bin/.hfs/hfs` + `.bin/dapr` + `.bin/{z3,cvc5}` + reachable `$CDS_KIMINA_URL`. Bound by Plan §10 step 4 web-search at decision time for FHIR R5 Subscriptions topic mechanics + FHIRcast vs Subscriptions split.
 
-> **Phase 0 → Phase 1 transition.** Phase 0 closed at Task 9.3 (visualizers + PHASE 0 → 1 flip). Phase 1 opens at Task 10.1 with three axis-aligned super-tasks 10 / 11 / 12 (FHIR / cloud / ZKSMT). The strict §8 ordering rule selects `10.1 < 10.2 < 10.3 < 10.4 < 11.1 < 11.2 < 11.3 < 11.4 < 12.1 < 12.2 < 12.3 < 12.4`. The PHASE constants stay at 1 across Phase 1 and flip 1 → 2 at Task 12.4 close-out. ADR-024 records the axis split + the per-axis ADR deferral (ADR-025 / 026 / 027 land at first sub-task of each axis, not here).
+> **Phase 1 axis 10 (FHIR) progress: 10.1 DONE / 10.2-10.4 TODO.** The strict §8.2 ordering rule selects `10.2` next. PHASE constants stay at 1 across Phase 1 and flip 1 → 2 at Task 12.4 close-out (ADR-024 §4).
+
+## Session 2026-05-02 — Task 10.1 close-out (ADR-025)
+
+Locked the Phase 1 FHIR axis foundation. The FHIR R5 server is
+**Rust-native** (HeliosSoftware/hfs v0.1.47, MIT, embedded SQLite —
+no JDK / .NET / Postgres dep added); the Python client is
+`fhir.resources>=8.0` (Pydantic V2; resolves to v8.2.0); the Rust
+client `fhirbolt` is locked as the candidate but deferred (no Rust
+consumer in 10.1). The LOINC mapping table for the six canonical
+vitals is the new Phase 1 boundary contract — adding a vital is now
+a 5-way coordinated edit (Python + Rust `CANONICAL_VITALS`,
+`LOINC_BY_VITAL`, `data/fhir/README.md`, ADR-025 §4, and any new
+fixtures).
+
+**Web-searches executed at decision time** (Plan §10 step 4):
+- `"State of the art FHIR R5 server 2026 self-hosted reference implementation"`
+- `"State of the art Python FHIR R5 client library 2026 fhir.resources"`
+- `"State of the art Rust FHIR R5 client crate 2026 fhirbolt"`
+
+**Why HeliosSoftware/hfs.** Rust-native (leverages existing
+toolchain — no JDK / .NET runtime added); MIT-licensed (Apache 2.0
+WITH LLVM-exception compatible); embedded SQLite default (no
+external DB dep); v0.1.47 has pre-compiled Linux x86_64 release
+tarball (sha256-pinned at decision time —
+`ce0558056ed50ce7b7e029ce1b5cd3f22c4faef7e78995c0e4fda3453ea37a18`).
+The 770MB compressed footprint is heavy but fits ADR-008's local-
+first cache contract; `fetch-fhir` is **not** added to `bootstrap`
+to keep the default chain lean (matches `fetch-lean`'s opt-in
+precedent). Operators run `just fetch-fhir` explicitly when they
+need a live FHIR server — Phase 0 baselines + the parity test do
+not require it.
+
+**Why `fhir.resources>=8.0`.** Pydantic V2-based; R5 default since
+v7.0 — `from fhir.resources.observation import Observation`
+resolves to R5 without explicit version pin; aligns with Phase 0's
+Pydantic V2 schema discipline (ADR-010). v8.2.0 resolved with
+`fhir-core` 1.1.8. **Caveat.** v8 dropped the deprecated
+`resource_type` attribute — use `Resource.get_resource_type()`
+instead (the parity test learned this the hard way; the fix landed
+in this session).
+
+**Why `fhirbolt` locked-but-not-added.** The kernel does not yet
+need a FHIR types crate — Phase 1's ingestion path is FHIR server
+→ Python harness (10.2 Subscriptions) → canonical
+`ClinicalTelemetryPayload` envelope → kernel via existing JSON-
+over-TCP. The kernel speaks only `ClinicalTelemetryPayload` in
+10.1–10.3. Adding `fhirbolt` to `Cargo.toml` now would compile an
+unused crate graph (multi-MB build cost). Reopen at the first
+kernel-side consumer (10.4 close-out, expected). Helios's own
+`helios-fhir` types crate is **rejected** as the Rust types lib —
+its multi-version feature flag matrix is tightly coupled to the
+server release cadence; `fhirbolt`'s single-version-clean R5
+default is cleaner.
+
+**Why Observation, not Encounter / DiagnosticReport / etc.** The
+Phase 0 telemetry shape is per-vital scalars sampled at timestamps
+— FHIR R5's `Observation.valueQuantity` + `effectiveDateTime` is
+the canonical resource for that shape. Multi-vital "Vital Signs
+Panel" (LOINC 85353-1) with `hasMember` was rejected for 10.1's
+fixtures because the Phase 0 ingest schema is per-vital flat (one
+`vitals[key]` per sample); the 1:1 Observation-per-vital mapping
+keeps the projection trivial. Reopen if Task 10.4 reveals a
+performance / aggregation need for panels.
+
+**Why two fixtures.** The Phase 0 sample shape has two telemetry
+fixtures (`icu-monitor-01.csv` + `.meta.json` sidecar;
+`icu-monitor-02.json`); Phase 1's FHIR fixtures mirror them 1:1.
+Both are smaller than the source (12 entries vs 60 rows; 4 entries
+direct mirror) — full 10-row fidelity is exercised in 10.4
+close-out smoke, where the harness re-ingests the source CSV
+through the FHIR boundary.
+
+**Why no events.** FHIR's `Observation` resource does not carry
+the Phase 0 `events` sidecar (e.g. `manual_bp_cuff_inflate`).
+FHIRcast (Task 10.3) is the standard FHIR carrier for
+collaborative-session events; for 10.1 the fixtures omit events
+and document the deferral in `data/fhir/README.md`. Phase 0 local
+CSV/JSON ingestion retains events full-fidelity per ADR-024 §3 C1
+refinement.
+
+**LOINC table choices.**
+
+| `vital_key`            | LOINC code | Display                            | UCUM unit |
+| ---------------------- | ---------- | ---------------------------------- | --------- |
+| `diastolic_mmhg`       | 8462-4     | Diastolic blood pressure           | `mm[Hg]`  |
+| `heart_rate_bpm`       | 8867-4     | Heart rate                         | `/min`    |
+| `respiratory_rate_bpm` | 9279-1     | Respiratory rate                   | `/min`    |
+| `spo2_percent`         | 2708-6     | Oxygen saturation in Arterial blood | `%`       |
+| `systolic_mmhg`        | 8480-6     | Systolic blood pressure            | `mm[Hg]`  |
+| `temp_celsius`         | 8310-5     | Body temperature                   | `Cel`     |
+
+`spo2_percent` could equally bind to LOINC 59408-5 (Oxygen
+saturation by pulse oximetry); 2708-6 is the more general
+"Oxygen saturation in Arterial blood" code and matches the
+Phase 0 `spo2_percent` semantic without over-specifying the
+sensing modality. Reopen at 10.4 if EHR vendor feedback prefers
+59408-5.
+
+**Justfile additions (8 new recipes + env-verify line).**
+
+| Recipe              | Purpose                                                                                         |
+| ------------------- | ----------------------------------------------------------------------------------------------- |
+| `fetch-fhir`        | Idempotent install of `hfs` v0.1.47 → `.bin/.hfs/hfs` with sha256 verification.                  |
+| `fhir-server-up`    | Background-spawn `hfs --port 8080`; pid → `target/hfs.pid`; metadata liveness probe (5s timeout). |
+| `fhir-server-down`  | SIGTERM-then-grace-then-SIGKILL on the pid (mirrors `placement-down`).                           |
+| `fhir-status`       | PID + port + log + capability statement probe summary.                                           |
+| `fhir-clean`        | Wipe `target/hfs.*` + `target/hfs-state/`; preserves `.bin/.hfs/`.                               |
+| `fhir-smoke`        | Round-trip canonical `icu-monitor-02` Observations through POST/GET; gated on `.bin/.hfs/hfs`.   |
+| `env-verify` line   | Informational `.bin/.hfs/ present | empty (run: just fetch-fhir)` — no hard fail.               |
+
+**Tests.**
+- `python/tests/test_fhir_fixtures.py` — 16 cases × 2 fixtures
+  (parametrized): Bundle is collection, every entry is Observation,
+  LOINC system + code locked, UCUM system + unit locked, RFC 3339
+  Z suffix, single-patient invariant, status=final, category=vital-signs,
+  finite numeric values. Plus `LOINC_BY_VITAL` parity-equality with
+  `CANONICAL_VITALS`.
+- Cargo workspace untouched — no Rust code edits in 10.1 (the
+  kernel does not yet consume FHIR; that's 10.4).
+
+**Final gate (all green):**
+- `uv run pytest -q` → **111 pass + 1 Kimina-skipped** (3 smoke + 9 schema + 25 ingest + 34 translate + 16 fhir + 24 dapr/service/workflow).
+- `uv run ruff check .` → clean.
+- `cargo test --workspace --lib --bins --quiet` → 130 + 3 pass; integration test `dapr_sidecar_drives_healthz_through_service_invocation` is environment-gated (Dapr cluster down on this dev box) — pre-existing flake, not a 10.1 regression.
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean.
+- `just env-verify` → clean (`.bin/.hfs/ empty (run: just fetch-fhir — Phase 1 FHIR axis only)` informational line).
+- `just --list` shows 8 new FHIR recipes.
+
+Decisions captured in **ADR-025**.
+
+
 
 ## Session 2026-05-02 — Phase 1 plan restructure (ADR-024)
 
