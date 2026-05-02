@@ -42,9 +42,22 @@ class FHIRBundleError(IngestError):
     """
 
 
+class FHIRcastError(IngestError):
+    """Raised on any malformed / out-of-contract FHIRcast STU3 event.
+
+    Phase 1 (Task 10.3). Covers envelope violations (missing
+    ``timestamp`` / ``id`` / ``event``), event-object violations
+    (missing ``hub.topic`` / ``hub.event``, wrong ``hub.event``,
+    multi-patient context, missing patient context entry), and
+    projection violations (Patient resource missing ``id`` / wrong
+    ``resourceType``). See ADR-026 for the full projection contract.
+    """
+
+
 __all__ = [
     "DuplicateMonotonicError",
     "FHIRBundleError",
+    "FHIRcastError",
     "IngestError",
     "InvalidTimestampError",
     "MalformedCsvError",

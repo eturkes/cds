@@ -21,6 +21,7 @@ from cds_harness.ingest.csv_loader import load_csv, load_csv_text
 from cds_harness.ingest.errors import (
     DuplicateMonotonicError,
     FHIRBundleError,
+    FHIRcastError,
     IngestError,
     InvalidTimestampError,
     MalformedCsvError,
@@ -28,14 +29,32 @@ from cds_harness.ingest.errors import (
     UnknownVitalError,
 )
 from cds_harness.ingest.fhir_observation import bundle_to_payload
+from cds_harness.ingest.fhircast import (
+    EVENT_PATIENT_CLOSE,
+    EVENT_PATIENT_OPEN,
+    TOPIC_PATIENT_CLOSE,
+    TOPIC_PATIENT_OPEN,
+    FHIRcastEvent,
+    FHIRcastSessionRegistry,
+    HubEvent,
+    parse_event,
+)
 from cds_harness.ingest.json_loader import load_json, load_json_envelope
 from cds_harness.ingest.loader import discover_payloads
 from cds_harness.ingest.timestamps import canonicalize_utc, parse_utc_timestamp
 
 __all__ = [
     "CANONICAL_VITALS",
+    "EVENT_PATIENT_CLOSE",
+    "EVENT_PATIENT_OPEN",
+    "TOPIC_PATIENT_CLOSE",
+    "TOPIC_PATIENT_OPEN",
     "DuplicateMonotonicError",
     "FHIRBundleError",
+    "FHIRcastError",
+    "FHIRcastEvent",
+    "FHIRcastSessionRegistry",
+    "HubEvent",
     "IngestError",
     "InvalidTimestampError",
     "MalformedCsvError",
@@ -48,5 +67,6 @@ __all__ = [
     "load_csv_text",
     "load_json",
     "load_json_envelope",
+    "parse_event",
     "parse_utc_timestamp",
 ]

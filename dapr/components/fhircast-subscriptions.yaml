@@ -1,0 +1,30 @@
+# FHIRcast STU3 collaborative-session pub/sub routing (Phase 1, Task 10.3).
+# Locked by ADR-026 §10. Two declarative subscriptions, one per
+# FHIRcast event topic. Both bind the in-memory `cds-pubsub` component
+# (Phase 0 Dapr foundation; durable broker deferred to Phase 1 cloud
+# axis Task 11.x). Scopes restrict publish/subscribe to the
+# `cds-harness` app — future axis-11 services adding subscribers
+# extend the scopes list.
+apiVersion: dapr.io/v2alpha1
+kind: Subscription
+metadata:
+  name: fhircast-patient-open
+spec:
+  pubsubname: cds-pubsub
+  topic: fhircast.patient-open
+  routes:
+    default: /v1/fhircast/patient-open
+scopes:
+  - cds-harness
+---
+apiVersion: dapr.io/v2alpha1
+kind: Subscription
+metadata:
+  name: fhircast-patient-close
+spec:
+  pubsubname: cds-pubsub
+  topic: fhircast.patient-close
+  routes:
+    default: /v1/fhircast/patient-close
+scopes:
+  - cds-harness

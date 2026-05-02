@@ -1,11 +1,23 @@
-"""FastAPI application factory for the Phase 0 Python harness service.
+"""FastAPI application factory for the Phase 0/1 Python harness service.
 
-The app exposes three endpoints:
+The app exposes the following endpoints:
 
 * ``GET  /healthz``     — liveness probe; returns ``{"status": "ok", ...}``.
 * ``POST /v1/ingest``   — accept either a JSON envelope (``format="json"``)
   or an in-memory CSV body (``format="csv"``); return the validated +
   canonicalized :class:`~cds_harness.schema.ClinicalTelemetryPayload`.
+* ``POST /v1/fhir/notification`` — accept a FHIR R5 ``Bundle``
+  (``type="collection"`` or ``type="subscription-notification"``) and
+  project it via :func:`cds_harness.ingest.bundle_to_payload`
+  (Task 10.2; ADR-025 §4).
+* ``POST /v1/fhircast/patient-open`` — accept a FHIRcast STU3
+  ``patient-open`` notification (raw or Dapr-CloudEvents-wrapped) and
+  apply it to the in-process :class:`FHIRcastSessionRegistry`
+  (Task 10.3; ADR-026).
+* ``POST /v1/fhircast/patient-close`` — analogous; clears the
+  session for the carried ``hub.topic``.
+* ``GET  /v1/fhircast/sessions`` — read-only snapshot of currently-
+  open sessions ``{hub_topic: patient_pseudo_id}``.
 * ``POST /v1/translate`` — accept ``(doc_id, text, root, logic,
   smt_check)`` and return ``{"tree", "matrix", "smt_check"}``.
 
@@ -18,6 +30,7 @@ traces. Pydantic validation errors are handled by FastAPI's default
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Annotated, Any, Final, Literal
 
@@ -27,10 +40,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from cds_harness import HARNESS_ID, PHASE
 from cds_harness.ingest import (
+    EVENT_PATIENT_CLOSE,
+    EVENT_PATIENT_OPEN,
+    FHIRcastSessionRegistry,
     IngestError,
     bundle_to_payload,
     load_csv_text,
     load_json_envelope,
+    parse_event,
 )
 from cds_harness.schema import (
     SCHEMA_VERSION,
@@ -51,6 +68,9 @@ SERVICE_APP_ID: Final[str] = "cds-harness"
 HEALTHZ_PATH: Final[str] = "/healthz"
 INGEST_PATH: Final[str] = "/v1/ingest"
 FHIR_NOTIFICATION_PATH: Final[str] = "/v1/fhir/notification"
+FHIRCAST_PATIENT_OPEN_PATH: Final[str] = "/v1/fhircast/patient-open"
+FHIRCAST_PATIENT_CLOSE_PATH: Final[str] = "/v1/fhircast/patient-close"
+FHIRCAST_SESSIONS_PATH: Final[str] = "/v1/fhircast/sessions"
 TRANSLATE_PATH: Final[str] = "/v1/translate"
 DEFAULT_HOST: Final[str] = "127.0.0.1"
 DEFAULT_PORT: Final[int] = 8081
@@ -130,6 +150,27 @@ class _FHIRNotificationRequest(_StrictModel):
     )
 
 
+class _FHIRcastEventEcho(BaseModel):
+    """Wire-visible echo of the projected FHIRcast event (Task 10.3, ADR-026)."""
+
+    event_id: str
+    timestamp: str
+    hub_topic: str
+    hub_event: Literal["patient-open", "patient-close"]
+    patient_pseudo_id: str
+
+
+class _FHIRcastApplyResponse(BaseModel):
+    applied: _FHIRcastEventEcho
+    current_patient: str | None = None
+
+
+class _FHIRcastSessionsResponse(BaseModel):
+    active: dict[str, str]
+    phase: int = PHASE
+    schema_version: str = SCHEMA_VERSION
+
+
 class _TranslateRequest(_StrictModel):
     doc_id: str = Field(..., min_length=1)
     text: str = Field(..., description="UTF-8 guideline body (used for source-span validation).")
@@ -175,6 +216,28 @@ class _InlineAdapter:
         return self._root
 
 
+async def _read_json_object(request: Request) -> dict[str, Any]:
+    """Decode a request body as a JSON object.
+
+    The FHIRcast routes accept either a raw FHIRcast notification or a
+    Dapr-wrapped CloudEvent — both are JSON objects. Anything else is
+    a contract violation surfaced as :class:`IngestError`.
+    """
+    raw = await request.body()
+    if not raw:
+        raise IngestError("FHIRcast request body is empty")
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise IngestError(f"FHIRcast request body is not valid JSON: {exc}") from exc
+    if not isinstance(decoded, dict):
+        raise IngestError(
+            f"FHIRcast request body must be a JSON object; "
+            f"got {type(decoded).__name__}"
+        )
+    return decoded
+
+
 def _ingest(payload: _IngestRequest) -> _IngestResponse:
     try:
         if isinstance(payload, _IngestJsonRequest):
@@ -193,6 +256,29 @@ def _ingest(payload: _IngestRequest) -> _IngestResponse:
 def _fhir_notification(request: _FHIRNotificationRequest) -> _IngestResponse:
     payload = bundle_to_payload(request.bundle)
     return _IngestResponse(payload=payload)
+
+
+def _fhircast_apply(
+    raw: dict[str, Any],
+    *,
+    expected_event: Literal["patient-open", "patient-close"],
+    registry: FHIRcastSessionRegistry,
+) -> _FHIRcastApplyResponse:
+    event = parse_event(raw, expected_event=expected_event)
+    if expected_event == EVENT_PATIENT_OPEN:
+        registry.apply_open(event)
+    else:
+        registry.apply_close(event)
+    return _FHIRcastApplyResponse(
+        applied=_FHIRcastEventEcho(
+            event_id=event.event_id,
+            timestamp=event.timestamp,
+            hub_topic=event.hub_topic,
+            hub_event=event.hub_event,
+            patient_pseudo_id=event.patient_pseudo_id,
+        ),
+        current_patient=registry.current_patient(event.hub_topic),
+    )
 
 
 def _translate(request: _TranslateRequest) -> _TranslateResponse:
@@ -217,6 +303,8 @@ def create_app() -> FastAPI:
             "stages. Bound under Dapr as app-id 'cds-harness'."
         ),
     )
+    fhircast_registry = FHIRcastSessionRegistry()
+    app.state.fhircast_registry = fhircast_registry
 
     @app.exception_handler(IngestError)
     async def _ingest_error_handler(_request: Request, exc: IngestError) -> JSONResponse:
@@ -258,6 +346,38 @@ def create_app() -> FastAPI:
         except Exception as exc:  # pragma: no cover — defensive boundary
             raise HTTPException(status_code=500, detail=f"unexpected: {exc}") from exc
 
+    @app.post(FHIRCAST_PATIENT_OPEN_PATH, response_model=_FHIRcastApplyResponse)
+    async def fhircast_patient_open(request: Request) -> _FHIRcastApplyResponse:
+        body = await _read_json_object(request)
+        try:
+            return _fhircast_apply(
+                body,
+                expected_event=EVENT_PATIENT_OPEN,
+                registry=fhircast_registry,
+            )
+        except IngestError:
+            raise
+        except Exception as exc:  # pragma: no cover — defensive boundary
+            raise HTTPException(status_code=500, detail=f"unexpected: {exc}") from exc
+
+    @app.post(FHIRCAST_PATIENT_CLOSE_PATH, response_model=_FHIRcastApplyResponse)
+    async def fhircast_patient_close(request: Request) -> _FHIRcastApplyResponse:
+        body = await _read_json_object(request)
+        try:
+            return _fhircast_apply(
+                body,
+                expected_event=EVENT_PATIENT_CLOSE,
+                registry=fhircast_registry,
+            )
+        except IngestError:
+            raise
+        except Exception as exc:  # pragma: no cover — defensive boundary
+            raise HTTPException(status_code=500, detail=f"unexpected: {exc}") from exc
+
+    @app.get(FHIRCAST_SESSIONS_PATH, response_model=_FHIRcastSessionsResponse)
+    async def fhircast_sessions() -> _FHIRcastSessionsResponse:
+        return _FHIRcastSessionsResponse(active=fhircast_registry.active_topics())
+
     @app.post(TRANSLATE_PATH, response_model=_TranslateResponse)
     async def translate(request: _TranslateRequest) -> _TranslateResponse:
         try:
@@ -273,6 +393,9 @@ def create_app() -> FastAPI:
 __all__ = [
     "DEFAULT_HOST",
     "DEFAULT_PORT",
+    "FHIRCAST_PATIENT_CLOSE_PATH",
+    "FHIRCAST_PATIENT_OPEN_PATH",
+    "FHIRCAST_SESSIONS_PATH",
     "FHIR_NOTIFICATION_PATH",
     "HEALTHZ_PATH",
     "INGEST_PATH",

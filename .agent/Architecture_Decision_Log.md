@@ -3328,3 +3328,343 @@ Findings:
   Phase 1 benefit.
 
 ---
+
+## ADR-026 — FHIRcast STU3 collaborative-session events → Dapr pub/sub (Task 10.3)
+
+**Status:** Accepted (Phase 1 — Task 10.3 architectural lock)
+**Date:** 2026-05-02
+
+**Context.** ADR-024 §1 opened the FHIR axis with three sub-tasks
+(10.1 foundation, 10.2 Subscriptions streaming, 10.3 FHIRcast events,
+10.4 close-out). ADR-025 §4 (10.1) deferred `events` ingestion from the
+FHIR R5 `Observation` projection because the resource does not carry
+collaborative-session events; FHIRcast is the FHIR-native carrier.
+Task 10.3 must lock (a) the FHIRcast specification version, (b) the
+event scope, (c) the Hub → harness delivery topology, (d) the Dapr
+pub/sub topic naming, (e) the harness-side projection contract +
+session registry, and (f) the Justfile smoke gate.
+
+Web-searches executed at decision time (Plan §10 step 4):
+- `"State of the art FHIRcast 2026 specification version event topics patient-open patient-close hub subscribe"`
+- `"FHIRcast patient-open event payload bundle format structure 2026 hub.event hub.topic context"`
+- `"Dapr pub/sub HTTP subscription declarative topic CloudEvents 1.17 2026"`
+
+Findings:
+- **FHIRcast STU3 / v3.0.0** is the current published version on
+  fhircast.org (built against FHIR R4 by IG history, but the event
+  shape is FHIR-version-agnostic — context resources are full FHIR
+  resources of the runtime FHIR version; the project's R5 commitment
+  per ADR-024 §1 is preserved by carrying R5 Patient resources in the
+  event context).
+- The patient-open / patient-close event JSON shape:
+  `{"timestamp": "<ISO-8601>", "id": "<event-id>", "event":
+  {"hub.topic": "<UUID-session>", "hub.event": "patient-open" |
+  "patient-close", "context": [{"key": "patient", "resource":
+  {"resourceType": "Patient", "id": "<id>", "identifier": [...]}}]}}`.
+  The patient context entry is REQUIRED. The `encounter` element was
+  deprecated in v1.1 in favor of a dedicated `encounter-open` event.
+- FHIRcast supports three Hub → subscriber transports: webhook (HTTP
+  POST), WebSocket, and WebSub. The harness sits on the subscriber
+  side; the Hub-protocol negotiation is the upstream's concern.
+- Dapr pub/sub wraps each message in CloudEvents 1.0 by default.
+  Declarative subscriptions (`apiVersion: dapr.io/v2alpha1, kind:
+  Subscription`) live in the `--resources-path` directory and route
+  topic deliveries to HTTP routes on the subscriber app.
+
+**Decision.**
+
+1. **FHIRcast version: STU3 / v3.0.0** (current publish on
+   fhircast.org as of 2026-05-02). The project's commitment to FHIR R5
+   is preserved by carrying R5 Patient resources in the event context
+   (`Patient.resourceType` is invariant across R4/R4B/R5/R6; the
+   identifier shape is wire-stable). Reopen at the FHIR R6 transition
+   ADR if FHIRcast STU4 ships breaking changes.
+
+2. **Event scope: patient-open + patient-close.** Only these two
+   events are in scope for Task 10.3, matching Plan §8.2 row 10.3
+   verbatim. Other FHIRcast events (`encounter-open`,
+   `imagingstudy-open`, `userlogin-*`, `*-update`) are out of scope —
+   reopen as new sub-task 10.3.x splits if Phase 1 surfaces a need
+   (the FHIR axis budget is 4 sub-tasks; allocating 10.3 to two events
+   keeps 10.4 as the close-out lane). The `*-update` and `*-select`
+   sub-events are explicitly NOT routed.
+
+3. **Topology: Hub → Dapr pub/sub → harness subscriber.** The harness
+   is on the subscriber side. A FHIRcast Hub publishes patient-open /
+   patient-close events to a Dapr pub/sub topic; the harness's
+   declarative Dapr Subscription routes each topic to an HTTP route
+   on the harness FastAPI service. This decouples the harness from
+   Hub-protocol negotiation (webhook vs. WebSocket vs. WebSub) — the
+   harness only needs to speak the Dapr CloudEvents-wrapped HTTP POST
+   subscriber convention. Direct webhook ingestion (no Dapr) is
+   supported by the same routes for unit-test ergonomics + a future
+   Hub-direct fallback path; the routes accept both raw FHIRcast
+   notification payloads and CloudEvents-wrapped variants (the
+   handler unwraps `data` if `specversion` is present).
+
+4. **Pub/sub component: reuse `cds-pubsub` (in-memory, Phase 0).**
+   No new Dapr component added. Durable broker (Redis Streams / NATS
+   JetStream) deferred to Phase 1 cloud axis (Task 11.x); the in-memory
+   component is sufficient for the harness-side subscribe contract +
+   smoke gate.
+
+5. **Topic naming: `fhircast.patient-open` and `fhircast.patient-close`.**
+   One Dapr topic per FHIRcast event type. Dotted-form mirrors the
+   FHIRcast event naming convention (`<resource>-<verb>`); the
+   `fhircast.` prefix scopes the namespace below other future Dapr
+   topics. Topic names are constants in
+   `cds_harness.ingest.fhircast` (`TOPIC_PATIENT_OPEN`,
+   `TOPIC_PATIENT_CLOSE`).
+
+6. **Harness routes:**
+
+   | Route                                | Topic                       | Action                                                                              |
+   | ------------------------------------ | --------------------------- | ----------------------------------------------------------------------------------- |
+   | `POST /v1/fhircast/patient-open`     | `fhircast.patient-open`     | Open patient context for `hub.topic`; replace any existing patient on the same topic. |
+   | `POST /v1/fhircast/patient-close`    | `fhircast.patient-close`    | Clear patient context for `hub.topic`; idempotent (close-without-open is a no-op).  |
+
+7. **Event projection (`FHIRcastEvent`).** A frozen Pydantic v2 model
+   with fields: `event_id: str`, `timestamp: str` (RFC 3339, accepts
+   FHIRcast's variable sub-second precision — canonicalized via
+   `canonicalize_utc`), `hub_topic: str`, `hub_event: Literal[
+   "patient-open", "patient-close"]`,
+   `patient_pseudo_id: str`. The `patient_pseudo_id` is extracted from
+   the FHIRcast `context[i].resource.id` where `context[i].key ==
+   "patient"`; multi-patient context arrays raise `FHIRcastError`
+   (single-patient invariant matches ADR-025 §4 §C). Identifiers on
+   the Patient resource are accepted but not surfaced — the
+   pseudo-id is the harness-side stable handle (mirrors ADR-025 §4's
+   patient projection).
+
+   `parse_event(raw, *, expected_event)` is the entry point. It
+   accepts two shapes:
+   * **Raw FHIRcast notification**: `{"timestamp": ..., "id": ...,
+     "event": {"hub.topic": ..., "hub.event": ...,
+     "context": [...]}}`.
+   * **Dapr-wrapped CloudEvent**: `{"specversion": "1.0", "type":
+     ..., "source": ..., "id": ..., "data": <FHIRcast notification>,
+     ...}`. The handler unwraps `data` automatically when
+     `specversion` is present.
+
+   The `hub_event` parameter is asserted against the route — a
+   `patient-close` payload posted to `/v1/fhircast/patient-open`
+   raises `FHIRcastError` (mismatch). This catches Hub-side topic
+   misrouting at the boundary.
+
+8. **Session registry (`FHIRcastSessionRegistry`).** A thread-safe
+   in-process dict keyed by `hub.topic`. The value per session is
+   either `None` (no patient currently in context — initial / post-
+   close state) or a `str` (the open patient's pseudo-id). Operations:
+   * `apply_open(event)` — set `registry[event.hub_topic] =
+     event.patient_pseudo_id`. Replaces any existing patient on the
+     same topic (FHIRcast spec §3.3.1: "the indicated patient is now
+     the current patient in context").
+   * `apply_close(event)` — set `registry[event.hub_topic] = None`.
+     Close-without-open is a no-op (idempotent close — matches
+     FHIRcast spec §3.3.2: "previously open and in context patient
+     chart is no longer open nor in context"). Closing a patient
+     other than the currently-open patient on the same topic is
+     diagnosed but does not raise (Hub-side correctness — the
+     harness's job is to track state, not arbitrate).
+   * `current_patient(hub_topic) -> str | None` — read; lock-held.
+   * `active_topics() -> dict[str, str]` — snapshot of open
+     sessions; copies under lock for thread safety.
+   * `clear()` — wipe registry (test ergonomics; not exposed on the
+     wire).
+
+   Concurrency: `threading.Lock` guarding every read / write. Single-
+   process registry; cluster-wide registry deferred to Phase 1 cloud
+   axis (Task 11.x — when the harness scales out, the registry
+   migrates to a Dapr state store).
+
+9. **No `ClinicalTelemetryPayload` schema bump.** FHIRcast events
+   are session-state-side, not telemetry-payload-side. The Phase 1
+   correlation between an open FHIRcast patient + an incoming
+   telemetry Bundle / CSV is deferred to Task 10.4 close-out — that
+   sub-task threads the open-patient pseudo-id into the harness's
+   `bundle_to_payload` source-override path so that the FHIRcast
+   session state actively drives the canonical patient binding for
+   simultaneous telemetry ingestion. Adding a session-state field to
+   the schema in 10.3 would couple the wire shape to a transient
+   harness-internal concern — rejected.
+
+10. **Dapr declarative subscription
+    (`dapr/components/fhircast-subscriptions.yaml`).**
+    A single YAML file declaring two `apiVersion: dapr.io/v2alpha1,
+    kind: Subscription` resources (one per topic):
+
+    ```
+    apiVersion: dapr.io/v2alpha1
+    kind: Subscription
+    metadata:
+      name: fhircast-patient-open
+    spec:
+      pubsubname: cds-pubsub
+      topic: fhircast.patient-open
+      routes:
+        default: /v1/fhircast/patient-open
+    scopes:
+      - cds-harness
+    ---
+    apiVersion: dapr.io/v2alpha1
+    kind: Subscription
+    metadata:
+      name: fhircast-patient-close
+    spec:
+      pubsubname: cds-pubsub
+      topic: fhircast.patient-close
+      routes:
+        default: /v1/fhircast/patient-close
+    scopes:
+      - cds-harness
+    ```
+
+    Lives alongside `pubsub-inmemory.yaml` in
+    `dapr/components/`. The `scopes` field restricts publish/subscribe
+    to the harness app; future axis-11 services adding subscribers
+    extend the scopes list.
+
+11. **Justfile recipe `fhircast-smoke`.** Boot a standalone harness
+    (no Dapr / no FHIR server required), POST a patient-open + a
+    patient-close (raw FHIRcast notification shape) to the harness
+    routes, assert the session registry transitions correctly via
+    a new `GET /v1/fhircast/sessions` debug endpoint. Same shape as
+    `fhir-pipeline-smoke` (10.2 precedent — harness-side end-to-end
+    without Dapr cluster bring-up; live Hub → Dapr → harness
+    delivery is deferred to Task 10.4 / 11.4 close-out smokes).
+    Smoke runner extracted to `python/scripts/fhircast_smoke.py`
+    (avoids `just`'s shebang-recipe column-zero pitfall).
+
+12. **`GET /v1/fhircast/sessions` debug endpoint.** Returns
+    `{"active": {<hub_topic>: <patient_pseudo_id>}, "phase": 1,
+    "schema_version": "0.1.0"}`. Read-only snapshot; never mutates
+    state. Used by the smoke + by tests to assert state transitions
+    without exposing the registry object across the wire boundary.
+    Justified as a debug surface, not a production API — Phase 1
+    cloud axis migration to a Dapr state store will replace this
+    with the existing state-store invocation API.
+
+13. **No Cargo workspace changes.** The kernel does not see
+    FHIRcast events in 10.3. Cross-language correlation between
+    FHIRcast sessions + canonical telemetry payloads is deferred to
+    Task 10.4 close-out (Python harness side only).
+
+14. **No PHASE flip.** Stays at 1; flip 1 → 2 locked at Task 12.4
+    close-out per ADR-024 §4.
+
+**Consequences.**
+
+- The Phase 1 FHIRcast axis has a discoverable subscriber-side
+  contract: declarative Dapr subscriptions wired; harness routes
+  defined; session registry implemented + thread-safe; smoke recipe
+  green without requiring a live FHIRcast Hub. Task 10.4 inherits
+  the session registry as the patient-binding handle for end-to-end
+  telemetry correlation.
+- FHIRcast Hub implementation is explicitly out of scope. Operators
+  who want a live Hub → harness delivery path stand up any
+  conformant FHIRcast Hub (Medplum, the FHIRcast sandbox at
+  `https://fhircast.org/sandbox`, etc.) and configure it to publish
+  to the `cds-pubsub` Dapr topics. The harness only contracts on
+  the topic names + the FHIRcast notification payload shape.
+- The single-patient invariant on the open-event projection
+  matches ADR-025 §4's Bundle invariant — both ingestion routes
+  (FHIR Bundles + FHIRcast events) bind one patient at a time.
+- The `fhircast-smoke` recipe runs without `.bin/dapr` /
+  `.bin/.hfs/`. Live Hub → Dapr cluster smokes deferred to 10.4 +
+  11.4 (matches the 10.2 precedent of harness-side smoke + live
+  delivery deferred to close-out).
+- The session registry is in-process / single-replica. Scaling the
+  harness across replicas in Phase 1 cloud axis (Task 11.x) requires
+  migrating the registry to a Dapr state store; the
+  `FHIRcastSessionRegistry` interface is shaped to make that swap a
+  drop-in (constructor takes a backing-store callable, defaulting
+  to the in-process dict).
+- Re-Entry Prompt selects Task 10.4 next; the strict §8.2 ordering
+  rule is preserved.
+
+**Alternatives rejected.**
+
+- **Skip FHIRcast; use only FHIR Subscriptions for events.** FHIR
+  Subscriptions deliver resource-create / resource-update events
+  (R5 Subscriptions Backport IG), not collaborative-session events
+  (patient-open is "this user is now looking at this chart", not
+  "the patient resource was created"). FHIRcast is the FHIR-native
+  carrier for collaborative-session events. Skipping it would
+  leave the Phase 0 `events` sidecar without a Phase 1 streaming
+  carrier (ADR-025 §4 explicitly deferred to FHIRcast).
+- **Bundle FHIRcast events into the existing
+  `/v1/fhir/notification` route.** FHIR Subscription notifications
+  are R5 Bundles; FHIRcast events are JSON envelopes around
+  resources. Different schemas — multiplexing them on one route
+  would force runtime discrimination (Bundle vs. FHIRcast-event)
+  on the harness boundary. Two routes is cleaner.
+- **Embed a FHIRcast Hub in the harness.** Out of scope; the
+  harness is a subscriber. The FHIRcast Hub spec includes
+  authentication, lease management, subscription verification,
+  and three transport flavors — all upstream concerns. The
+  research-prototype framing bars implementing a production-grade
+  Hub.
+- **Skip the `fhircast.` topic prefix; use bare event names.**
+  Bare names like `patient-open` collide with future axes that
+  may want to publish their own patient-open semantics (e.g.
+  cloud-axis cluster-state events). The `fhircast.` prefix scopes
+  the namespace.
+- **Use `fhircast-patient-open` (hyphen-separated) instead of
+  `fhircast.patient-open` (dot-separated).** Dapr topics have no
+  hierarchy enforcement — both are valid. Dot-separated is the
+  conventional message-topic style (cf. Dapr docs examples
+  `orderbook.orders`, `fleet.position-updates`); hyphen-only would
+  flatten the namespace.
+- **Implement the registry as a free-function dict + module-level
+  lock.** Class-based with an explicit constructor + lock makes
+  the cluster-wide-state migration in Phase 1 cloud axis a drop-in
+  replacement. A module-level dict couples the registry lifetime
+  to module-import lifetime.
+- **Store the full FHIRcast event in the registry instead of just
+  the patient pseudo-id.** Storing the raw event grows the
+  registry footprint with information the harness doesn't use
+  (timestamp, event_id). Reopen if Task 10.4 surfaces a need to
+  audit-trail every event; for now the projection extracts only
+  what 10.4 will consume.
+- **Make `apply_close` raise on close-without-open.** FHIRcast
+  spec §3.3.2 frames close as the negation of open; idempotent
+  close matches the spec's semantics ("previously open ... is no
+  longer open"). Strict close would force the harness to reject
+  Hub retries / replays. Accept the no-op.
+- **Make `apply_close(other_patient)` raise on patient-id
+  mismatch.** The Hub is the source of truth for sequencing; the
+  harness's role is state-tracking. A mismatch is a Hub-side
+  correctness issue, not a harness-side one. The diagnosis is
+  preserved as a logged warning; the close still wipes the
+  session. Reopen if Phase 1 close-out surfaces a need for
+  stricter contract enforcement.
+- **Skip the `/v1/fhircast/sessions` debug endpoint; expose
+  session state only via `assert_state` test helpers.** A wire-
+  visible snapshot endpoint makes the smoke gate trivially
+  observable + supports future Hub-side validation tools that
+  query the harness for current state. Read-only; no mutation
+  surface added.
+- **Bump `ClinicalTelemetryPayload.source` with an
+  `fhircast_session_topic` field.** Premature — 10.3 doesn't
+  cross-correlate sessions with Bundle ingestion. 10.4 close-out
+  threads the session state through the source-override path
+  without a schema bump; if a wire-visible binding is needed, the
+  bump lands in 10.4's ADR.
+- **Add a Dapr state store binding for the registry now (not
+  Phase 1 cloud axis).** Premature — the in-process registry is
+  sufficient for 10.3's smoke gate + tests. The cloud-axis
+  migration is a focused 11.x sub-task; doing it now would couple
+  Task 10.3 to a Dapr state-store invocation that 10.3's smoke
+  doesn't exercise.
+- **Pin FHIRcast at STU2 (v2.x) instead of STU3 (v3.x).** STU3 is
+  the current published version; the patient-open / patient-close
+  event shape is wire-compatible across STU2 → STU3 (the v3
+  changes touch other events + Hub mechanics). Pin at STU3 to
+  match the current spec.
+- **Wire the live FHIRcast Hub → Dapr → harness smoke in 10.3.**
+  Scope-budget — 10.3 is the harness-subscriber contract;
+  end-to-end Hub → cluster → harness delivery is 10.4 / 11.4
+  close-out scope. Matches the 10.2 precedent (harness-side
+  smoke; live FHIR-server delivery deferred).
+
+---

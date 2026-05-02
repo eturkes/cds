@@ -29,6 +29,7 @@ COMPONENTS_DIR = DAPR_DIR / "components"
 CONFIG_PATH = DAPR_DIR / "config.yaml"
 PUBSUB_PATH = COMPONENTS_DIR / "pubsub-inmemory.yaml"
 STATESTORE_PATH = COMPONENTS_DIR / "state-store-inmemory.yaml"
+FHIRCAST_SUBSCRIPTIONS_PATH = COMPONENTS_DIR / "fhircast-subscriptions.yaml"
 
 DAPR_CLI = REPO_ROOT / ".bin" / "dapr"
 DAPR_INSTALL_DIR = REPO_ROOT / ".bin" / ".dapr"
@@ -38,6 +39,12 @@ DAPRD_BIN = DAPR_INSTALL_DIR / ".dapr" / "bin" / "daprd"
 def _load_yaml(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as fh:
         return yaml.safe_load(fh)
+
+
+def _load_yaml_all(path: Path) -> list[dict]:
+    """Load every document in a multi-document YAML file."""
+    with path.open("r", encoding="utf-8") as fh:
+        return [doc for doc in yaml.safe_load_all(fh) if doc is not None]
 
 
 def test_components_dir_exists() -> None:
@@ -81,8 +88,38 @@ def test_configuration_well_formed() -> None:
 
 
 def test_component_names_unique() -> None:
-    names = [_load_yaml(p)["metadata"]["name"] for p in sorted(COMPONENTS_DIR.glob("*.yaml"))]
-    assert len(names) == len(set(names)), f"duplicate component names: {names}"
+    """Every (kind, metadata.name) tuple across the resources directory is unique.
+
+    The directory carries Component (Phase 0 pubsub + state store) and
+    Subscription (Phase 1 FHIRcast routing — ADR-026 §10) manifests; a
+    multi-doc file is permitted (one YAML file may declare several
+    Subscriptions). Uniqueness is asserted on (kind, name) so that a
+    Component named ``cds-pubsub`` and a Subscription named
+    ``cds-pubsub`` would not collide if they ever coexisted (defensive —
+    Phase 1 keeps them disjoint by topic naming).
+    """
+    seen: list[tuple[str, str]] = []
+    for path in sorted(COMPONENTS_DIR.glob("*.yaml")):
+        for doc in _load_yaml_all(path):
+            kind = doc["kind"]
+            name = doc["metadata"]["name"]
+            seen.append((kind, name))
+    assert len(seen) == len(set(seen)), f"duplicate (kind, name) pairs: {seen}"
+
+
+def test_fhircast_subscription_manifest_well_formed() -> None:
+    """ADR-026 §10 — two Subscriptions routing fhircast topics to harness routes."""
+    docs = _load_yaml_all(FHIRCAST_SUBSCRIPTIONS_PATH)
+    assert len(docs) == 2, f"expected 2 Subscription docs; got {len(docs)}"
+    by_topic = {doc["spec"]["topic"]: doc for doc in docs}
+    assert set(by_topic) == {"fhircast.patient-open", "fhircast.patient-close"}
+    for topic, doc in by_topic.items():
+        assert doc["apiVersion"] == "dapr.io/v2alpha1"
+        assert doc["kind"] == "Subscription"
+        assert doc["spec"]["pubsubname"] == "cds-pubsub"
+        assert doc["scopes"] == ["cds-harness"]
+        suffix = topic.split(".", 1)[1]  # "patient-open" or "patient-close"
+        assert doc["spec"]["routes"]["default"] == f"/v1/fhircast/{suffix}"
 
 
 def test_dapr_cli_present_and_pinned() -> None:

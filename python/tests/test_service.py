@@ -32,6 +32,9 @@ from cds_harness import HARNESS_ID, PHASE
 from cds_harness.schema import SCHEMA_VERSION
 from cds_harness.service import (
     FHIR_NOTIFICATION_PATH,
+    FHIRCAST_PATIENT_CLOSE_PATH,
+    FHIRCAST_PATIENT_OPEN_PATH,
+    FHIRCAST_SESSIONS_PATH,
     HEALTHZ_PATH,
     INGEST_PATH,
     SERVICE_APP_ID,
@@ -100,6 +103,9 @@ def test_constants_match_dapr_app_id() -> None:
     assert SERVICE_APP_ID == "cds-harness"
     assert INGEST_PATH == "/v1/ingest"
     assert FHIR_NOTIFICATION_PATH == "/v1/fhir/notification"
+    assert FHIRCAST_PATIENT_OPEN_PATH == "/v1/fhircast/patient-open"
+    assert FHIRCAST_PATIENT_CLOSE_PATH == "/v1/fhircast/patient-close"
+    assert FHIRCAST_SESSIONS_PATH == "/v1/fhircast/sessions"
     assert TRANSLATE_PATH == "/v1/translate"
     assert HEALTHZ_PATH == "/healthz"
 
@@ -244,6 +250,141 @@ def test_fhir_notification_invalid_bundle_returns_422(client: TestClient) -> Non
     detail = response.json()
     assert detail["error"] == "ingest_error"
     assert "unsupported Bundle.type" in detail["detail"]
+
+
+def _fhircast_open(topic: str, patient: str, *, event_id: str = "evt-1") -> dict[str, Any]:
+    return {
+        "timestamp": "2026-05-02T08:00:00.000000Z",
+        "id": event_id,
+        "event": {
+            "hub.topic": topic,
+            "hub.event": "patient-open",
+            "context": [
+                {
+                    "key": "patient",
+                    "resource": {
+                        "resourceType": "Patient",
+                        "id": patient,
+                        "identifier": [{"system": "urn:cds:test", "value": patient}],
+                    },
+                },
+            ],
+        },
+    }
+
+
+def _fhircast_close(topic: str, patient: str, *, event_id: str = "evt-2") -> dict[str, Any]:
+    return {
+        "timestamp": "2026-05-02T09:00:00.000000Z",
+        "id": event_id,
+        "event": {
+            "hub.topic": topic,
+            "hub.event": "patient-close",
+            "context": [
+                {
+                    "key": "patient",
+                    "resource": {"resourceType": "Patient", "id": patient},
+                },
+            ],
+        },
+    }
+
+
+def test_fhircast_patient_open_applies_to_registry(client: TestClient) -> None:
+    topic = "topic-svc-open-001"
+    patient = "pseudo-svc-001"
+    response = client.post(
+        FHIRCAST_PATIENT_OPEN_PATH, json=_fhircast_open(topic, patient)
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["applied"]["hub_event"] == "patient-open"
+    assert body["applied"]["patient_pseudo_id"] == patient
+    assert body["applied"]["hub_topic"] == topic
+    assert body["current_patient"] == patient
+
+    sessions = client.get(FHIRCAST_SESSIONS_PATH).json()
+    assert sessions["active"][topic] == patient
+    assert sessions["phase"] == PHASE
+    assert sessions["schema_version"] == SCHEMA_VERSION
+
+
+def test_fhircast_patient_close_clears_registry(client: TestClient) -> None:
+    topic = "topic-svc-close-001"
+    patient = "pseudo-svc-002"
+    open_resp = client.post(
+        FHIRCAST_PATIENT_OPEN_PATH, json=_fhircast_open(topic, patient)
+    )
+    assert open_resp.status_code == 200, open_resp.text
+
+    close_resp = client.post(
+        FHIRCAST_PATIENT_CLOSE_PATH, json=_fhircast_close(topic, patient)
+    )
+    assert close_resp.status_code == 200, close_resp.text
+    body = close_resp.json()
+    assert body["applied"]["hub_event"] == "patient-close"
+    assert body["current_patient"] is None
+
+    sessions = client.get(FHIRCAST_SESSIONS_PATH).json()
+    assert topic not in sessions["active"]
+
+
+def test_fhircast_cloudevents_wrapped_unwraps(client: TestClient) -> None:
+    topic = "topic-svc-cloudevent-001"
+    patient = "pseudo-svc-003"
+    wrapped = {
+        "specversion": "1.0",
+        "type": "com.dapr.event.sent",
+        "source": "fhircast-hub",
+        "id": "ce-1",
+        "datacontenttype": "application/json",
+        "data": _fhircast_open(topic, patient, event_id="evt-ce-1"),
+    }
+    response = client.post(FHIRCAST_PATIENT_OPEN_PATH, json=wrapped)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["applied"]["patient_pseudo_id"] == patient
+
+
+def test_fhircast_route_event_mismatch_returns_422(client: TestClient) -> None:
+    """A patient-close payload posted to /patient-open route is a 422."""
+    topic = "topic-svc-mismatch-001"
+    patient = "pseudo-svc-004"
+    response = client.post(
+        FHIRCAST_PATIENT_OPEN_PATH, json=_fhircast_close(topic, patient)
+    )
+    assert response.status_code == 422
+    detail = response.json()
+    assert detail["error"] == "ingest_error"
+    assert "does not match route contract" in detail["detail"]
+
+
+def test_fhircast_invalid_envelope_returns_422(client: TestClient) -> None:
+    response = client.post(
+        FHIRCAST_PATIENT_OPEN_PATH, json={"timestamp": "garbage"}
+    )
+    assert response.status_code == 422
+    detail = response.json()
+    assert detail["error"] == "ingest_error"
+
+
+def test_fhircast_non_object_body_returns_422(client: TestClient) -> None:
+    response = client.post(FHIRCAST_PATIENT_OPEN_PATH, json=["not", "an", "object"])
+    assert response.status_code == 422
+    detail = response.json()
+    assert detail["error"] == "ingest_error"
+    assert "JSON object" in detail["detail"]
+
+
+def test_fhircast_close_without_open_is_idempotent(client: TestClient) -> None:
+    topic = "topic-svc-idem-001"
+    patient = "pseudo-svc-005"
+    response = client.post(
+        FHIRCAST_PATIENT_CLOSE_PATH, json=_fhircast_close(topic, patient)
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["current_patient"] is None
 
 
 def test_translate_happy_path_no_smt_check(client: TestClient) -> None:

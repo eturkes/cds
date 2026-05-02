@@ -422,6 +422,63 @@ fhir-pipeline-smoke:
     [ -f "$smoke_runner" ] || { echo "missing $smoke_runner"; exit 1; }
     uv run python "$smoke_runner" "$fixture" "$notify"
 
+# End-to-end FHIRcast STU3 collaborative-session events → harness session
+# registry smoke (Task 10.3 close-out gate). Boots the standalone Python
+# harness service in the background, POSTs a synthetic patient-open
+# followed by patient-close (raw FHIRcast notification shape, not
+# CloudEvents-wrapped — the route accepts both per ADR-026 §7), and
+# asserts that GET /v1/fhircast/sessions reflects the registry
+# transitions. Decoupled from a live FHIRcast Hub + Dapr cluster — the
+# harness-side end-to-end exercise is sufficient for 10.3; live Hub →
+# Dapr → harness delivery is 10.4 / 11.4 close-out scope (ADR-026 §11).
+# No external binaries required (python is always present per
+# env-verify).
+fhircast-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo="{{ justfile_directory() }}"
+    mkdir -p target
+    pid_file="$repo/target/cds-harness-fhircast-smoke.pid"
+    log_file="$repo/target/cds-harness-fhircast-smoke.log"
+    pick_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
+    port=$(pick_port)
+    cleanup() {
+        if [ -f "$pid_file" ]; then
+            pid=$(cat "$pid_file")
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -TERM "$pid" 2>/dev/null || true
+                for _ in $(seq 1 50); do
+                    kill -0 "$pid" 2>/dev/null || break
+                    sleep 0.1
+                done
+                if kill -0 "$pid" 2>/dev/null; then
+                    kill -KILL "$pid" 2>/dev/null || true
+                fi
+            fi
+            rm -f "$pid_file"
+        fi
+    }
+    trap cleanup EXIT INT TERM
+    CDS_HARNESS_HOST=127.0.0.1 CDS_HARNESS_PORT=$port \
+        nohup uv run python -m cds_harness.service \
+        > "$log_file" 2>&1 < /dev/null &
+    echo $! > "$pid_file"
+    echo "→ harness boot: pid=$(cat "$pid_file") port=$port log=$log_file"
+    healthz="http://127.0.0.1:$port/healthz"
+    base="http://127.0.0.1:$port"
+    for _ in $(seq 1 80); do
+        if curl -sf "$healthz" >/dev/null; then break; fi
+        sleep 0.25
+    done
+    if ! curl -sf "$healthz" >/dev/null; then
+        echo "smoke fail: harness /healthz never came up"
+        tail -40 "$log_file" || true
+        exit 1
+    fi
+    smoke_runner="$repo/python/scripts/fhircast_smoke.py"
+    [ -f "$smoke_runner" ] || { echo "missing $smoke_runner"; exit 1; }
+    uv run python "$smoke_runner" "$base"
+
 # =============================================================================
 # Dapr 1.17 — slim self-hosted polyglot orchestration (Phase 0, Task 8)
 # =============================================================================
