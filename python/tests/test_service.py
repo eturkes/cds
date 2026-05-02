@@ -31,6 +31,7 @@ from fastapi.testclient import TestClient
 from cds_harness import HARNESS_ID, PHASE
 from cds_harness.schema import SCHEMA_VERSION
 from cds_harness.service import (
+    FHIR_NOTIFICATION_PATH,
     HEALTHZ_PATH,
     INGEST_PATH,
     SERVICE_APP_ID,
@@ -56,6 +57,7 @@ def _project_root() -> Path:
 REPO_ROOT = _project_root()
 SAMPLE_DIR = REPO_ROOT / "data" / "sample"
 GUIDELINES_DIR = REPO_ROOT / "data" / "guidelines"
+FHIR_DIR = REPO_ROOT / "data" / "fhir"
 HYPOXEMIA_TXT = GUIDELINES_DIR / "hypoxemia-trigger.txt"
 HYPOXEMIA_RECORDED = GUIDELINES_DIR / "hypoxemia-trigger.recorded.json"
 CONTRADICTORY_TXT = GUIDELINES_DIR / "contradictory-bound.txt"
@@ -63,6 +65,7 @@ CONTRADICTORY_RECORDED = GUIDELINES_DIR / "contradictory-bound.recorded.json"
 ICU_CSV = SAMPLE_DIR / "icu-monitor-01.csv"
 ICU_META = SAMPLE_DIR / "icu-monitor-01.meta.json"
 ICU_JSON = SAMPLE_DIR / "icu-monitor-02.json"
+FHIR_BUNDLE_02 = FHIR_DIR / "icu-monitor-02.observations.json"
 
 DAPR_DIR = REPO_ROOT / "dapr"
 COMPONENTS_DIR = DAPR_DIR / "components"
@@ -96,6 +99,7 @@ def test_healthz_reports_phase0(client: TestClient) -> None:
 def test_constants_match_dapr_app_id() -> None:
     assert SERVICE_APP_ID == "cds-harness"
     assert INGEST_PATH == "/v1/ingest"
+    assert FHIR_NOTIFICATION_PATH == "/v1/fhir/notification"
     assert TRANSLATE_PATH == "/v1/translate"
     assert HEALTHZ_PATH == "/healthz"
 
@@ -188,6 +192,58 @@ def test_ingest_csv_missing_source_returns_422(client: TestClient) -> None:
 def test_ingest_unknown_format_rejected(client: TestClient) -> None:
     response = client.post(INGEST_PATH, json={"format": "yaml", "envelope": {}})
     assert response.status_code == 422  # discriminator mismatch
+
+
+def test_fhir_notification_collection_round_trips(client: TestClient) -> None:
+    bundle = json.loads(FHIR_BUNDLE_02.read_text(encoding="utf-8"))
+    response = client.post(FHIR_NOTIFICATION_PATH, json={"bundle": bundle})
+    assert response.status_code == 200, response.text
+    payload = response.json()["payload"]
+    assert payload["schema_version"] == SCHEMA_VERSION
+    assert payload["source"]["device_id"] == "fhir:icu-monitor-02"
+    assert payload["source"]["patient_pseudo_id"] == "pseudo-def456"
+    assert len(payload["samples"]) == 2
+    assert list(payload["samples"][0]["vitals"].keys()) == ["heart_rate_bpm", "spo2_percent"]
+
+
+def test_fhir_notification_subscription_skips_status(client: TestClient) -> None:
+    """A FHIR R5 notification Bundle (entry[0] = SubscriptionStatus) projects fine."""
+    coll = json.loads(FHIR_BUNDLE_02.read_text(encoding="utf-8"))
+    notification = {
+        "resourceType": "Bundle",
+        "id": "ntfn-svc-test",
+        "type": "subscription-notification",
+        "entry": [
+            {
+                "fullUrl": "urn:uuid:status",
+                "resource": {
+                    "resourceType": "SubscriptionStatus",
+                    "status": "active",
+                    "type": "event-notification",
+                    "subscription": {"reference": "Subscription/sub-icu-01"},
+                    "topic": "http://example.org/SubscriptionTopic/icu-vitals",
+                },
+            },
+            *coll["entry"],
+        ],
+    }
+    response = client.post(FHIR_NOTIFICATION_PATH, json={"bundle": notification})
+    assert response.status_code == 200, response.text
+    payload = response.json()["payload"]
+    assert payload["source"]["device_id"] == "fhir:ntfn-svc-test"
+    assert payload["source"]["patient_pseudo_id"] == "pseudo-def456"
+    assert len(payload["samples"]) == 2
+
+
+def test_fhir_notification_invalid_bundle_returns_422(client: TestClient) -> None:
+    response = client.post(
+        FHIR_NOTIFICATION_PATH,
+        json={"bundle": {"resourceType": "Bundle", "type": "transaction"}},
+    )
+    assert response.status_code == 422
+    detail = response.json()
+    assert detail["error"] == "ingest_error"
+    assert "unsupported Bundle.type" in detail["detail"]
 
 
 def test_translate_happy_path_no_smt_check(client: TestClient) -> None:

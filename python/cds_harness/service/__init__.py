@@ -7,6 +7,11 @@ Dapr sidecar (Task 8) can drive them via service-invocation:
 * ``POST /v1/ingest`` — validate + canonicalize a
   :class:`~cds_harness.schema.ClinicalTelemetryPayload` envelope or an
   in-memory CSV body.
+* ``POST /v1/fhir/notification`` — accept a FHIR R5 ``Bundle`` (either
+  ``type="collection"`` or ``type="subscription-notification"``) and
+  project it into a :class:`~cds_harness.schema.ClinicalTelemetryPayload`
+  via :func:`cds_harness.ingest.bundle_to_payload` (Task 10.2; ADR-025
+  §4).
 * ``POST /v1/translate`` — lift a guideline ``(doc_id, text, root)`` into
   an :class:`~cds_harness.schema.OnionLIRTree` and lower it to an
   :class:`~cds_harness.schema.SmtConstraintMatrix`.
@@ -22,6 +27,7 @@ from __future__ import annotations
 from cds_harness.service.app import (
     DEFAULT_HOST,
     DEFAULT_PORT,
+    FHIR_NOTIFICATION_PATH,
     HEALTHZ_PATH,
     HOST_ENV,
     INGEST_PATH,
@@ -36,6 +42,7 @@ from cds_harness.service.app import (
 __all__ = [
     "DEFAULT_HOST",
     "DEFAULT_PORT",
+    "FHIR_NOTIFICATION_PATH",
     "HEALTHZ_PATH",
     "HOST_ENV",
     "INGEST_PATH",

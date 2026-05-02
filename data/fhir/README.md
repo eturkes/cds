@@ -2,9 +2,12 @@
 
 This directory carries the canonical FHIR R5 `Observation` Bundles
 that mirror the Phase 0 `data/sample/icu-monitor-*.{csv,json}`
-telemetry samples. Tasks 10.2 (FHIR Subscriptions) and 10.3
-(FHIRcast) consume them through the harness ingestion adapter
-defined by **ADR-025** §4.
+telemetry samples. **Task 10.2** (FHIR Subscriptions) consumes them
+through `cds_harness.ingest.bundle_to_payload` — wired into the
+harness FastAPI service at `POST /v1/fhir/notification`. **Task 10.3**
+(FHIRcast) will route patient-open / patient-close events through
+Dapr pub/sub later. The projection contract is locked by **ADR-025
+§4**.
 
 The Phase 0 local CSV/JSON ingestion path under `data/sample/`
 remains authoritative for regression — these fixtures are
@@ -21,6 +24,14 @@ Each file is a FHIR R5 `Bundle` with `type = "collection"`. Each
 `entry.resource` is a single-vital `Observation` carrying the LOINC
 code, UCUM unit, decimal value, RFC 3339 `effectiveDateTime`, and a
 `subject.reference` to the patient pseudo-ID.
+
+`cds_harness.ingest.bundle_to_payload` also accepts the FHIR R5
+Subscriptions Backport notification shape — `Bundle.type =
+"subscription-notification"` with a `SubscriptionStatus` resource at
+`entry[0]`. The status entry is skipped; the remaining
+`Observation` entries project as in the `collection` case. The
+`fhir-pipeline-smoke` Justfile recipe exercises this end-to-end
+against a live `cds-harness` service (no FHIR server required).
 
 ## Locked LOINC mapping (`vital_key` ↔ LOINC ↔ UCUM)
 

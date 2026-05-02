@@ -31,8 +31,20 @@ class UnknownVitalError(IngestError):
     """Raised when a vital column or key is outside the canonical namespace."""
 
 
+class FHIRBundleError(IngestError):
+    """Raised on any malformed / out-of-contract FHIR R5 Observation Bundle.
+
+    Phase 1 (Task 10.2). Covers structural Bundle violations (wrong type,
+    empty entries, multi-patient), Observation projection failures (LOINC
+    not in locked table, UCUM mismatch, missing valueQuantity), and the
+    single-vital-per-timestamp uniqueness invariant. See ADR-025 §4 for
+    the full projection contract.
+    """
+
+
 __all__ = [
     "DuplicateMonotonicError",
+    "FHIRBundleError",
     "IngestError",
     "InvalidTimestampError",
     "MalformedCsvError",

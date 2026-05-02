@@ -26,7 +26,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from cds_harness import HARNESS_ID, PHASE
-from cds_harness.ingest import IngestError, load_csv_text, load_json_envelope
+from cds_harness.ingest import (
+    IngestError,
+    bundle_to_payload,
+    load_csv_text,
+    load_json_envelope,
+)
 from cds_harness.schema import (
     SCHEMA_VERSION,
     ClinicalTelemetryPayload,
@@ -45,6 +50,7 @@ from cds_harness.translate import (
 SERVICE_APP_ID: Final[str] = "cds-harness"
 HEALTHZ_PATH: Final[str] = "/healthz"
 INGEST_PATH: Final[str] = "/v1/ingest"
+FHIR_NOTIFICATION_PATH: Final[str] = "/v1/fhir/notification"
 TRANSLATE_PATH: Final[str] = "/v1/translate"
 DEFAULT_HOST: Final[str] = "127.0.0.1"
 DEFAULT_PORT: Final[int] = 8081
@@ -103,6 +109,25 @@ _IngestRequest = Annotated[
 
 class _IngestResponse(BaseModel):
     payload: ClinicalTelemetryPayload
+
+
+class _FHIRNotificationRequest(_StrictModel):
+    """FHIR R5 Subscription notification (or canonical collection) Bundle.
+
+    The harness accepts both the FHIR R5 Subscriptions Backport
+    notification shape (``Bundle.type = "subscription-notification"``,
+    ``entry[0]`` is a ``SubscriptionStatus``) and the 10.1 canonical
+    collection shape (``Bundle.type = "collection"``); the projection
+    logic in :func:`cds_harness.ingest.bundle_to_payload` dispatches on
+    ``Bundle.type``. ADR-025 §4 fixes the projection contract.
+    """
+
+    bundle: dict[str, Any] = Field(
+        ...,
+        description=(
+            "FHIR R5 Bundle JSON — type is 'collection' or 'subscription-notification'."
+        ),
+    )
 
 
 class _TranslateRequest(_StrictModel):
@@ -165,6 +190,11 @@ def _ingest(payload: _IngestRequest) -> _IngestResponse:
     return _IngestResponse(payload=canonical)
 
 
+def _fhir_notification(request: _FHIRNotificationRequest) -> _IngestResponse:
+    payload = bundle_to_payload(request.bundle)
+    return _IngestResponse(payload=payload)
+
+
 def _translate(request: _TranslateRequest) -> _TranslateResponse:
     adapter = _InlineAdapter(root=request.root)
     tree = translate_guideline(
@@ -217,6 +247,17 @@ def create_app() -> FastAPI:
         except Exception as exc:  # pragma: no cover — defensive boundary
             raise HTTPException(status_code=500, detail=f"unexpected: {exc}") from exc
 
+    @app.post(FHIR_NOTIFICATION_PATH, response_model=_IngestResponse)
+    async def fhir_notification(
+        request: _FHIRNotificationRequest,
+    ) -> _IngestResponse:
+        try:
+            return _fhir_notification(request)
+        except IngestError:
+            raise
+        except Exception as exc:  # pragma: no cover — defensive boundary
+            raise HTTPException(status_code=500, detail=f"unexpected: {exc}") from exc
+
     @app.post(TRANSLATE_PATH, response_model=_TranslateResponse)
     async def translate(request: _TranslateRequest) -> _TranslateResponse:
         try:
@@ -232,6 +273,7 @@ def create_app() -> FastAPI:
 __all__ = [
     "DEFAULT_HOST",
     "DEFAULT_PORT",
+    "FHIR_NOTIFICATION_PATH",
     "HEALTHZ_PATH",
     "INGEST_PATH",
     "SERVICE_APP_ID",

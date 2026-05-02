@@ -361,6 +361,67 @@ fhir-smoke:
     done
     echo "✓ fhir-smoke: $n Observations round-tripped through $base"
 
+# End-to-end FHIR R5 Subscription notification → harness ingest smoke
+# (Task 10.2 close-out gate). Boots the standalone Python harness
+# service in the background, POSTs the canonical icu-monitor-02
+# Bundle wrapped as a FHIR R5 Subscriptions Backport
+# `subscription-notification` Bundle (entry[0] = SubscriptionStatus)
+# to /v1/fhir/notification, and asserts the projected
+# ClinicalTelemetryPayload matches the locked LOINC / UCUM contract
+# (ADR-025 §4). Decoupled from hfs's actual subscription delivery —
+# v0.1.47's R5 Subscription support is unverified, so the smoke
+# exercises the harness side end-to-end and treats the live FHIR
+# server delivery as 10.4 close-out scope. No external binaries
+# required (python is always present per env-verify).
+fhir-pipeline-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo="{{ justfile_directory() }}"
+    fixture="$repo/data/fhir/icu-monitor-02.observations.json"
+    [ -f "$fixture" ] || { echo "fixture missing: $fixture"; exit 1; }
+    mkdir -p target
+    pid_file="$repo/target/cds-harness-fhir-smoke.pid"
+    log_file="$repo/target/cds-harness-fhir-smoke.log"
+    pick_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
+    port=$(pick_port)
+    cleanup() {
+        if [ -f "$pid_file" ]; then
+            pid=$(cat "$pid_file")
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -TERM "$pid" 2>/dev/null || true
+                for _ in $(seq 1 50); do
+                    kill -0 "$pid" 2>/dev/null || break
+                    sleep 0.1
+                done
+                if kill -0 "$pid" 2>/dev/null; then
+                    kill -KILL "$pid" 2>/dev/null || true
+                fi
+            fi
+            rm -f "$pid_file"
+        fi
+    }
+    trap cleanup EXIT INT TERM
+    CDS_HARNESS_HOST=127.0.0.1 CDS_HARNESS_PORT=$port \
+        nohup uv run python -m cds_harness.service \
+        > "$log_file" 2>&1 < /dev/null &
+    echo $! > "$pid_file"
+    echo "→ harness boot: pid=$(cat "$pid_file") port=$port log=$log_file"
+    healthz="http://127.0.0.1:$port/healthz"
+    notify="http://127.0.0.1:$port/v1/fhir/notification"
+    for _ in $(seq 1 80); do
+        if curl -sf "$healthz" >/dev/null; then break; fi
+        sleep 0.25
+    done
+    if ! curl -sf "$healthz" >/dev/null; then
+        echo "smoke fail: harness /healthz never came up"
+        tail -40 "$log_file" || true
+        exit 1
+    fi
+    # Wrap the canonical collection Bundle as a subscription-notification.
+    smoke_runner="$repo/python/scripts/fhir_pipeline_smoke.py"
+    [ -f "$smoke_runner" ] || { echo "missing $smoke_runner"; exit 1; }
+    uv run python "$smoke_runner" "$fixture" "$notify"
+
 # =============================================================================
 # Dapr 1.17 — slim self-hosted polyglot orchestration (Phase 0, Task 8)
 # =============================================================================

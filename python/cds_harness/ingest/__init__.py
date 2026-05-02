@@ -20,12 +20,14 @@ from cds_harness.ingest.canonical import CANONICAL_VITALS
 from cds_harness.ingest.csv_loader import load_csv, load_csv_text
 from cds_harness.ingest.errors import (
     DuplicateMonotonicError,
+    FHIRBundleError,
     IngestError,
     InvalidTimestampError,
     MalformedCsvError,
     MissingMetadataError,
     UnknownVitalError,
 )
+from cds_harness.ingest.fhir_observation import bundle_to_payload
 from cds_harness.ingest.json_loader import load_json, load_json_envelope
 from cds_harness.ingest.loader import discover_payloads
 from cds_harness.ingest.timestamps import canonicalize_utc, parse_utc_timestamp
@@ -33,11 +35,13 @@ from cds_harness.ingest.timestamps import canonicalize_utc, parse_utc_timestamp
 __all__ = [
     "CANONICAL_VITALS",
     "DuplicateMonotonicError",
+    "FHIRBundleError",
     "IngestError",
     "InvalidTimestampError",
     "MalformedCsvError",
     "MissingMetadataError",
     "UnknownVitalError",
+    "bundle_to_payload",
     "canonicalize_utc",
     "discover_payloads",
     "load_csv",
