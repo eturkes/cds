@@ -41,6 +41,15 @@ from cds_harness.workflow.activities import (
     solve_activity,
     translate_activity,
 )
+from cds_harness.workflow.fhir_axis import (
+    assert_muc_topology,
+    build_patient_close_event,
+    build_patient_open_event,
+    build_subscription_notification,
+    collect_atom_spans,
+    iter_observation_entries,
+    parse_muc_entry,
+)
 from cds_harness.workflow.pipeline import (
     WORKFLOW_NAME,
     PipelineInput,
@@ -62,8 +71,15 @@ __all__ = [
     "WORKFLOW_NAME",
     "PipelineInput",
     "WorkflowActivityError",
+    "assert_muc_topology",
+    "build_patient_close_event",
+    "build_patient_open_event",
+    "build_subscription_notification",
+    "collect_atom_spans",
     "deduce_activity",
     "ingest_activity",
+    "iter_observation_entries",
+    "parse_muc_entry",
     "pipeline_workflow",
     "recheck_activity",
     "register_activities",

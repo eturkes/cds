@@ -6,10 +6,129 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 10.3 — FHIRcast collaborative-session events → Dapr pub/sub. Routes FHIRcast STU3 `patient-open` / `patient-close` events from a FHIRcast Hub through Dapr pub/sub into the harness, restoring the `events` sidecar fidelity that ADR-025 §4 deferred from 10.1/10.2. New `cds_harness.ingest.fhircast` module: `parse_event(raw, *, expected_event)` projects a FHIRcast notification — accepts both **raw** (`{timestamp, id, event: {hub.topic, hub.event, context: [{key: "patient", resource: <Patient>}]}}`) and **CloudEvents 1.0-wrapped** shapes (detects `specversion` key, unwraps `data`); validates envelope, hub.topic, hub.event ∈ {`patient-open`, `patient-close`}, single-patient context, `Patient.resourceType="Patient"` + non-empty `Patient.id`; route-event mismatch raises `FHIRcastError`. Returns frozen `FHIRcastEvent` Pydantic v2 model (fields: `event_id`, `timestamp` canonicalized to µs UTC `Z`, `hub_topic`, `hub_event`, `patient_pseudo_id`). Thread-safe in-process `FHIRcastSessionRegistry` keyed by `hub.topic` with `apply_open` (replaces — STU3 §3.3.1), `apply_close` (idempotent — STU3 §3.3.2), `current_patient`, `active_topics` (snapshot copy), `clear` — guarded by `threading.Lock`; cluster-state migration deferred to Phase 1 cloud axis Task 11.x. New `FHIRcastError(IngestError)` covers every contract violation. New endpoints `POST /v1/fhircast/patient-open` / `POST /v1/fhircast/patient-close` (raw-JSON-body parsers handling both wire shapes) + `GET /v1/fhircast/sessions` (debug snapshot). New Dapr declarative subscriptions `dapr/components/fhircast-subscriptions.yaml` (multi-doc YAML, `apiVersion: dapr.io/v2alpha1, kind: Subscription`, two docs — one per topic — both bound to `cds-pubsub`, scoped to `cds-harness`); locked topic naming `fhircast.patient-open` / `fhircast.patient-close`. New `fhircast-smoke` Justfile recipe + `python/scripts/fhircast_smoke.py` runner — boots standalone `cds-harness` (no Dapr/Hub deps), POSTs synthetic patient-open + patient-close, asserts `GET /v1/fhircast/sessions` reflects state correctly. Web-search executed at decision time (Plan §10 step 4): `"State of the art FHIRcast 2026 specification version"` + `"FHIRcast STU3 patient-open patient-close event JSON shape"` + `"Dapr pub/sub CloudEvents 1.0 declarative subscription FHIRcast 2026"` — confirmed FHIRcast STU3 (v3.0.0) as current published version, locked dual-shape acceptance (raw + CloudEvents-wrapped) since Dapr defaults to CloudEvents wrapping. Final gate (all green): `uv run pytest -q` → **173 pass + 1 Kimina-skipped** (32 new fhircast tests + 7 new service-endpoint tests + foundation YAML multi-doc rewrite); `uv run ruff check .` clean; `cargo test --workspace --lib --bins --quiet` → 130+3 pass (no Rust touchpoints); `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all -- --check` clean; `just env-verify` clean; `just fhircast-smoke` exits 0 with `✓ fhircast-smoke: patient-open → patient-close → registry OK`; `just fhir-pipeline-smoke` (regression check) still green. Decisions captured in **ADR-026 — FHIRcast topology + STU3 spec lock + dual-shape projection contract**. **No PHASE flip** (1 → 2 deferred to Task 12.4 per ADR-024 §4). **No Cargo workspace changes**.
-- **Next up:** **Task 10.4 — FHIR streaming axis close-out — end-to-end FHIR → canonical `contradictory-bound` smoke.** Closes the FHIR axis (10.1–10.4) by chaining the bring-up established in 10.1 (hfs server + canonical Observation fixtures), the Subscriptions ingestion path locked in 10.2 (`POST /v1/fhir/notification`), and the FHIRcast session events locked in 10.3 (`POST /v1/fhircast/patient-{open,close}`) into a single end-to-end live-cluster smoke against the canonical `contradictory-bound` fixture. Expected to: (a) introduce a `fhir-axis-smoke` Justfile recipe that boots `hfs` + Dapr cluster + `cds-harness` + `cds-kernel`, posts the Phase 0 contradictory-bound CSV through the FHIR boundary (CSV → Observations + FHIRcast session events → harness Workflow → kernel verification trace) and asserts the same UNSAT MUC topologically maps back to `Atom.source_span`; (b) consider opening a kernel-side FHIR types crate (`fhirbolt`, locked-but-not-added by ADR-025 §3) if a kernel-side consumer emerges; (c) flip Plan §8.2 row 10.4 to DONE and close the FHIR axis. Bound by Plan §10 step 4 web-search at decision time for live hfs R5 Subscription delivery semantics + any 2026 SOTA shifts on Dapr Workflow + FHIR boundary patterns.
+- **Last completed:** Task 10.4 — FHIR streaming axis close-out. Single fused `python -m cds_harness.workflow run-fhir-pipeline` runner inside `dapr run --app-id cds-workflow` chains the three FHIR axis contracts (10.1 collection Bundle fixture / 10.2 `/v1/fhir/notification` projection / 10.3 `/v1/fhircast/patient-{open,close}` registry) end-to-end on a live Dapr cluster against the canonical `contradictory-bound` guideline. Pure helpers landed in `cds_harness.workflow.fhir_axis` (`build_subscription_notification`, `build_patient_open_event`, `build_patient_close_event`, `parse_muc_entry`, `collect_atom_spans`, `assert_muc_topology`, `iter_observation_entries` — no network / no fs / no daprd dep); orchestrator (`__main__.py:_run_fhir_pipeline_cmd`) owns httpx + WorkflowRuntime side-effects. Routes `/v1/fhir/notification` + `/v1/fhircast/patient-{open,close,sessions}` via daprd at `http://127.0.0.1:$DAPR_HTTP_PORT/v1.0/invoke/cds-harness/method<path>` (HTTP service-invocation; no typed Dapr SDK helper). Constraint **C4** enforced end-to-end via `assert_muc_topology` — walks `envelope.ir.root` OnionL tree, collects predicate-atom spans (skipping `predicate=="literal"`), then asserts every `trace.muc` entry parses as `atom:<doc_id>:<start>-<end>` and resolves to a known span. New Justfile recipe `fhir-axis-smoke` mirrors `dapr-pipeline` topology verbatim (placement+scheduler + cds-harness + cds-kernel + cds-workflow runner; reverse-order teardown; readiness gate on app `/healthz` + daprd `/v1.0/healthz`). `_build_input` factored into `_resolve_recorded_path` + `_resolve_kimina_url` + `_build_workflow_spec` so `run-pipeline` and `run-fhir-pipeline` share the workflow-spec construction. New `_schedule_and_wait` + `_check_envelope_assertions` helpers de-duplicate the workflow client + assert lattice between the two subcommands. Web-searches at decision time (Plan §10 step 4): `"State of the art Dapr Workflow FHIR boundary 2026 service invocation httpx daprd"` + `"FHIR R5 Subscriptions Backport IG live server delivery latency 2026 conformance"` + `"hfs HeliosSoftware FHIR R5 Subscription topic publish webhook 2026"` — confirmed httpx-direct via `DAPR_HTTP_PORT` is the cleanest service-invocation path; live `hfs` Subscription delivery re-deferred to **11.4** (cloud axis) since its 10.1 R5 Subscription support is upstream-unverified and the cloud-axis topology (Kubernetes + durable broker) is the natural seam to introduce a real-server publish path. `fhirbolt` Cargo dep stays deferred — no kernel-side FHIR consumer emerged in 10.4; ADR-025 §3's reopen trigger is **closed without action**. Final gate (offline only, live cluster gated): `uv run pytest -q` → **191 pass + 1 Kimina-skipped** (18 new `test_fhir_axis.py` cases — wraps non-collection rejection, empty-collection rejection, observation-entries iteration, patient-open/close envelope, empty pseudo-id rejection, MUC parse canonical/malformed/inverted-span, atom-span collection skip-literals/include-literals, MUC topology canonical/unknown-span/doc-mismatch/empty-list/missing-ir/non-string-entry); `uv run ruff check .` → clean (4 errors fixed mid-flight: 1 E501 + 1 ANN401 + 2 RUF043); `just --list` → `fhir-axis-smoke` registered with the canonical `Requires .bin/dapr + slim runtime + .bin/{z3,cvc5} + reachable $CDS_KIMINA_URL.` description; `cargo check --workspace --quiet` → clean (no Rust touchpoints in 10.4). `just fhir-axis-smoke` is the live-cluster gate (gated on `.bin/dapr` + `.bin/{z3,cvc5}` + `$CDS_KIMINA_URL` — same gate as `dapr-pipeline`). Decisions captured in **ADR-027 — FHIR axis close-out: end-to-end notification → Workflow → MUC topology smoke**. **FHIR axis closed** (10.1+10.2+10.3+10.4 all DONE). **No PHASE flip** (1 → 2 deferred to Task 12.4 per ADR-024 §4). **No Cargo workspace changes**.
+- **Next up:** **Task 11.1 — Cloud foundation.** Opens Phase 1's cloud axis: Kubernetes manifests + `kind` local cluster bootstrap + Dapr helm chart pin. Per ADR-024 §6 this is the first sub-task of the cloud axis and lands its own architectural lock — now **ADR-028** (numbering shifted; see ADR-027 §10 ordering note). Bound by Plan §10 step 4 web-search at decision time for: `kind` 2026 release pin, Dapr 1.17+ helm chart cadence + manifest layout, OpenTelemetry Collector / Prometheus / Grafana 2026 SOTA. The placement+scheduler binaries staged by `just fetch-dapr` will need replacing with helm-managed control-plane on the Kubernetes side; the slim self-hosted recipes (`dapr-cluster-up` / `dapr-pipeline` / `fhir-axis-smoke`) stay as the fast local-dev path.
 
-> **Phase 1 axis 10 (FHIR) progress: 10.1 + 10.2 + 10.3 DONE / 10.4 TODO.** The strict §8.2 ordering rule selects `10.4` next. PHASE constants stay at 1 across Phase 1 and flip 1 → 2 at Task 12.4 close-out (ADR-024 §4).
+> **Phase 1 axis 10 (FHIR) progress: 10.1 + 10.2 + 10.3 + 10.4 DONE — FHIR axis CLOSED.** The strict §8.2 ordering rule selects `11.1` next. PHASE constants stay at 1 across Phase 1 and flip 1 → 2 at Task 12.4 close-out (ADR-024 §4).
+>
+> **ADR numbering drift (recorded for future sessions):** ADR-024 §6 pre-allocated ADR-026 → Task 11.1 and ADR-027 → Task 12.1. Actual landing has been sequential-by-task: ADR-026 was consumed by Task 10.3 (FHIRcast); ADR-027 was consumed by Task 10.4 (close-out). Cloud foundation (11.1) → ADR-028; ZK toolchain (12.1) → ADR-029. Sequential-by-task numbering is simpler than pre-reserved-by-axis; ADR-024 is *not* back-edited (its pre-allocation reads as planning intent, not contract).
+
+## Session 2026-05-04 — Task 10.4 close-out (ADR-027) — FHIR axis CLOSED
+
+Closed the Phase 1 FHIR axis (10.1+10.2+10.3+10.4). Task 10.4 chains
+the three preceding contracts end-to-end against the canonical
+`contradictory-bound` UNSAT fixture on a live Dapr cluster, with a
+single fused workflow runner inside `dapr run --app-id cds-workflow`.
+
+**Web-searches executed at decision time** (Plan §10 step 4):
+- `"State of the art Dapr Workflow FHIR boundary 2026 service invocation httpx daprd"` — confirmed `DAPR_HTTP_PORT` env injection by `dapr run` + the standard `/v1.0/invoke/<app-id>/method<path>` HTTP form.
+- `"FHIR R5 Subscriptions Backport IG live server delivery latency 2026 conformance"` — no SOTA shifts since ADR-025; Backport IG v1.2.0 still the wire contract.
+- `"hfs HeliosSoftware FHIR R5 Subscription topic publish webhook 2026"` — `hfs` v0.1.47's R5 Subscription delivery is upstream-unverified; live publish re-deferred to 11.4.
+
+**Why one fused runner (not three stitched smokes).** Stitching
+`fhir-pipeline-smoke` → `fhircast-smoke` → `dapr-pipeline` does not
+exercise the patient-pseudo-id binding from notification → FHIRcast →
+workflow. The fused runner threads the projected `patient_pseudo_id`
+from the harness's `/v1/fhir/notification` response through the
+synthetic FHIRcast `patient-open` event, matching ADR-026's session-
+registry cross-axis correlation contract. One ✓ line at the end —
+matches the `dapr-pipeline` operator-experience precedent.
+
+**Why pure helpers split into `cds_harness.workflow.fhir_axis`.**
+Pure data transforms (no network / no fs / no daprd dep) keep the
+unit tests deterministic across CI environments. The 18 offline
+tests under `python/tests/test_fhir_axis.py` run on every box
+regardless of `.bin/dapr` / `$CDS_KIMINA_URL` availability —
+mirrors the 10.2/10.3 split between offline data-shape tests +
+recipe-gated live-cluster smoke. Orchestrator (`__main__.py`) owns
+the httpx + WorkflowRuntime side-effects.
+
+**Why HTTP service-invocation through daprd, not the typed Dapr SDK
+helper.** `httpx` is already a transitive dep (FastAPI test client
++ `dapr-ext-workflow`); the typed Python SDK service-invocation
+surface is gRPC-only and would force a second sidecar wiring just
+for the FHIR axis routes. The `_dapr_invoke_url` helper centralizes
+URL construction + `DAPR_HTTP_PORT` read-or-bail discipline. Matches
+the Phase 0 `dapr-pipeline` precedent (which uses neither — it
+routes through the WorkflowRuntime gRPC + activities).
+
+**Why MUC topology check inside the runner (not inside the kernel).**
+Constraint **C4** ("every contradiction triggers topological mapping
+back to its offending textual node") was covered inside the kernel's
+evaluator in Phase 0; the FHIR axis adds a new ingestion path, so
+the boundary needs its own end-to-end protection. `assert_muc_topology`
+walks `envelope.ir.root`, collects predicate-atom spans (skipping
+`predicate=="literal"` per ADR-012 §6's `_atom_provenance` rule),
+then asserts every `trace.muc` entry parses as
+`atom:<doc_id>:<start>-<end>` and resolves to a known span. The IR
+tree comes from the same workflow envelope as the MUC list, so the
+check is closed-loop on a single data structure — no cross-process
+correlation needed.
+
+**Why default fixture `icu-monitor-02.observations.json` (4 entries,
+not `icu-monitor-01.observations.json` 12 entries).** The smaller
+fixture is sufficient to drive the projection contract; the
+`contradictory-bound.txt` guideline is the canonical UNSAT (the
+`dapr-pipeline` recipe already uses it). Both override-able via
+`FHIR_AXIS_BUNDLE` / `FHIR_AXIS_GUIDELINE` / `FHIR_AXIS_DOC_ID` env
+vars (mirrors `DAPR_PIPELINE_*`).
+
+**Why live `hfs` Subscription delivery re-deferred to 11.4.** ADR-025
+§"Why two fixtures" deferred live-server delivery to 10.4; 10.4
+re-defers to 11.4 because: (a) `hfs` v0.1.47's R5 Subscription
+delivery is upstream-unverified (verifying it would couple the
+close-out to a feature outside the project's control), and (b) the
+cloud-axis topology change (Kubernetes + durable broker) is the
+natural seam to introduce a real-server publish path. The
+harness-side projection from a hand-constructed `subscription-
+notification` Bundle is the wire contract under test in 10.4.
+
+**Why `fhirbolt` stays deferred.** No kernel-side FHIR consumer
+emerged in 10.4 — the close-out runs Python-side only (the existing
+JSON-over-TCP boundary into `cds-kernel` carries
+`ClinicalTelemetryPayload`, not FHIR resources). ADR-025 §3's
+"Reopen at the first kernel-side consumer (10.4 close-out, expected)"
+entry is **closed without action** by ADR-027 §7. If a future task
+surfaces a kernel-side FHIR consumer, that task opens its own ADR.
+
+**Why ADR-027 not ADR-028 for the close-out.** ADR-024 §6 pre-allocated
+ADR-027 → Task 12.1 (ZK toolchain), ADR-026 → Task 11.1 (Cloud).
+Actual landing has been sequential-by-task (ADR-026 consumed by 10.3,
+ADR-027 by 10.4). Sequential-by-task is simpler than pre-reserved-
+by-axis; the shift is recorded in the active task pointer's "ADR
+numbering drift" sub-note rather than back-editing ADR-024.
+
+**Files added.**
+
+| Path                                                | Purpose                                                                                              |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `python/cds_harness/workflow/fhir_axis.py`          | Pure helpers: `build_subscription_notification`, `build_patient_open_event`, `build_patient_close_event`, `parse_muc_entry`, `collect_atom_spans`, `assert_muc_topology`, `iter_observation_entries`. |
+| `python/tests/test_fhir_axis.py`                    | 18 offline unit tests covering every helper's positive + negative paths.                              |
+
+**Files modified.**
+
+| Path                                                  | Change                                                                                                              |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `python/cds_harness/workflow/__init__.py`             | Re-export the seven `fhir_axis` helpers.                                                                            |
+| `python/cds_harness/workflow/__main__.py`             | New `run-fhir-pipeline` subcommand + `_run_fhir_pipeline_cmd` + `_dapr_invoke_url`. Refactored `_build_input` into `_resolve_recorded_path` + `_resolve_kimina_url` + `_build_workflow_spec`; new shared `_schedule_and_wait` + `_check_envelope_assertions`. |
+| `Justfile`                                            | New `fhir-axis-smoke` recipe (after `dapr-pipeline`); 4 `FHIR_AXIS_*` env defaults.                                  |
+| `.agent/Plan.md`                                      | Row 10.4 → DONE with "FHIR axis closed" annotation.                                                                  |
+| `.agent/Architecture_Decision_Log.md`                 | ADR-027 appended.                                                                                                    |
+
+**Final gate (all green; live cluster recipe gated as expected).**
+- `uv run pytest -q` → **191 pass + 1 Kimina-skipped** (173 → 191 = 18 new offline `test_fhir_axis.py` cases).
+- `uv run ruff check .` → clean (4 errors fixed mid-flight: 1 E501 long-line in `__main__.py:382` → multi-line block, 1 ANN401 disallowed `Any` in `_walk_node` → `object`, 2 RUF043 unescaped regex metacharacters in test `match=` patterns → raw strings).
+- `cargo check --workspace --quiet` → clean (no Rust touchpoints).
+- `just env-verify` → clean.
+- `just --list | grep fhir-axis-smoke` → recipe registered with the canonical "Requires .bin/dapr + slim runtime + .bin/{z3,cvc5} + reachable $CDS_KIMINA_URL." description.
+- `just fhir-axis-smoke` is the live-cluster gate (gated on `.bin/dapr` + `.bin/{z3,cvc5}` + `$CDS_KIMINA_URL` — same gate as `dapr-pipeline`); not run on this dev box because the gate dependencies are not staged.
+
+Decisions captured in **ADR-027**. **No PHASE flip** (1 → 2 deferred
+to Task 12.4 per ADR-024 §4). **No Cargo workspace changes**. **FHIR
+axis CLOSED** — Plan §8.2 row 10.4 → DONE; rows 10.1–10.4 are all
+DONE; the strict ordering rule advances the pointer to Task 11.1.
+
+
 
 ## Session 2026-05-02 — Task 10.3 close-out (ADR-026)
 

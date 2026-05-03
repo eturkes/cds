@@ -1103,6 +1103,183 @@ dapr-pipeline:
     fi
 
 # =============================================================================
+# FHIR axis end-to-end smoke (Task 10.4 close-out)
+# =============================================================================
+# `just fhir-axis-smoke` brings up placement + scheduler + the cds-harness
+# and cds-kernel daprd sidecars + a workflow runner sidecar, then drives
+# the canonical `data/fhir/icu-monitor-02.observations.json` collection
+# Bundle through the FHIR boundary:
+#
+#   1. POST `/v1/fhir/notification`  → ClinicalTelemetryPayload (10.2)
+#   2. POST `/v1/fhircast/patient-open` → session registry (10.3)
+#   3. Schedule the canonical Workflow (ingest→translate→deduce→solve→recheck)
+#   4. Verify `trace.sat == false`, `recheck.ok == true`
+#   5. Verify every `trace.muc` entry maps back to an Atom span (C4)
+#   6. POST `/v1/fhircast/patient-close` → session registry teardown
+#
+# Mirrors `dapr-pipeline` topology; the only delta is that the workflow
+# runner uses the `run-fhir-pipeline` subcommand, which routes through
+# daprd's HTTP service-invocation port (`DAPR_HTTP_PORT`) rather than
+# reading a pre-baked envelope from disk. Per ADR-027 §3-§5.
+
+FHIR_AXIS_BUNDLE     := env_var_or_default('FHIR_AXIS_BUNDLE',     'data/fhir/icu-monitor-02.observations.json')
+FHIR_AXIS_GUIDELINE  := env_var_or_default('FHIR_AXIS_GUIDELINE',  'data/guidelines/contradictory-bound.txt')
+FHIR_AXIS_DOC_ID     := env_var_or_default('FHIR_AXIS_DOC_ID',     'contradictory-bound')
+FHIR_AXIS_TIMEOUT_S  := env_var_or_default('FHIR_AXIS_TIMEOUT_S',  '600')
+
+# End-to-end FHIR axis close-out (Task 10.4 close-out gate). Requires .bin/dapr + slim runtime + .bin/{z3,cvc5} + reachable $CDS_KIMINA_URL.
+fhir-axis-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo="{{ justfile_directory() }}"
+    dapr_cli="$repo/.bin/dapr"
+    daprd="{{DAPR_DAPRD}}"
+    [ -x "$dapr_cli" ] && [ -x "$daprd" ] || \
+        { echo "dapr CLI / slim runtime missing — run \`just fetch-dapr\`"; exit 1; }
+    [ -x "$repo/.bin/z3" ] && [ -x "$repo/.bin/cvc5" ] || \
+        { echo "Z3 / cvc5 missing — run \`just fetch-bins\`"; exit 1; }
+    [ -n "${CDS_KIMINA_URL:-}" ] || \
+        { echo "CDS_KIMINA_URL unset — start Kimina (\`python -m server\` from the project-numina/kimina-lean-server checkout) and re-run with that URL exported."; exit 1; }
+
+    # Pre-build the kernel binary so the kernel sidecar starts fast.
+    cargo build --bin cds-kernel-service
+
+    mkdir -p target
+
+    # Per-sidecar pid + log paths.
+    py_pid="target/fhir-axis-harness.pid"
+    py_log="target/fhir-axis-harness.log"
+    rs_pid="target/fhir-axis-kernel.pid"
+    rs_log="target/fhir-axis-kernel.log"
+    wf_pid="target/fhir-axis-workflow.pid"
+    wf_log="target/fhir-axis-workflow.log"
+
+    # Reverse-order teardown — run on every exit path so we never leak.
+    cleanup() {
+        for pidfile in "$wf_pid" "$rs_pid" "$py_pid"; do
+            if [ -f "$pidfile" ]; then
+                pid=$(cat "$pidfile")
+                if kill -0 "$pid" 2>/dev/null; then
+                    kill -TERM "$pid" 2>/dev/null || true
+                    for _ in $(seq 1 50); do
+                        kill -0 "$pid" 2>/dev/null || break
+                        sleep 0.1
+                    done
+                    if kill -0 "$pid" 2>/dev/null; then
+                        kill -KILL "$pid" 2>/dev/null || true
+                    fi
+                fi
+                rm -f "$pidfile"
+            fi
+        done
+        just dapr-cluster-down >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT INT TERM
+
+    # 1. Placement + scheduler.
+    just dapr-cluster-up
+    for _ in $(seq 1 60); do
+        if curl -sf "http://127.0.0.1:{{DAPR_PLACEMENT_HZ}}/healthz" >/dev/null; then break; fi
+        sleep 0.5
+    done
+    for _ in $(seq 1 60); do
+        if curl -sf "http://127.0.0.1:{{DAPR_SCHEDULER_HZ}}/healthz" >/dev/null; then break; fi
+        sleep 0.5
+    done
+
+    # Reserve four ports per sidecar (app + dapr-http + dapr-grpc + metrics).
+    pick_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
+    py_app_port=$(pick_port); py_http=$(pick_port); py_grpc=$(pick_port); py_met=$(pick_port)
+    rs_app_port=$(pick_port); rs_http=$(pick_port); rs_grpc=$(pick_port); rs_met=$(pick_port)
+    wf_app_port=$(pick_port); wf_http=$(pick_port); wf_grpc=$(pick_port); wf_met=$(pick_port)
+
+    # 2. Harness sidecar (cds-harness).
+    CDS_HARNESS_HOST=127.0.0.1 CDS_HARNESS_PORT=$py_app_port \
+    nohup "$dapr_cli" run \
+        --app-id cds-harness \
+        --app-port "$py_app_port" \
+        --app-protocol http \
+        --dapr-http-port "$py_http" \
+        --dapr-grpc-port "$py_grpc" \
+        --metrics-port "$py_met" \
+        --runtime-path "{{DAPR_INSTALL_DIR}}" \
+        --resources-path "{{DAPR_RESOURCES_PATH}}" \
+        --config "{{DAPR_CONFIG_PATH}}" \
+        --log-level info \
+        -- uv run python -m cds_harness.service \
+        > "$py_log" 2>&1 < /dev/null &
+    echo $! > "$py_pid"
+
+    # 3. Kernel sidecar (cds-kernel).
+    CDS_KERNEL_HOST=127.0.0.1 CDS_KERNEL_PORT=$rs_app_port \
+    nohup "$dapr_cli" run \
+        --app-id cds-kernel \
+        --app-port "$rs_app_port" \
+        --app-protocol http \
+        --dapr-http-port "$rs_http" \
+        --dapr-grpc-port "$rs_grpc" \
+        --metrics-port "$rs_met" \
+        --runtime-path "{{DAPR_INSTALL_DIR}}" \
+        --resources-path "{{DAPR_RESOURCES_PATH}}" \
+        --config "{{DAPR_CONFIG_PATH}}" \
+        --log-level info \
+        -- "$repo/target/debug/cds-kernel-service" \
+        > "$rs_log" 2>&1 < /dev/null &
+    echo $! > "$rs_pid"
+
+    # Wait for both /healthz + daprd /v1.0/healthz to flip ready.
+    wait_ready() {
+        local url=$1 budget=${2:-60}
+        for _ in $(seq 1 $budget); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$url" || echo 000)
+            if [ "$code" = "200" ] || [ "$code" = "204" ]; then return 0; fi
+            sleep 0.5
+        done
+        echo "readiness wait timed out for $url"; return 1
+    }
+    wait_ready "http://127.0.0.1:${py_app_port}/healthz"
+    wait_ready "http://127.0.0.1:${rs_app_port}/healthz"
+    wait_ready "http://127.0.0.1:${py_http}/v1.0/healthz" 90
+    wait_ready "http://127.0.0.1:${rs_http}/v1.0/healthz" 90
+
+    # 4. Workflow + FHIR-axis runner sidecar (cds-workflow). The
+    # `run-fhir-pipeline` subcommand reads `DAPR_HTTP_PORT` to route
+    # /v1/fhir/notification and /v1/fhircast/* through daprd to
+    # cds-harness; the dapr SDK's WorkflowRuntime reads `DAPR_GRPC_PORT`.
+    nohup "$dapr_cli" run \
+        --app-id cds-workflow \
+        --dapr-http-port "$wf_http" \
+        --dapr-grpc-port "$wf_grpc" \
+        --metrics-port "$wf_met" \
+        --runtime-path "{{DAPR_INSTALL_DIR}}" \
+        --resources-path "{{DAPR_RESOURCES_PATH}}" \
+        --config "{{DAPR_CONFIG_PATH}}" \
+        --log-level info \
+        -- uv run python -m cds_harness.workflow run-fhir-pipeline \
+            --fhir-bundle "{{FHIR_AXIS_BUNDLE}}" \
+            --guideline "{{FHIR_AXIS_GUIDELINE}}" \
+            --doc-id "{{FHIR_AXIS_DOC_ID}}" \
+            --kimina-url "$CDS_KIMINA_URL" \
+            --z3-path "$repo/.bin/z3" \
+            --cvc5-path "$repo/.bin/cvc5" \
+            --timeout-s "{{FHIR_AXIS_TIMEOUT_S}}" \
+            --assert-unsat \
+            --assert-recheck-ok \
+        > "$wf_log" 2>&1 < /dev/null &
+    wf_runner=$!
+    echo $wf_runner > "$wf_pid"
+
+    if wait "$wf_runner"; then
+        echo "✓ fhir-axis-smoke complete — see $wf_log for the aggregated envelope"
+        exit 0
+    else
+        rc=$?
+        echo "✗ fhir-axis-smoke failed (exit=$rc) — tail of $wf_log:"
+        tail -40 "$wf_log" || true
+        exit $rc
+    fi
+
+# =============================================================================
 # Frontend (bun + Vite + SvelteKit 2 + Svelte 5 runes + Tailwind 4) — Task 9.1
 # =============================================================================
 # Per ADR-022 §2: scaffolded via `sv create --template minimal --types ts`
