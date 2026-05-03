@@ -3912,3 +3912,214 @@ Findings:
   pre-reserved-by-axis; the shift is tracked in the scratchpad.
 
 ---
+
+## ADR-028 — Phase 1 cloud foundation: kind v0.31.0 + kubectl v1.35.4 + helm v3.20.3 + Dapr 1.17 helm chart + cds-* K8s manifests (Task 11.1)
+
+**Status:** Accepted (Phase 1 cloud axis foundation lock)
+**Date:** 2026-05-04
+
+**Context.** Task 11.1 opens the Phase 1 cloud axis (per ADR-024 §6).
+The axis target is moving the Phase 0 services (cds-harness +
+cds-kernel + cds-frontend) from self-hosted slim Dapr (placement +
+scheduler binaries staged under `.bin/.dapr/`) onto a Kubernetes
+cluster with a helm-managed Dapr control plane. Plan §10 step 4
+binds tool selection to the moment of decision; per-axis
+architectural locks were deliberately deferred from ADR-024 to each
+axis's first sub-task (Plan §6 / ADR-024 §"Alternatives rejected —
+pre-locked tools").
+
+11.1 is **foundation** — manifests + cluster bootstrap + helm chart
+pin only. Container images, the apply-and-bring-up flow, and the
+end-to-end smoke land downstream:
+
+- **11.2:** build container images for cds-harness / cds-kernel /
+  cds-frontend; `kind load docker-image`; apply -f k8s/; verify
+  pod/service health.
+- **11.3:** OpenTelemetry Collector + Prometheus + Grafana +
+  Dapr metrics scrape.
+- **11.4:** end-to-end `contradictory-bound` UNSAT smoke against the
+  kind cluster (parity with `dapr-pipeline` + `fhir-axis-smoke`).
+
+**Web-searches executed at decision time** (Plan §10 step 4):
+
+- `"kind kubernetes-in-docker latest release 2026 v0.x cluster local"`
+  → kind v0.31.0; defaults to Kubernetes v1.35.0; kindest/node image
+  digest `sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f`.
+  Notable upcoming breaking changes: kubeadm v1beta3 → v1beta4
+  migration; cgroup v1 removal across newer Kubernetes versions.
+- `"Dapr helm chart 1.17 1.18 install kubernetes cluster 2026 release"`
+  → Dapr 1.17 helm chart is GA on `https://dapr.github.io/helm-charts/`;
+  1.18 is at 1.18.0-rc.1. The release-candidate is rejected; the GA
+  pin is locked.
+- `"kubernetes manifests Dapr sidecar annotations 2026 best practices deployment"`
+  → confirmed annotation surface (`dapr.io/enabled`, `app-id`,
+  `app-port`, `app-protocol`, `config`, `log-level`,
+  `sidecar-memory-limit`, `sidecar-cpu-limit`).
+- `"kind v0.31 release notes kubernetes 1.35 default cluster config 2026"`
+  → confirmed kindest/node v1.35.0 as the default and the digest
+  pinned above.
+- `"helm v3 latest release 2026 kubernetes package manager stable"`
+  → Helm 4.1.3 is the latest GA across the project; 3.20.3 is the
+  parallel-stable v3 line patch (planned 2026-04-08; treated as
+  released by 2026-05-04). The Dapr 1.17 chart is a v3-format chart;
+  staying on the v3 line is the conservative choice.
+- `"kubectl 1.35 stable release linux amd64 2026 download"`
+  → kubectl 1.35.4 is the latest 1.35.x patch; matches the
+  kindest/node minor version (the upstream ±1-minor skew guarantee
+  is preserved).
+
+**Decision.**
+
+1. **kind v0.31.0** locked as the local Kubernetes runtime. Cluster
+   shape (`k8s/kind-cluster.yaml`): 1 control-plane + 1 worker; both
+   on `kindest/node:v1.35.0` with the sha256 digest pinned above.
+   The control-plane node carries `node-labels: ingress-ready=true`
+   in its kubeadm patch + `extraPortMappings` 80→8090 / 443→8443 so
+   a future ingress controller (Task 11.3) is reachable from the
+   host without `kubectl port-forward`.
+2. **kubectl v1.35.4** locked as the cluster client. Pinned to match
+   the kindest/node v1.35.0 minor (the standard Kubernetes ±1-minor
+   skew guarantee covers this).
+3. **helm v3.20.3** locked. Helm 4.x is GA but the Dapr 1.17 helm
+   chart is a v3-format chart; pinning the v3 line preserves chart
+   compatibility. Re-evaluate at the Dapr-helm bump (a future Phase 1
+   sub-task may upgrade to a 1.18+ chart that ships in v4 format).
+4. **Dapr helm chart 1.17.x** locked — parity with the Phase 0
+   self-hosted lock (ADR-016 §3 / ADR-021 §"Why Dapr 1.17"). The
+   `dapr-helm-install` Justfile recipe targets `--namespace
+   dapr-system --create-namespace` per the upstream production
+   recipe; mTLS stays disabled (parity with the local
+   `dapr/config.yaml` shape — Phase 0 dev posture, ADR-016).
+5. **`k8s/` manifest layout** (foundation only — Task 11.2 ships
+   container images + applies):
+   - `kind-cluster.yaml` — kind cluster config (above).
+   - `namespaces.yaml` — `cds` namespace; `dapr-system` is created by
+     helm (`--create-namespace`), intentionally NOT pre-declared here
+     so the helm install flow stays the canonical creator.
+   - `dapr-config.yaml` — `Configuration: cds-config` (mirror of
+     `dapr/config.yaml`; tracing stdout, mTLS off, metric on).
+   - `dapr-components/{pubsub-inmemory,state-store-inmemory}.yaml` —
+     mirror of `dapr/components/`, namespaced to `cds`. In-memory is
+     intentional for the foundation; durable broker / state backing
+     deferred (see §"Alternatives rejected").
+   - `cds-harness.yaml`, `cds-kernel.yaml`, `cds-frontend.yaml` —
+     Deployment + Service per app, in `cds` namespace, with Dapr
+     sidecar annotations. App-ids match Phase 0 self-hosted (cds-
+     harness / cds-kernel / cds-frontend); container ports match
+     (8081 / 8082 / 3000). Image tags follow `<app-id>:dev` so
+     `kind load docker-image cds-harness:dev` (Task 11.2) resolves
+     with `imagePullPolicy: IfNotPresent`.
+6. **Justfile additions** (12 new symbols total; opt-in like
+   `fetch-fhir`):
+   - Pinned constants: `KIND_VERSION`, `KUBECTL_VERSION`,
+     `HELM_VERSION`, `DAPR_HELM_VERSION`, `KIND_CLUSTER_NAME`,
+     `K8S_DIR`, `KIND_CLUSTER_CONFIG`, `KUBECTL_CONTEXT`.
+   - `fetch-cloud` (composite) → `fetch-kind` + `fetch-kubectl` +
+     `fetch-helm` (each idempotent + skip-if-present, mirrors
+     `fetch-z3` / `fetch-cvc5` / `fetch-lean`).
+   - `kind-up` / `kind-down` / `kind-status` / `cloud-clean` —
+     idempotent cluster lifecycle.
+   - `dapr-helm-install` — `helm upgrade --install dapr dapr/dapr
+     --version 1.17 --namespace dapr-system --create-namespace
+     --wait --timeout 5m` against `kind-{{KIND_CLUSTER_NAME}}` (or
+     `KUBECTL_CONTEXT` override).
+   - `k8s-validate` — pure offline `kubectl apply --dry-run=client`
+     sweep of every `k8s/**/*.yaml`. Foundation gate (Task 11.1).
+   - `env-verify` extended with one informational line summarizing
+     `.bin/{kind,kubectl,helm}` presence.
+7. **Phase parity.** The slim self-hosted recipes (`dapr-cluster-up`,
+   `dapr-pipeline`, `fhir-axis-smoke`) **stay** as the fast local-
+   dev path. The cloud axis is the *additional* deployment target —
+   not a replacement. Operators choose; the canonical
+   `contradictory-bound` UNSAT fixture is the smoke gate on both
+   paths.
+8. **Tests** — `python/tests/test_k8s_foundation.py` covers offline
+   validation (14 cases): manifest presence, kind cluster shape,
+   kindest/node digest pin, namespace + Dapr config + components
+   shape, namespace uniformity, Deployment + Service pairing,
+   Dapr annotation parity (app-id / app-port / config), Service
+   selector ↔ Deployment label coupling, resource floor present,
+   image-tag convention, app-id / containerPort uniqueness.
+
+**Consequences.**
+
+- New `k8s/` directory adds ≈ 350 lines of YAML; tracked under git.
+  Manifests are inert until `just kind-up && just dapr-helm-install
+  && kubectl apply -f k8s/...` runs (Task 11.2 close-out).
+- `bootstrap` chain unchanged (cloud tooling NOT in `bootstrap` —
+  mirrors `fetch-fhir`). New operators run `just fetch-cloud` to
+  opt in.
+- Self-hosted recipes untouched. ADR-016 / ADR-017 / ADR-021 stay
+  authoritative for the Phase 0 dev path.
+- A future durable-broker swap (Redis Streams / NATS JetStream) on
+  the K8s side requires editing the two `dapr-components/*.yaml`
+  files only — no app-code change (the in-memory components carry
+  the same `cds-pubsub` / `cds-statestore` names; Dapr's component-
+  type abstraction is what makes the swap transparent).
+- Image tags are environment-fixed at `<app-id>:dev`. Production
+  pinning (sha256 / semver) is a Phase 1 release concern downstream
+  of cloud axis foundation.
+- The kindest/node digest is a long string in the YAML. Drifting it
+  is caught by `test_kind_cluster_config_well_formed` (the digest
+  is asserted byte-for-byte against `EXPECTED_KINDEST_NODE`).
+
+**Alternatives rejected.**
+
+- **k3d / minikube / microk8s instead of kind.** kind is the
+  upstream Kubernetes-SIG-maintained tool, has the cleanest
+  Dapr+ingress story for local dev, and matches the upstream
+  `helm install dapr` flow used in the Dapr docs. k3d adds a k3s
+  layer (different etcd story); minikube ships a heavier VM
+  abstraction (Phase 1 dev hosts span Linux + WSL + macOS — kind's
+  Docker-only requirement is the broadest); microk8s is snap-only
+  on most distros. None of those frictions buy us anything
+  measurable on the foundation; revisit if Task 11.4's smoke
+  uncovers a kind-specific pathology.
+- **Helm 4.x.** Latest GA but the Dapr 1.17 chart is a v3-format
+  chart; mixing v4 client with v3 chart works in practice but the
+  v3.20.x parallel-stable line is the lower-risk pin. Reopen at
+  the next Dapr helm chart bump.
+- **Dapr 1.18-rc.1 helm chart.** Release candidate. Phase 0 already
+  pinned 1.17 (ADR-016 §3 / ADR-021); RC stability concerns
+  outweigh the marginal feature gain. Reopen when 1.18 is GA.
+- **Pre-built container images already shipped at 11.1.** Foundation
+  vs. integration boundary — image build + load is a separable
+  concern (Dockerfiles, base-image choice, multi-stage build
+  optimization, cache strategy) that warrants its own session
+  (11.2). Apply manifests now would fail with `ImagePullBackOff`
+  on every pod; that's a noisy smoke. Foundation = manifests
+  written + offline-validated; integration (11.2) = images +
+  apply + smoke.
+- **Durable broker (Redis Streams / NATS JetStream) on the K8s
+  side.** Phase 0 in-memory pub/sub stays as the cloud axis
+  foundation default; a multi-replica use-case (Workflow durability
+  across pod restarts; multi-replica harness) would force the swap.
+  No such use-case in 11.1; reopen when 11.2's apply-and-smoke
+  reveals one (e.g., if `kubectl rollout restart deployment/cds-
+  harness` shows in-memory state loss as a problem).
+- **OpenTelemetry Collector / Prometheus / Grafana inline at 11.1.**
+  Observability is its own sub-task (11.3) per ADR-024's per-axis
+  decomposition. Foundation manifests stay slim.
+- **Live cluster bring-up + smoke at 11.1.** Inverts the
+  foundation→integration split. The `k8s-validate` recipe gives a
+  no-cluster-needed dry-run gate; the live smoke lands at 11.2/11.4.
+- **Embed the helm chart values inline in the `dapr-helm-install`
+  recipe.** Default values are sufficient for the foundation; the
+  helm chart's own `values.yaml` remains the single source of
+  configuration truth. Override values land at 11.3 (observability
+  toggles) or 11.4 (close-out) if needed.
+- **`kubectl apply -f k8s/` recipe alongside `k8s-validate`.** Apply
+  is a live-cluster mutation — wraps a permission boundary that
+  Task 11.2 owns. `k8s-validate` is a pure offline lint; apply
+  belongs to integration, not foundation.
+
+**ADR numbering note.** ADR-024 §6 pre-allocated ADR-026 → Task 11.1
+(Cloud) and ADR-027 → Task 12.1 (ZK toolchain). Actual landing has
+been sequential-by-task: ADR-026 → Task 10.3 (FHIRcast), ADR-027 →
+Task 10.4 (FHIR close-out), ADR-028 → Task 11.1 (cloud foundation).
+ZK toolchain at Task 12.1 is now expected to land as ADR-029.
+Sequential-by-task numbering is simpler than pre-reserved-by-axis;
+ADR-024 is *not* back-edited (its pre-allocation reads as planning
+intent, not contract).
+
+---

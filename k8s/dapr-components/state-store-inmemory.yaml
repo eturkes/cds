@@ -1,0 +1,17 @@
+# Phase 1 cloud foundation state store component (Task 11.1, ADR-028).
+# Mirrors `dapr/components/state-store-inmemory.yaml` (Phase 0) but
+# bound to the `cds` namespace. Doubles as the Workflow / actor state
+# store via `actorStateStore=true` (Dapr 1.17 Workflow requirement —
+# see ADR-016 §3 for the same lock under self-hosted). Durable backing
+# (SQLite / Postgres) deferred to a later cloud-axis sub-task.
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: cds-statestore
+  namespace: cds
+spec:
+  type: state.in-memory
+  version: v1
+  metadata:
+    - name: actorStateStore
+      value: "true"

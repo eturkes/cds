@@ -1,0 +1,13 @@
+# Phase 1 cloud foundation namespace (Task 11.1, ADR-028).
+# Holds every cds-* Deployment + Service + Dapr Component. The
+# `dapr-system` namespace is created by `helm install dapr ... \
+# --create-namespace` (Task 11.1 `dapr-helm-install` recipe); it is
+# intentionally NOT pre-declared here so the helm install flow stays
+# the canonical creator.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cds
+  labels:
+    name: cds
+    app.kubernetes.io/part-of: cds

@@ -1,0 +1,91 @@
+# SvelteKit visualizer Deployment + Service (Phase 1 cloud foundation,
+# Task 11.1). The `cds-frontend` app-id matches the Phase 0 BFF
+# wiring; the BFF talks to cds-harness + cds-kernel exclusively
+# through the Dapr sidecar's service-invocation surface (ADR-022 §3),
+# so the Deployment carries the same Dapr annotations as the other
+# two services. Image tag `cds-frontend:dev` is built + loaded at
+# Task 11.2 (a `node:22-alpine` runtime hosting the SvelteKit
+# `node` adapter output is the expected shape; finalized at 11.2).
+# Container port 3000 is the SvelteKit `node` adapter default.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cds-frontend
+  namespace: cds
+  labels:
+    app: cds-frontend
+    app.kubernetes.io/name: cds-frontend
+    app.kubernetes.io/part-of: cds
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cds-frontend
+  template:
+    metadata:
+      labels:
+        app: cds-frontend
+        app.kubernetes.io/name: cds-frontend
+        app.kubernetes.io/part-of: cds
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "cds-frontend"
+        dapr.io/app-port: "3000"
+        dapr.io/app-protocol: "http"
+        dapr.io/config: "cds-config"
+        dapr.io/log-level: "info"
+        dapr.io/sidecar-memory-limit: "256Mi"
+        dapr.io/sidecar-cpu-limit: "500m"
+    spec:
+      containers:
+        - name: cds-frontend
+          image: cds-frontend:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "3000"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cds-frontend
+  namespace: cds
+  labels:
+    app: cds-frontend
+    app.kubernetes.io/name: cds-frontend
+    app.kubernetes.io/part-of: cds
+spec:
+  type: ClusterIP
+  selector:
+    app: cds-frontend
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+      protocol: TCP

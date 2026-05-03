@@ -1,0 +1,30 @@
+# kind cluster bootstrap (Phase 1 cloud foundation, Task 11.1).
+# Locked by ADR-028: kind v0.31.0 / kindest/node v1.35.0. The control-
+# plane node carries an `ingress-ready=true` label so a future ingress
+# controller (Task 11.3) binds without needing to retag nodes. Two
+# extraPortMappings expose the in-cluster ingress (HTTP + HTTPS) on the
+# host so `curl http://127.0.0.1:8090/...` reaches a Service routed
+# through ingress without `kubectl port-forward`. The single worker
+# node holds the cds-* pods so the control plane stays unscheduled —
+# matches the upstream kind production-shape recommendation.
+apiVersion: kind.x-k8s.io/v1alpha4
+kind: Cluster
+name: cds
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 8090
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 8443
+        protocol: TCP
+  - role: worker
+    image: kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f

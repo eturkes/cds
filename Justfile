@@ -62,6 +62,19 @@ env-verify:
     else
         echo "  .bin/.hfs/ empty (run: just fetch-fhir — Phase 1 FHIR axis only)"
     fi
+    cloud_missing=()
+    for tool in kind kubectl helm; do
+        if [ -x "{{ justfile_directory() }}/.bin/$tool" ]; then
+            :
+        else
+            cloud_missing+=("$tool")
+        fi
+    done
+    if [ "${#cloud_missing[@]}" -eq 0 ]; then
+        echo "  .bin/{kind,kubectl,helm} present (Phase 1 cloud axis staged)"
+    else
+        printf "  .bin/ missing cloud tools: %s (run: just fetch-cloud — Phase 1 cloud axis only)\n" "${cloud_missing[*]}"
+    fi
     [ "$fail" = "0" ] || { echo "Required tooling missing — see above."; exit 1; }
     echo "✓ environment verified"
 
@@ -782,6 +795,198 @@ dapr-cluster-status:
         "{{DAPR_SCHEDULER_PORT}}" \
         "{{DAPR_SCHEDULER_HZ}}" \
         "{{DAPR_CLUSTER_DIR}}/dapr-scheduler.log"
+
+# =============================================================================
+# Phase 1 cloud foundation (Task 11.1) — kind + kubectl + helm + Dapr helm chart
+# =============================================================================
+# Per ADR-028: kind v0.31.0 (defaults to kindest/node v1.35.0), kubectl
+# v1.35.4 (matches the kindest/node minor; the upstream ±1 minor skew
+# guarantee is preserved), helm v3.20.3 (parallel-stable v3 line —
+# Helm 4.x exists but the Dapr 1.17 chart is a v3-format chart so we
+# stay on the v3 line). Binaries staged under .bin/ via `fetch-cloud`;
+# the recipe is opt-in (NOT in `bootstrap`) — mirrors `fetch-fhir`'s
+# precedent for the heavy / cloud-specific tooling.
+#
+# Phase parity. The slim self-hosted recipes (`dapr-cluster-up`,
+# `dapr-pipeline`, `fhir-axis-smoke`) stay as the fast local-dev path;
+# the cloud axis is the *additional* deployment target. Container
+# images + apply -f k8s/cds-*.yaml + an end-to-end cluster smoke land
+# at Task 11.2.
+
+KIND_VERSION         := env_var_or_default('KIND_VERSION',         'v0.31.0')
+KUBECTL_VERSION      := env_var_or_default('KUBECTL_VERSION',      'v1.35.4')
+HELM_VERSION         := env_var_or_default('HELM_VERSION',         'v3.20.3')
+DAPR_HELM_VERSION    := env_var_or_default('DAPR_HELM_VERSION',    '1.17')
+KIND_CLUSTER_NAME    := env_var_or_default('KIND_CLUSTER_NAME',    'cds')
+K8S_DIR              := justfile_directory() + "/k8s"
+KIND_CLUSTER_CONFIG  := K8S_DIR + "/kind-cluster.yaml"
+KUBECTL_CONTEXT      := env_var_or_default('KUBECTL_CONTEXT',      'kind-' + KIND_CLUSTER_NAME)
+
+# Composite — stages kind + kubectl + helm under .bin/. NOT in
+# `bootstrap` (heavy + cloud-specific; mirrors `fetch-fhir`).
+fetch-cloud: fetch-kind fetch-kubectl fetch-helm
+    @echo "✓ kind + kubectl + helm staged under .bin/"
+
+# Stage the kind binary into .bin/kind. Skips if already present.
+fetch-kind:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ justfile_directory() }}/.bin"
+    if [ -x "{{ justfile_directory() }}/.bin/kind" ]; then
+        echo "kind already present in .bin/"
+        "{{ justfile_directory() }}/.bin/kind" version | head -1
+        exit 0
+    fi
+    echo "→ fetching kind {{KIND_VERSION}} (linux-amd64)"
+    url="https://github.com/kubernetes-sigs/kind/releases/download/{{KIND_VERSION}}/kind-linux-amd64"
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    curl -fsSL "$url" -o "$tmp/kind"
+    install -m 0755 "$tmp/kind" "{{ justfile_directory() }}/.bin/kind"
+    "{{ justfile_directory() }}/.bin/kind" version | head -1
+
+# Stage the kubectl binary into .bin/kubectl. Skips if already present.
+fetch-kubectl:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ justfile_directory() }}/.bin"
+    if [ -x "{{ justfile_directory() }}/.bin/kubectl" ]; then
+        echo "kubectl already present in .bin/"
+        "{{ justfile_directory() }}/.bin/kubectl" version --client=true | head -1
+        exit 0
+    fi
+    echo "→ fetching kubectl {{KUBECTL_VERSION}} (linux/amd64)"
+    url="https://dl.k8s.io/release/{{KUBECTL_VERSION}}/bin/linux/amd64/kubectl"
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    curl -fsSL "$url" -o "$tmp/kubectl"
+    install -m 0755 "$tmp/kubectl" "{{ justfile_directory() }}/.bin/kubectl"
+    "{{ justfile_directory() }}/.bin/kubectl" version --client=true | head -1
+
+# Stage the helm binary into .bin/helm. Skips if already present.
+fetch-helm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ justfile_directory() }}/.bin"
+    if [ -x "{{ justfile_directory() }}/.bin/helm" ]; then
+        echo "helm already present in .bin/"
+        "{{ justfile_directory() }}/.bin/helm" version --short
+        exit 0
+    fi
+    echo "→ fetching helm {{HELM_VERSION}} (linux-amd64)"
+    asset="helm-{{HELM_VERSION}}-linux-amd64.tar.gz"
+    url="https://get.helm.sh/${asset}"
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    curl -fsSL "$url" -o "$tmp/helm.tgz"
+    tar -xzf "$tmp/helm.tgz" -C "$tmp"
+    bin_path=$(find "$tmp" -type f -name helm -perm -u+x | head -1)
+    [ -n "$bin_path" ] || { echo "no executable 'helm' in tarball"; exit 1; }
+    install -m 0755 "$bin_path" "{{ justfile_directory() }}/.bin/helm"
+    "{{ justfile_directory() }}/.bin/helm" version --short
+
+# Spin up the kind cluster from k8s/kind-cluster.yaml. Idempotent —
+# noop if the named cluster already exists.
+kind-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -x "{{ justfile_directory() }}/.bin/kind" ] || \
+        { echo "kind missing — run \`just fetch-cloud\`"; exit 1; }
+    if "{{ justfile_directory() }}/.bin/kind" get clusters 2>/dev/null | grep -qx "{{KIND_CLUSTER_NAME}}"; then
+        echo "kind cluster '{{KIND_CLUSTER_NAME}}' already up"
+        exit 0
+    fi
+    echo "→ creating kind cluster '{{KIND_CLUSTER_NAME}}'"
+    "{{ justfile_directory() }}/.bin/kind" create cluster \
+        --name {{KIND_CLUSTER_NAME}} \
+        --config "{{KIND_CLUSTER_CONFIG}}" \
+        --wait 5m
+    echo "✓ kind cluster '{{KIND_CLUSTER_NAME}}' up"
+
+# Tear down the kind cluster. Idempotent — noop if the named cluster
+# is absent.
+kind-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -x "{{ justfile_directory() }}/.bin/kind" ] || \
+        { echo "kind missing — nothing to tear down"; exit 0; }
+    if ! "{{ justfile_directory() }}/.bin/kind" get clusters 2>/dev/null | grep -qx "{{KIND_CLUSTER_NAME}}"; then
+        echo "kind cluster '{{KIND_CLUSTER_NAME}}' not present"
+        exit 0
+    fi
+    "{{ justfile_directory() }}/.bin/kind" delete cluster --name {{KIND_CLUSTER_NAME}}
+    echo "✓ kind cluster '{{KIND_CLUSTER_NAME}}' down"
+
+# Print kind cluster + node + pod status. Skips loudly if no cluster.
+kind-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -x "{{ justfile_directory() }}/.bin/kind" ] || \
+        { echo "kind missing — run \`just fetch-cloud\`"; exit 0; }
+    [ -x "{{ justfile_directory() }}/.bin/kubectl" ] || \
+        { echo "kubectl missing — run \`just fetch-cloud\`"; exit 0; }
+    if ! "{{ justfile_directory() }}/.bin/kind" get clusters 2>/dev/null | grep -qx "{{KIND_CLUSTER_NAME}}"; then
+        echo "kind cluster '{{KIND_CLUSTER_NAME}}' not present"
+        exit 0
+    fi
+    echo "::: kind cluster '{{KIND_CLUSTER_NAME}}' :::"
+    "{{ justfile_directory() }}/.bin/kubectl" \
+        --context "{{KUBECTL_CONTEXT}}" \
+        get nodes -o wide
+    echo
+    echo "::: pods (all namespaces) :::"
+    "{{ justfile_directory() }}/.bin/kubectl" \
+        --context "{{KUBECTL_CONTEXT}}" \
+        get pods -A
+
+# Install Dapr 1.17 control plane via helm. Idempotent — `--install`
+# behaves as install or upgrade. Targets the kind cluster context;
+# override KUBECTL_CONTEXT to retarget. Requires `kind-up` first.
+dapr-helm-install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -x "{{ justfile_directory() }}/.bin/helm" ] || \
+        { echo "helm missing — run \`just fetch-cloud\`"; exit 1; }
+    [ -x "{{ justfile_directory() }}/.bin/kubectl" ] || \
+        { echo "kubectl missing — run \`just fetch-cloud\`"; exit 1; }
+    "{{ justfile_directory() }}/.bin/helm" repo add dapr https://dapr.github.io/helm-charts/ 2>/dev/null || true
+    "{{ justfile_directory() }}/.bin/helm" repo update dapr
+    "{{ justfile_directory() }}/.bin/helm" upgrade --install dapr dapr/dapr \
+        --kube-context "{{KUBECTL_CONTEXT}}" \
+        --version {{DAPR_HELM_VERSION}} \
+        --namespace dapr-system \
+        --create-namespace \
+        --wait \
+        --timeout 5m
+    echo "✓ Dapr {{DAPR_HELM_VERSION}} installed under context {{KUBECTL_CONTEXT}}"
+    "{{ justfile_directory() }}/.bin/kubectl" \
+        --context "{{KUBECTL_CONTEXT}}" \
+        -n dapr-system \
+        get pods
+
+# Validate every k8s/*.yaml manifest with `kubectl apply --dry-run=client`.
+# Pure offline check (no live cluster needed). Foundation gate (Task 11.1).
+k8s-validate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -x "{{ justfile_directory() }}/.bin/kubectl" ] || \
+        { echo "kubectl missing — run \`just fetch-cloud\`"; exit 1; }
+    fail=0
+    while IFS= read -r -d '' f; do
+        if "{{ justfile_directory() }}/.bin/kubectl" apply --dry-run=client \
+            --validate=false -f "$f" >/dev/null 2>&1; then
+            echo "  ✓ $f"
+        else
+            echo "  ✗ $f" >&2
+            "{{ justfile_directory() }}/.bin/kubectl" apply --dry-run=client \
+                --validate=false -f "$f" || true
+            fail=1
+        fi
+    done < <(find "{{K8S_DIR}}" -type f -name '*.yaml' -print0 | sort -z)
+    [ "$fail" = "0" ] || { echo "k8s manifest validation FAILED"; exit 1; }
+    echo "✓ k8s manifests valid (client-side dry-run)"
+
+# Alias for kind-down — tears down the cluster (helm install vanishes
+# with it). Provided for naming parity with `dapr-clean` / `fhir-clean`.
+cloud-clean: kind-down
+    @echo "✓ cloud clean"
 
 # =============================================================================
 # Python (uv + ruff + pytest)

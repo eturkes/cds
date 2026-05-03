@@ -1,0 +1,19 @@
+# Dapr Configuration for the K8s side (Phase 1 cloud foundation, Task
+# 11.1). Mirrors `dapr/config.yaml` (the Phase 0 self-hosted shape) so
+# observable behaviour stays parity-equal across the two deployment
+# modes. mTLS off for parity with the local dev path; OpenTelemetry
+# Collector wiring lands at Task 11.3 (ADR-028 §"Observability stays
+# deferred to 11.3").
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: cds-config
+  namespace: cds
+spec:
+  tracing:
+    samplingRate: "1"
+    stdout: true
+  metric:
+    enabled: true
+  mtls:
+    enabled: false

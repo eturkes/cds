@@ -1,0 +1,16 @@
+# Phase 1 cloud foundation pub/sub component (Task 11.1, ADR-028).
+# Mirrors `dapr/components/pubsub-inmemory.yaml` (Phase 0) but bound to
+# the `cds` namespace so the component is reachable from the cds-* pods
+# only. In-memory is intentional for foundation work — durable broker
+# (Redis Streams / NATS JetStream) lands at Task 11.2 close-out or
+# Task 11.4 once a multi-replica use-case forces broker durability
+# (ADR-026 §"Reuse cds-pubsub" precedent: same component name across
+# axis sub-tasks).
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: cds-pubsub
+  namespace: cds
+spec:
+  type: pubsub.in-memory
+  version: v1

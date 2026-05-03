@@ -1,0 +1,90 @@
+# Python harness Deployment + Service (Phase 1 cloud foundation, Task
+# 11.1). Single-replica scaffold; image tag `cds-harness:dev` is
+# loaded into the kind cluster via `kind load docker-image` at Task
+# 11.2 (the Dockerfile + image build land then). Dapr sidecar
+# annotations match the Phase 0 self-hosted lock — `dapr.io/app-id`
+# parity with `--app-id cds-harness` from the Justfile recipes
+# (ADR-017 §1) so service-invocation routes (`/v1.0/invoke/cds-
+# harness/method/...`) stay byte-equal across self-hosted + K8s.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cds-harness
+  namespace: cds
+  labels:
+    app: cds-harness
+    app.kubernetes.io/name: cds-harness
+    app.kubernetes.io/part-of: cds
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cds-harness
+  template:
+    metadata:
+      labels:
+        app: cds-harness
+        app.kubernetes.io/name: cds-harness
+        app.kubernetes.io/part-of: cds
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "cds-harness"
+        dapr.io/app-port: "8081"
+        dapr.io/app-protocol: "http"
+        dapr.io/config: "cds-config"
+        dapr.io/log-level: "info"
+        dapr.io/sidecar-memory-limit: "256Mi"
+        dapr.io/sidecar-cpu-limit: "500m"
+    spec:
+      containers:
+        - name: cds-harness
+          image: cds-harness:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8081
+          env:
+            - name: CDS_HARNESS_HOST
+              value: "0.0.0.0"
+            - name: CDS_HARNESS_PORT
+              value: "8081"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cds-harness
+  namespace: cds
+  labels:
+    app: cds-harness
+    app.kubernetes.io/name: cds-harness
+    app.kubernetes.io/part-of: cds
+spec:
+  type: ClusterIP
+  selector:
+    app: cds-harness
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http
+      protocol: TCP
