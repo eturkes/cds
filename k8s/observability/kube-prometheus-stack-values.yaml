@@ -1,0 +1,128 @@
+# Helm values for the kube-prometheus-stack chart
+# (prometheus-community/kube-prometheus-stack 84.5.0 — March 2026
+# parallel-stable line). Released into the `cds-observability`
+# namespace by `just cloud-observability-up` as release
+# `kube-prometheus-stack`. Phase 1 cloud observability (Task 11.3,
+# ADR-030).
+#
+# What this lights up:
+#   - Prometheus Operator (StatefulSet)
+#   - Prometheus (StatefulSet, 7d retention default)
+#   - Grafana (Deployment, sidecar auto-loads ConfigMaps with
+#     `grafana_dashboard: "1"` from any namespace)
+#   - Alertmanager (StatefulSet — disabled by default below; enable at
+#     Task 11.4 / Phase 2 when alert rules become a stakeholder ask)
+#   - node-exporter (DaemonSet)
+#   - kube-state-metrics (Deployment)
+#
+# Why operator-mode vs raw Prometheus: ServiceMonitor / PodMonitor /
+# PrometheusRule CRDs are the 2026 SOTA for declarative scrape config
+# and rule definitions. The operator reconciles them into Prometheus
+# server config, so adding a new scrape target is a single CR
+# (k8s/observability/dapr-podmonitor.yaml) instead of a values-bump +
+# helm upgrade.
+
+fullnameOverride: kube-prometheus-stack
+
+# Prometheus server config.
+prometheus:
+  prometheusSpec:
+    # Pick up PodMonitor / ServiceMonitor from any namespace, not just
+    # ones that carry the chart's release-name label. Required so the
+    # `dapr-system` namespace's daprd sidecars are scraped without a
+    # values-bump every time we add a new app namespace.
+    podMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+
+    retention: 7d
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+# Grafana config.
+grafana:
+  enabled: true
+  # Research-prototype password. Override via `--set
+  # grafana.adminPassword=...` in production; the kind cluster is
+  # local-dev only so a known default keeps the smoke loop tight.
+  adminPassword: cds-admin
+  service:
+    type: ClusterIP
+    port: 80
+  persistence:
+    enabled: true
+    size: 5Gi
+  # The sidecar discovers any ConfigMap labelled
+  # `grafana_dashboard: "1"` across the cluster and loads it as a
+  # dashboard. The Dapr sidecar dashboard
+  # (k8s/observability/grafana-dapr-dashboard-cm.yaml) ships the label.
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+      provider:
+        allowUiUpdates: false
+        foldersFromFilesStructure: true
+    datasources:
+      enabled: true
+      defaultDatasourceEnabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+# Alertmanager: disabled. No alert rules in the Phase 1 foundation;
+# enable at Phase 2 once alerting policy is decided.
+alertmanager:
+  enabled: false
+
+# kube-state-metrics: enabled (essential for k8s pod / deployment
+# state in dashboards).
+kubeStateMetrics:
+  enabled: true
+
+# node-exporter: enabled (host CPU / memory / disk metrics).
+nodeExporter:
+  enabled: true
+
+# Standard kube-system component scrapes — enabled defaults are fine.
+kubelet:
+  enabled: true
+kubeApiServer:
+  enabled: true
+kubeControllerManager:
+  enabled: true
+kubeScheduler:
+  enabled: true
+kubeProxy:
+  enabled: true
+coreDns:
+  enabled: true
+kubeEtcd:
+  enabled: true
+
+# Default rules: keep enabled; the chart ships a robust baseline of
+# Kubernetes alert rules (KubePodCrashLooping, NodeMemoryHighUtilization,
+# etc.) that fire into Alertmanager when enabled. Even with
+# Alertmanager off they are useful as PrometheusRule CRs documenting
+# the cluster's healthy operating envelope.
+defaultRules:
+  create: true

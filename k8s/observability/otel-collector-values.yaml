@@ -1,0 +1,105 @@
+# Helm values for the OpenTelemetry Collector chart
+# (open-telemetry/opentelemetry-collector). Released into the
+# `cds-observability` namespace by `just cloud-observability-up` as
+# release `otel-collector`. Phase 1 cloud observability (Task 11.3,
+# ADR-030).
+#
+# Shape: single-replica Deployment (mode: deployment) — sufficient for
+# the local kind cluster and the Phase 0 service trio. Scale-out
+# (mode: daemonset for per-node agents + a gateway deployment) is a
+# Phase 2 multi-node concern.
+#
+# Tracing pipeline:
+#   - OTLP gRPC receiver on :4317 (Dapr sidecars push spans here).
+#   - OTLP HTTP receiver on :4318 (browser / app SDKs may push here too).
+#   - Batch + memory_limiter processors (production hygiene).
+#   - debug exporter at default verbosity (writes spans to collector
+#     logs — operators run `kubectl logs -n cds-observability deploy/
+#     otel-collector-opentelemetry-collector` to inspect). Backend
+#     fan-out (Tempo / Jaeger / Honeycomb) is a downstream concern;
+#     keeping the exporter list short avoids pulling extra images.
+#
+# Metrics pipeline:
+#   - Prometheus receiver scrapes the collector's own `/metrics`
+#     (default behaviour of the chart's `presets.metrics`).
+#   - Forwarded to Prometheus via the prometheus exporter on :8889
+#     (kube-prometheus-stack scrapes via PodMonitor `otel-collector`).
+mode: deployment
+
+replicaCount: 1
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+
+# Required for Dapr → OTLP. The Phase 0 sidecars already enable
+# `metrics.enabled: true` (see k8s/dapr-config.yaml); this preset
+# enriches both pipelines with k8s pod / namespace / node metadata so
+# spans carry `k8s.namespace.name=cds`, `k8s.pod.name=cds-harness-...`
+# without requiring app-side instrumentation changes.
+presets:
+  kubernetesAttributes:
+    enabled: true
+
+ports:
+  otlp:
+    enabled: true
+    containerPort: 4317
+    servicePort: 4317
+    protocol: TCP
+  otlp-http:
+    enabled: true
+    containerPort: 4318
+    servicePort: 4318
+    protocol: TCP
+  metrics:
+    enabled: true
+    containerPort: 8888
+    servicePort: 8888
+    protocol: TCP
+  prometheus:
+    enabled: true
+    containerPort: 8889
+    servicePort: 8889
+    protocol: TCP
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+config:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+  processors:
+    batch:
+      timeout: 5s
+      send_batch_size: 1024
+    memory_limiter:
+      check_interval: 5s
+      limit_percentage: 80
+      spike_limit_percentage: 25
+  exporters:
+    debug:
+      verbosity: normal
+    prometheus:
+      endpoint: 0.0.0.0:8889
+      send_timestamps: true
+      metric_expiration: 5m
+  service:
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, batch]
+        exporters: [debug]
+      metrics:
+        receivers: [otlp]
+        processors: [memory_limiter, batch]
+        exporters: [debug, prometheus]

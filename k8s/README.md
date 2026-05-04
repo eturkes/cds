@@ -1,10 +1,9 @@
 # Phase 1 Cloud — Kubernetes manifests + kind cluster bootstrap
 
 > **Status:** Foundation (Task 11.1, ADR-028) + service deployment
-> (Task 11.2, ADR-029). Observability stack (OpenTelemetry Collector
-> / Prometheus / Grafana) lands at Task 11.3; end-to-end
-> `contradictory-bound` smoke against the kind cluster closes the
-> cloud axis at Task 11.4.
+> (Task 11.2, ADR-029) + observability (Task 11.3, ADR-030).
+> End-to-end `contradictory-bound` smoke against the kind cluster
+> closes the cloud axis at Task 11.4.
 
 ## Layout
 
@@ -12,12 +11,13 @@
 | ---------------------------------------- | ----------------------------------------------------------------------- |
 | `kind-cluster.yaml`                      | kind v0.31.0 cluster: 1 control-plane + 1 worker, kindest/node v1.35.0. |
 | `namespaces.yaml`                        | The `cds` namespace (the `dapr-system` namespace is created by helm).   |
-| `dapr-config.yaml`                       | `Configuration: cds-config` (mirror of `dapr/config.yaml`).             |
+| `dapr-config.yaml`                       | `Configuration: cds-config` (Phase 1 OTLP tracing → cds-observability). |
 | `dapr-components/pubsub-inmemory.yaml`   | `cds-pubsub` (in-memory; namespaced to `cds`).                          |
 | `dapr-components/state-store-inmemory.yaml` | `cds-statestore` (in-memory + actorStateStore=true).                  |
 | `cds-harness.yaml`                       | Python harness Deployment + Service (8081, app-id `cds-harness`).       |
 | `cds-kernel.yaml`                        | Rust kernel Deployment + Service (8082, app-id `cds-kernel`).           |
 | `cds-frontend.yaml`                      | SvelteKit BFF Deployment + Service (3000, app-id `cds-frontend`).       |
+| `observability/`                         | OpenTelemetry Collector + kube-prometheus-stack + Dapr scrape (11.3).   |
 
 The matching Dockerfiles live under `docker/` (Task 11.2, ADR-029):
 `docker/cds-{harness,kernel,frontend}.Dockerfile`. The repo-root
@@ -30,11 +30,14 @@ just fetch-cloud         # stages kind + kubectl + helm under .bin/
 just fetch-bins          # stages .bin/{z3,cvc5} for the cds-kernel image
 just kind-up             # spins up the kind cluster
 just dapr-helm-install   # installs Dapr 1.17 control plane via helm
-just cloud-build         # builds cds-{harness,kernel,frontend}:dev images
-just cloud-load          # loads them into the kind cluster
-just cloud-up            # applies namespace + config + components + workloads;
-                         # waits for rollouts (5m timeout per Deployment)
-just cloud-smoke         # in-cluster /healthz round-trip across the three apps
+just cloud-build              # builds cds-{harness,kernel,frontend}:dev images
+just cloud-load               # loads them into the kind cluster
+just cloud-up                 # applies namespace + config + components + workloads;
+                              # waits for rollouts (5m timeout per Deployment)
+just cloud-smoke              # in-cluster /healthz round-trip across the three apps
+just cloud-observability-up   # helm install OTel Collector + kube-prometheus-stack;
+                              # apply Dapr PodMonitors + Grafana dashboard ConfigMap
+just cloud-observability-smoke# in-cluster probes for collector + prometheus + grafana
 ```
 
 Status / inspection:

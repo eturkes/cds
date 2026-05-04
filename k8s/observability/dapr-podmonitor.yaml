@@ -1,0 +1,63 @@
+# Prometheus Operator PodMonitor for the Dapr sidecars injected into
+# the cds-* pods. Phase 1 cloud observability (Task 11.3, ADR-030).
+#
+# Dapr sidecars expose a Prometheus-compatible /metrics endpoint on
+# port 9090 by default (toggled by `metric.enabled: true` in the
+# Configuration CRD; see k8s/dapr-config.yaml). The injector adds a
+# named container `daprd` to each cds-* pod and exposes that port as
+# `dapr-metrics` (port name canonical from the Dapr injector,
+# 1.17+).
+#
+# This PodMonitor scopes scrape to the `cds` namespace only — Dapr
+# control-plane metrics (sentry, operator, placement, scheduler) are
+# scraped via the matching k8s/observability/dapr-control-plane-
+# podmonitor.yaml below.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: dapr-sidecars-cds
+  namespace: cds-observability
+  labels:
+    app.kubernetes.io/name: dapr-sidecars-cds
+    app.kubernetes.io/part-of: cds
+spec:
+  namespaceSelector:
+    matchNames:
+      - cds
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: cds
+  podMetricsEndpoints:
+    - port: dapr-metrics
+      path: /
+      interval: 15s
+      scheme: http
+      honorLabels: true
+---
+# Dapr control plane PodMonitor — scrapes the helm-installed
+# control-plane components (dapr-sentry, dapr-operator, dapr-placement,
+# dapr-scheduler, dapr-injector) in the `dapr-system` namespace. The
+# control plane components carry the `app.kubernetes.io/part-of: dapr`
+# label by upstream chart convention (Dapr 1.17 helm chart, ADR-028
+# §4).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: dapr-control-plane
+  namespace: cds-observability
+  labels:
+    app.kubernetes.io/name: dapr-control-plane
+    app.kubernetes.io/part-of: cds
+spec:
+  namespaceSelector:
+    matchNames:
+      - dapr-system
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: dapr
+  podMetricsEndpoints:
+    - port: metrics
+      path: /
+      interval: 15s
+      scheme: http
+      honorLabels: true

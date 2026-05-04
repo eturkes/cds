@@ -4376,3 +4376,278 @@ ADR-030; ZK toolchain at Task 12.1 as ADR-031. ADR-024 / ADR-028's
 pre-allocation notes remain planning intent only.
 
 ---
+
+## ADR-030 — Phase 1 cloud observability: OpenTelemetry Collector 0.146.1 + kube-prometheus-stack 84.5.0 + Dapr OTLP tracing + Dapr PodMonitor (Task 11.3)
+
+**Status:** Accepted (Phase 1 cloud axis observability lock)
+**Date:** 2026-05-04
+
+**Context.** Task 11.1 (ADR-028) pinned the kind cluster + Dapr 1.17
+helm chart + the cds-* Deployment + Service manifests with stub
+sidecar annotations. Task 11.2 (ADR-029) shipped the three Dockerfiles
++ the `cloud-{build,load,up,down,status,smoke}` lifecycle. Both
+foundation + integration sub-tasks deliberately deferred observability
+to 11.3 — ADR-028 §"Alternatives rejected: OpenTelemetry Collector /
+Prometheus / Grafana inline at 11.1" + ADR-029 §"Live `cloud-build &&
+cloud-load && cloud-up && cloud-smoke` gate at 11.2. Inverts the
+foundation→integration split a second time. … the live end-to-end
+gate stays at 11.4 (after observability lands at 11.3, so the
+close-out smoke can also exercise the tracing pipeline)".
+
+11.3 lights up the observability stack so Task 11.4's close-out smoke
+can exercise span propagation (cds-harness → cds-kernel through Dapr
+service-invocation, traced via OTLP) and a Grafana dashboard query
+(`dapr_http_server_request_count` cardinality) alongside the
+canonical `contradictory-bound` UNSAT verdict. Scope: ship the
+manifests + helm value files + Justfile lifecycle recipes + offline
+tests. The live `helm install` step still stays gated on host
+docker/podman + `.bin/{kind,kubectl,helm}` + an active kind cluster +
+`dapr-helm-install`; not run on this dev box because the gate
+dependencies are not staged.
+
+**Web-searches executed at decision time** (Plan §10 step 4):
+
+- `"OpenTelemetry collector helm chart 2026 kubernetes deployment latest version"`
+  → `open-telemetry/opentelemetry-collector` chart on
+  `https://open-telemetry.github.io/opentelemetry-helm-charts`. Chart
+  modes: deployment, daemonset, statefulset. Single-replica deployment
+  is the local-cluster default. Three pipelines (logs, metrics,
+  traces) shipped by default with debug exporter.
+- `"opentelemetry-collector helm chart latest version April 2026 0.1 release"`
+  → 0.146.1 is the most recent stable chart release in the 0.x line
+  (parallel to the upstream Collector 0.146.x release line).
+- `"kube-prometheus-stack helm chart version 2026 latest release prometheus operator grafana"`
+  → 84.5.0 (released 2026-03-30 in `prometheus-community/helm-charts`).
+  Bundles Prometheus Operator + Prometheus + Alertmanager + Grafana +
+  node-exporter + kube-state-metrics. Operator-mode (CRDs:
+  ServiceMonitor / PodMonitor / PrometheusRule) is the 2026 SOTA for
+  declarative scrape configuration.
+- `"Dapr observability OpenTelemetry collector OTLP tracing config 2026 zipkin endpoint kubernetes"`
+  → Dapr 1.17 supports OTLP-native tracing via
+  `spec.tracing.otel.endpointAddress` (replaces the legacy
+  `tracing.zipkin.endpointAddress`). Collector pattern: ConfigMap or
+  helm-values declares OTLP receivers (gRPC :4317, HTTP :4318), Dapr
+  Configuration points sidecars at the in-cluster collector Service
+  DNS, collector fans out via exporters.
+- `"Dapr metrics prometheus scrape ServiceMonitor 2026 dashboard grafana kubernetes"`
+  → Dapr sidecar exposes `/metrics` on port 9090 by default (toggled
+  by `metric.enabled: true` in the Configuration CRD). PodMonitor with
+  `namespaceSelector` + label selector + `targetPort: 9090` is the
+  recommended scrape pattern. Dapr publishes three official Grafana
+  dashboards (system-services, sidecar, actor) — re-importable via
+  `grafana_dashboard: "1"` ConfigMap pattern.
+
+**Decision.**
+
+1. **OpenTelemetry Collector helm chart 0.146.1** locked, deployed via
+   `helm upgrade --install otel-collector
+   open-telemetry/opentelemetry-collector --version 0.146.1 --namespace
+   cds-observability --values
+   k8s/observability/otel-collector-values.yaml`. Mode: `deployment`;
+   single replica (local kind cluster). Image:
+   `otel/opentelemetry-collector-contrib` (the contrib variant ships
+   the prometheus exporter + kubernetesattributes processor).
+
+2. **Tracing pipeline:** OTLP gRPC :4317 + OTLP HTTP :4318 receivers
+   → memory_limiter + batch processors → debug exporter (writes spans
+   to collector pod logs). Backend fan-out (Tempo / Jaeger /
+   Honeycomb) is a Phase 2 release concern; debug exporter is
+   sufficient for the close-out smoke (operators run
+   `kubectl logs -n cds-observability deploy/otel-collector-...`).
+
+3. **Metrics pipeline:** OTLP receivers → memory_limiter + batch
+   processors → debug + prometheus exporters. Prometheus exporter
+   binds :8889 — kube-prometheus-stack scrapes this via a future
+   PodMonitor (Phase 2 — the cds-* apps don't yet emit OTel metrics
+   directly, only Dapr-mediated traces; OTel-native app metrics
+   require `opentelemetry-instrumentation-fastapi` etc. and is a
+   Phase 2 instrumentation concern).
+
+4. **kube-prometheus-stack 84.5.0** locked, deployed via
+   `helm upgrade --install kube-prometheus-stack
+   prometheus-community/kube-prometheus-stack --version 84.5.0
+   --namespace cds-observability --values
+   k8s/observability/kube-prometheus-stack-values.yaml`. Lights up
+   Prometheus Operator + Prometheus (7d retention, 10Gi PVC) +
+   Grafana (5Gi PVC, sidecar dashboard discovery on) + node-exporter
+   + kube-state-metrics. Alertmanager **disabled** (no alert rules in
+   the foundation; reopen at Phase 2 once alerting policy is decided).
+
+5. **Cross-namespace CR discovery.** Prometheus Operator selectors
+   pinned with `*SelectorNilUsesHelmValues: false` for PodMonitor +
+   ServiceMonitor + Probe + Rule. Required so Prometheus discovers
+   the `dapr-control-plane` PodMonitor (binds the `dapr-system`
+   namespace selector) and the future `cds-app-podmonitor` (binds
+   the `cds` namespace) without a values bump per scrape target.
+
+6. **Dapr OTLP tracing.** `k8s/dapr-config.yaml` updated to replace
+   `tracing.stdout: true` with `tracing.otel.endpointAddress:
+   otel-collector-opentelemetry-collector.cds-observability.svc.cluster.local:4317`
+   + `isSecure: false` + `protocol: grpc`. Sampling rate stays at
+   `"1"` (every span). The Phase 0 `dapr/config.yaml` keeps `stdout:
+   true` for fast log inspection on the local self-hosted dev path —
+   path divergence is intentional (research-prototype; cluster-side
+   gets the OTel pipeline, local-dev keeps the fast log loop).
+
+7. **Dapr PodMonitor pair** — `k8s/observability/dapr-podmonitor.yaml`
+   carries two CRs in `cds-observability` (PodMonitors don't have to
+   live in the target namespace):
+   - `dapr-sidecars-cds` — `namespaceSelector.matchNames: [cds]` +
+     `selector.matchLabels.app.kubernetes.io/part-of: cds`; scrapes
+     port `dapr-metrics` (the named sidecar metrics port the Dapr
+     1.17 injector adds) at 15s interval.
+   - `dapr-control-plane` — `namespaceSelector.matchNames:
+     [dapr-system]` + `selector.matchLabels.app.kubernetes.io/part-of:
+     dapr`; scrapes the helm-installed control-plane pods (sentry,
+     operator, placement, scheduler, injector) on their `metrics`
+     port at 15s interval.
+
+8. **Grafana dashboard ConfigMap.** `k8s/observability/grafana-dapr-
+   dashboard-cm.yaml` ships a minimal Phase 1 starter dashboard
+   (`uid: cds-dapr-sidecars`, four panels — request rate, p95
+   latency, service-invocation rate, healthy-sidecar count) labelled
+   `grafana_dashboard: "1"` so the kube-prometheus-stack grafana
+   sidecar auto-discovers it via
+   `grafana.sidecar.dashboards.searchNamespace: ALL`. Full upstream
+   Dapr dashboards (system-services, sidecar, actor) are a Phase 2
+   import — they bundle ~150KB JSON each and don't materially exceed
+   this starter's value for the close-out smoke.
+
+9. **`cds-observability` namespace** — kept distinct from `cds` so
+   observability bring-up / tear-down is independent of the cds-*
+   workload lifecycle. `cloud-observability-down` does not touch the
+   cds-* services; `cloud-down` does not touch observability.
+
+10. **Justfile additions** (4 recipes + 6 constants):
+    - Pinned constants: `OBSERVABILITY_DIR`, `OBSERVABILITY_NAMESPACE`,
+      `OTEL_COLLECTOR_CHART_VERSION`, `KPS_CHART_VERSION`,
+      `OTEL_COLLECTOR_RELEASE`, `KPS_RELEASE`.
+    - `cloud-observability-up` — gates on `.bin/helm` + `.bin/kubectl`;
+      adds + refreshes the `open-telemetry` and `prometheus-community`
+      helm repos; runs both `helm upgrade --install` calls; applies
+      the PodMonitor + dashboard ConfigMap manifests.
+    - `cloud-observability-down` — `helm uninstall` both releases;
+      `kubectl delete` the PodMonitor + dashboard manifests + namespace.
+      Cluster + Dapr control plane preserved.
+    - `cloud-observability-status` — `kubectl get pods/svc -n
+      cds-observability`.
+    - `cloud-observability-smoke` — in-cluster `kubectl run --rm
+      curlimages/curl:latest --restart=Never` probing the OTel
+      Collector health endpoint (:13133), Prometheus `/-/healthy`
+      (:9090), and Grafana `/api/health` (:80) via in-cluster Service
+      DNS. Foundation gate (Task 11.3); span propagation + dashboard
+      query smoke is Task 11.4's gate.
+
+11. **Tests** — `python/tests/test_k8s_observability.py` covers
+    offline validation (14 cases): directory presence, namespace
+    shape, OTel Collector values shape (mode + ports + receivers +
+    pipeline), kube-prometheus-stack values shape (Prometheus
+    cross-namespace selectors + Grafana sidecar dashboard label),
+    Dapr PodMonitor pair shape (sidecars + control plane,
+    namespaceSelector + matchLabels parity), grafana_dashboard label
+    discovery cross-check (ConfigMap label MUST equal the chart
+    sidecar's discovery label), Dapr config OTLP endpoint matches the
+    chart release-name → service-name pattern, Justfile registers all
+    four recipes + the six constants + the 0.146.1 / 84.5.0 chart
+    version pins, and the up + smoke recipes invoke the right helm
+    releases / health endpoints. The existing
+    `test_dapr_config_well_formed` (in `test_k8s_foundation.py`) is
+    retargeted from `tracing.stdout: true` to the OTLP endpoint
+    assertion + `metric.enabled: true` parity check.
+
+**Consequences.**
+
+- New `k8s/observability/` directory adds ~330 lines of YAML
+  (namespace + 2 helm value files + PodMonitor pair + dashboard CM +
+  README). Manifests + values are inert until `just kind-up &&
+  just dapr-helm-install && just cloud-up && just cloud-observability-up`
+  runs (Task 11.4 close-out gate covers the live span propagation).
+- `bootstrap` chain unchanged (cloud + observability tooling NOT in
+  `bootstrap` — mirrors `fetch-fhir` precedent).
+- Phase 0 `dapr/config.yaml` unchanged (`stdout: true` stays the
+  local-dev tracing path). Cluster-side `k8s/dapr-config.yaml`
+  diverges to OTLP. Path divergence is documented in
+  `k8s/observability/README.md` §"Phase parity".
+- Helm chart pins float on env-overridable defaults; bumping them is
+  a `OTEL_COLLECTOR_CHART_VERSION=...` / `KPS_CHART_VERSION=...`
+  override at recipe-invoke time.
+- `cloud-observability-up` runtime is the major host-side cost
+  (Prometheus + Grafana StatefulSet pulls + 10Gi + 5Gi PVCs). Helm
+  `--wait --timeout 10m` covers the largest expected pull on a fresh
+  cluster.
+- `cloud-observability-down` deletes the namespace; PVCs are lost
+  with it (in-memory state only — research prototype). Add a backup
+  step at Phase 2 if Grafana dashboard customizations need to
+  survive tear-down.
+- Self-hosted Phase 0 recipes untouched. ADR-016 / ADR-017 / ADR-021
+  / ADR-028 / ADR-029 stay authoritative for the local self-hosted
+  path; ADR-030 governs the cluster-side observability path.
+
+**Alternatives rejected.**
+
+- **Raw Prometheus + Grafana manifests instead of helm.** Operator
+  mode (kube-prometheus-stack) ships ServiceMonitor + PodMonitor +
+  PrometheusRule CRDs that make scrape config + alert rules
+  declarative-by-default; raw manifests would require a Prometheus
+  ConfigMap edit + `kubectl rollout restart` per scrape target.
+  Helm is the 2026 SOTA + matches the Dapr 1.17 install pattern
+  (ADR-028 §"Dapr helm chart 1.17 locked").
+- **Single helm chart for the entire observability stack** (e.g.,
+  bring up Tempo + Loki + Mimir + Grafana via Grafana's own
+  `lgtm-distributed` chart). Two charts (collector + KPS) match the
+  upstream Dapr docs precisely; mixing in Tempo + Loki + Mimir
+  would triple the resource footprint for marginal Phase 1 gain.
+  Reopen at Phase 2 if the trace fan-out story warrants a real
+  backend.
+- **ServiceMonitor instead of PodMonitor for Dapr sidecars.** Dapr
+  sidecars are containers injected into pods — they don't have a
+  Service of their own. PodMonitor is the only operator-native
+  scrape target for sidecar containers.
+- **Annotation-based scrape via `prometheus.io/scrape: true` +
+  Prometheus's `kubernetes_sd_configs`.** Works but bypasses the
+  Operator's declarative model + requires editing the Prometheus
+  ConfigMap. PodMonitor CRs keep the contract local to
+  `k8s/observability/dapr-podmonitor.yaml` and survive helm
+  upgrades cleanly.
+- **Zipkin tracing over OTLP for Dapr.** ADR-028 explicitly noted
+  the Phase 0 self-hosted path uses `stdout: true`; the cluster-side
+  path could instead use Zipkin. OTLP is the 2026 vendor-neutral
+  standard (Dapr docs explicitly mark it as the recommended path
+  over Zipkin); Zipkin support is in legacy-compat mode. Choosing
+  OTLP avoids a second Phase 1 retrofit when Tempo / Jaeger / etc.
+  land at Phase 2.
+- **Grafana dashboard inlined inside the values file** (via
+  `grafana.dashboardsConfigMaps` or `grafana.dashboards`). Possible
+  but couples dashboard updates to helm-upgrade cycles; a separate
+  ConfigMap in `k8s/observability/` keeps the dashboard editable
+  without touching the values lock.
+- **Inline Tempo / Loki for trace + log backend.** Phase 1 gate is
+  span emission + sidecar metrics + a Grafana dashboard query — not
+  a full LGTM stack. Adds ~5 PVCs + ~300MB of pod images for no
+  Phase 1-bounded value. Reopen at Phase 2.
+- **Bake OTel app-side instrumentation into cds-harness +
+  cds-kernel + cds-frontend now.** Worthy refactor but it touches
+  the FastAPI / axum / SvelteKit code paths that ADR-017 / ADR-018
+  / ADR-022 govern. Dapr-mediated tracing covers the
+  service-invocation hop already; app-internal spans are a Phase 2
+  instrumentation concern.
+- **Live `cloud-observability-up && cloud-observability-smoke` gate
+  at 11.3.** Inverts the foundation→close-out split a third time.
+  The `test_k8s_observability.py` offline gate covers the static
+  surface; the live span-propagation + dashboard-query smoke stays
+  at 11.4 (where the canonical `contradictory-bound` UNSAT fixture
+  also runs end-to-end).
+- **Embed an ingress controller for external Grafana access in
+  11.3.** ADR-028 §1 reserved the kind cluster's 80→8090 / 443→8443
+  port mappings precisely for this; wiring the actual ingress
+  controller (nginx-ingress / traefik) is a Phase 2 release
+  concern. `kubectl port-forward svc/kube-prometheus-stack-grafana
+  3001:80` is the foundation-level local-access path.
+
+**ADR numbering note.** Sequential-by-task continues: ADR-028 →
+Task 11.1, ADR-029 → Task 11.2, ADR-030 → Task 11.3 (this entry).
+Task 11.4 (cloud axis close-out) → ADR-031 expected; ZK toolchain
+(Task 12.1) → ADR-032 expected. ADR-024's pre-allocation note
+remains planning intent only.
+
+---

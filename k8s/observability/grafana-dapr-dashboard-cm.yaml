@@ -1,0 +1,100 @@
+# Grafana dashboard ConfigMap — picked up by the kube-prometheus-stack
+# grafana sidecar via the `grafana_dashboard: "1"` label (configured in
+# k8s/observability/kube-prometheus-stack-values.yaml under
+# `grafana.sidecar.dashboards`). Lands in the `cds-observability`
+# namespace alongside the rest of the observability stack so the
+# bring-up / tear-down lifecycle stays atomic with the helm releases.
+# Phase 1 cloud observability (Task 11.3, ADR-030).
+#
+# This dashboard is a minimal Phase 1 starter focusing on Dapr service-
+# invocation throughput + latency through the cds-* mesh. It queries
+# the canonical Dapr 1.17 sidecar metrics (`dapr_http_server_request_*`
+# and `dapr_grpc_io_server_*` series) which the dapr-sidecars-cds
+# PodMonitor (k8s/observability/dapr-podmonitor.yaml) ferries into
+# Prometheus. The full upstream Dapr Grafana dashboard set
+# (system-services / sidecar / actor) is a Phase 2 import — they
+# bundle ~150KB JSON each and don't materially exceed this starter's
+# value for the Phase 1 close-out smoke (Task 11.4).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cds-dapr-dashboard
+  namespace: cds-observability
+  labels:
+    grafana_dashboard: "1"
+    app.kubernetes.io/name: cds-dapr-dashboard
+    app.kubernetes.io/part-of: cds
+data:
+  cds-dapr-dashboard.json: |
+    {
+      "annotations": {"list": []},
+      "editable": false,
+      "graphTooltip": 0,
+      "schemaVersion": 39,
+      "tags": ["cds", "dapr"],
+      "timezone": "browser",
+      "title": "CDS Dapr sidecars",
+      "uid": "cds-dapr-sidecars",
+      "version": 1,
+      "time": {"from": "now-30m", "to": "now"},
+      "refresh": "30s",
+      "templating": {"list": []},
+      "panels": [
+        {
+          "id": 1,
+          "type": "timeseries",
+          "title": "HTTP server requests / sec (by app_id)",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "gridPos": {"h": 9, "w": 12, "x": 0, "y": 0},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (app_id) (rate(dapr_http_server_request_count[1m]))",
+              "legendFormat": "{{app_id}}"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "HTTP server p95 latency (ms)",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "gridPos": {"h": 9, "w": 12, "x": 12, "y": 0},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "histogram_quantile(0.95, sum by (le, app_id) (rate(dapr_http_server_latency_bucket[1m])))",
+              "legendFormat": "{{app_id}}"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "Service-invocation requests / sec",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "gridPos": {"h": 9, "w": 12, "x": 0, "y": 9},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (app_id, status) (rate(dapr_http_server_request_count{path=~\"/v1.0/invoke/.*\"}[1m]))",
+              "legendFormat": "{{app_id}} {{status}}"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Healthy Dapr sidecars",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "gridPos": {"h": 9, "w": 12, "x": 12, "y": 9},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "count(up{job=~\"dapr-sidecars-cds.*\"} == 1)",
+              "legendFormat": "up"
+            }
+          ]
+        }
+      ]
+    }

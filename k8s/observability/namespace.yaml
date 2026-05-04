@@ -1,0 +1,15 @@
+# Phase 1 cloud observability namespace (Task 11.3, ADR-030).
+# Holds the OpenTelemetry Collector (OTLP gRPC receiver for Dapr
+# tracing fan-out) and the kube-prometheus-stack release (Prometheus
+# Operator + Prometheus + Grafana + Alertmanager + node-exporter +
+# kube-state-metrics). Kept out of the `cds` namespace so observability
+# bring-up / tear-down is independent of the cds-* workload lifecycle —
+# `cloud-observability-down` does not touch the cds-* services and
+# `cloud-down` does not touch observability.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cds-observability
+  labels:
+    name: cds-observability
+    app.kubernetes.io/part-of: cds

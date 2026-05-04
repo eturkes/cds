@@ -114,7 +114,10 @@ def test_namespaces_manifest_well_formed() -> None:
 
 
 def test_dapr_config_well_formed() -> None:
-    """Mirror of the Phase 0 self-hosted Configuration shape."""
+    """Phase 1 cloud Configuration shape — tracing routed via OTLP to
+    the OpenTelemetry Collector in `cds-observability` (Task 11.3,
+    ADR-030); mTLS off + metric on retain Phase 0 self-hosted parity.
+    """
     doc = _load_yaml(DAPR_CONFIG_PATH)
     assert doc["apiVersion"] == "dapr.io/v1alpha1"
     assert doc["kind"] == "Configuration"
@@ -122,7 +125,14 @@ def test_dapr_config_well_formed() -> None:
     assert doc["metadata"]["namespace"] == CDS_NAMESPACE
     spec = doc["spec"]
     assert spec["tracing"]["samplingRate"] == "1"
-    assert spec["tracing"]["stdout"] is True
+    otel = spec["tracing"]["otel"]
+    assert otel["endpointAddress"] == (
+        "otel-collector-opentelemetry-collector."
+        "cds-observability.svc.cluster.local:4317"
+    )
+    assert otel["isSecure"] is False
+    assert otel["protocol"] == "grpc"
+    assert spec["metric"]["enabled"] is True
     assert spec["mtls"]["enabled"] is False
 
 

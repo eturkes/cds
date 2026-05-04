@@ -1155,6 +1155,150 @@ cloud-smoke:
     echo "✓ cloud smoke green — three /healthz endpoints responsive"
 
 # =============================================================================
+# Phase 1 cloud observability (Task 11.3) — OpenTelemetry Collector +
+# kube-prometheus-stack + Dapr metrics scrape + Grafana dashboard
+# =============================================================================
+# Per ADR-030. Four recipes form the lifecycle:
+#   - cloud-observability-up     : helm install otel-collector +
+#                                  kube-prometheus-stack into the
+#                                  cds-observability namespace, then
+#                                  apply k8s/observability/{namespace,
+#                                  dapr-podmonitor, grafana-dapr-
+#                                  dashboard-cm}.yaml
+#   - cloud-observability-down   : helm uninstall both releases,
+#                                  delete the cds-observability namespace
+#                                  (cluster + Dapr control-plane
+#                                  preserved)
+#   - cloud-observability-status : kubectl get pods/svc -n cds-observability
+#   - cloud-observability-smoke  : in-cluster `kubectl run` of
+#                                  curlimages/curl probing the OTel
+#                                  Collector + Prometheus + Grafana
+#                                  health endpoints via in-cluster
+#                                  Service DNS. Foundation gate
+#                                  (Task 11.3); end-to-end span
+#                                  propagation lands at Task 11.4.
+#
+# Tooling gates: helm + kubectl from .bin/ (staged via `just fetch-cloud`).
+# Helm chart pins are env-overridable for forward-compat.
+
+OBSERVABILITY_DIR             := K8S_DIR + "/observability"
+OBSERVABILITY_NAMESPACE       := env_var_or_default('OBSERVABILITY_NAMESPACE',  'cds-observability')
+OTEL_COLLECTOR_CHART_VERSION  := env_var_or_default('OTEL_COLLECTOR_CHART_VERSION',  '0.146.1')
+KPS_CHART_VERSION             := env_var_or_default('KPS_CHART_VERSION',             '84.5.0')
+OTEL_COLLECTOR_RELEASE        := env_var_or_default('OTEL_COLLECTOR_RELEASE',        'otel-collector')
+KPS_RELEASE                   := env_var_or_default('KPS_RELEASE',                   'kube-prometheus-stack')
+
+# Helm install both releases + apply the PodMonitor / dashboard
+# manifests. Idempotent — `helm upgrade --install` handles install or
+# upgrade. Requires kubectl + helm + an active kind cluster + Dapr
+# already installed.
+cloud-observability-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -x "{{ justfile_directory() }}/.bin/helm" ] || \
+        { echo "helm missing — run \`just fetch-cloud\`"; exit 1; }
+    [ -x "{{ justfile_directory() }}/.bin/kubectl" ] || \
+        { echo "kubectl missing — run \`just fetch-cloud\`"; exit 1; }
+    HELM=( "{{ justfile_directory() }}/.bin/helm" )
+    KCTL=( "{{ justfile_directory() }}/.bin/kubectl" --context "{{KUBECTL_CONTEXT}}" )
+    echo "→ applying cds-observability namespace"
+    "${KCTL[@]}" apply -f "{{OBSERVABILITY_DIR}}/namespace.yaml"
+    echo "→ helm repo refresh"
+    "${HELM[@]}" repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts 2>/dev/null || true
+    "${HELM[@]}" repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null || true
+    "${HELM[@]}" repo update open-telemetry prometheus-community
+    echo "→ helm upgrade --install {{OTEL_COLLECTOR_RELEASE}} (chart {{OTEL_COLLECTOR_CHART_VERSION}})"
+    "${HELM[@]}" upgrade --install {{OTEL_COLLECTOR_RELEASE}} \
+        open-telemetry/opentelemetry-collector \
+        --kube-context "{{KUBECTL_CONTEXT}}" \
+        --version {{OTEL_COLLECTOR_CHART_VERSION}} \
+        --namespace {{OBSERVABILITY_NAMESPACE}} \
+        --values "{{OBSERVABILITY_DIR}}/otel-collector-values.yaml" \
+        --wait \
+        --timeout 5m
+    echo "→ helm upgrade --install {{KPS_RELEASE}} (chart {{KPS_CHART_VERSION}})"
+    "${HELM[@]}" upgrade --install {{KPS_RELEASE}} \
+        prometheus-community/kube-prometheus-stack \
+        --kube-context "{{KUBECTL_CONTEXT}}" \
+        --version {{KPS_CHART_VERSION}} \
+        --namespace {{OBSERVABILITY_NAMESPACE}} \
+        --values "{{OBSERVABILITY_DIR}}/kube-prometheus-stack-values.yaml" \
+        --wait \
+        --timeout 10m
+    echo "→ applying PodMonitors + Grafana dashboard ConfigMap"
+    "${KCTL[@]}" apply -f "{{OBSERVABILITY_DIR}}/dapr-podmonitor.yaml"
+    "${KCTL[@]}" apply -f "{{OBSERVABILITY_DIR}}/grafana-dapr-dashboard-cm.yaml"
+    echo "✓ cloud observability up — namespace {{OBSERVABILITY_NAMESPACE}}"
+
+# Helm uninstall both releases + delete the namespace (clears any
+# leftover PVCs + ConfigMaps). Cluster + Dapr control plane preserved.
+cloud-observability-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -x "{{ justfile_directory() }}/.bin/kubectl" ] || \
+        { echo "kubectl missing — nothing to tear down"; exit 0; }
+    HELM=( "{{ justfile_directory() }}/.bin/helm" )
+    KCTL=( "{{ justfile_directory() }}/.bin/kubectl" --context "{{KUBECTL_CONTEXT}}" )
+    if [ -x "{{ justfile_directory() }}/.bin/helm" ]; then
+        "${HELM[@]}" uninstall {{KPS_RELEASE}} \
+            --kube-context "{{KUBECTL_CONTEXT}}" \
+            --namespace {{OBSERVABILITY_NAMESPACE}} \
+            --ignore-not-found 2>/dev/null || true
+        "${HELM[@]}" uninstall {{OTEL_COLLECTOR_RELEASE}} \
+            --kube-context "{{KUBECTL_CONTEXT}}" \
+            --namespace {{OBSERVABILITY_NAMESPACE}} \
+            --ignore-not-found 2>/dev/null || true
+    fi
+    "${KCTL[@]}" delete -f "{{OBSERVABILITY_DIR}}/grafana-dapr-dashboard-cm.yaml" --ignore-not-found
+    "${KCTL[@]}" delete -f "{{OBSERVABILITY_DIR}}/dapr-podmonitor.yaml" --ignore-not-found
+    "${KCTL[@]}" delete -f "{{OBSERVABILITY_DIR}}/namespace.yaml" --ignore-not-found
+    echo "✓ cloud observability down — namespace {{OBSERVABILITY_NAMESPACE}} removed"
+
+# Print pod + service inventory in the cds-observability namespace.
+cloud-observability-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -x "{{ justfile_directory() }}/.bin/kubectl" ] || \
+        { echo "kubectl missing — run \`just fetch-cloud\`"; exit 0; }
+    KCTL=( "{{ justfile_directory() }}/.bin/kubectl" --context "{{KUBECTL_CONTEXT}}" )
+    echo "::: pods in {{OBSERVABILITY_NAMESPACE}} :::"
+    "${KCTL[@]}" -n "{{OBSERVABILITY_NAMESPACE}}" get pods -o wide || true
+    echo
+    echo "::: services in {{OBSERVABILITY_NAMESPACE}} :::"
+    "${KCTL[@]}" -n "{{OBSERVABILITY_NAMESPACE}}" get svc || true
+
+# In-cluster smoke (Task 11.3): kubectl-run a transient curl pod
+# against /healthz on the OTel Collector + Prometheus + Grafana via
+# in-cluster Service DNS. Returns non-zero on any probe failure.
+# Live span propagation + dashboard query smoke is Task 11.4's gate.
+cloud-observability-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -x "{{ justfile_directory() }}/.bin/kubectl" ] || \
+        { echo "kubectl missing — run \`just fetch-cloud\`"; exit 1; }
+    KCTL=( "{{ justfile_directory() }}/.bin/kubectl" --context "{{KUBECTL_CONTEXT}}" )
+    fail=0
+    for entry in \
+        "{{OTEL_COLLECTOR_RELEASE}}-opentelemetry-collector:13133:/" \
+        "{{KPS_RELEASE}}-prometheus:9090:/-/healthy" \
+        "{{KPS_RELEASE}}-grafana:80:/api/health" ; do
+        IFS=":" read -r svc port path <<< "$entry"
+        url="http://${svc}.{{OBSERVABILITY_NAMESPACE}}.svc.cluster.local:${port}${path}"
+        echo "→ probing $url"
+        if "${KCTL[@]}" -n "{{OBSERVABILITY_NAMESPACE}}" run "obs-smoke-${svc}-$$" \
+                --rm --image=curlimages/curl:latest \
+                --restart=Never --quiet --attach \
+                --command -- curl -fsS --max-time 10 "$url" >/dev/null 2>&1; then
+            echo "  ✓ $svc"
+        else
+            echo "  ✗ $svc"
+            fail=1
+        fi
+    done
+    [ "$fail" = "0" ] || { echo "cloud observability smoke FAILED"; exit 1; }
+    echo "✓ cloud observability smoke green — collector + prometheus + grafana responsive"
+
+# =============================================================================
 # Python (uv + ruff + pytest)
 # =============================================================================
 

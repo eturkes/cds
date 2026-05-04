@@ -1,9 +1,17 @@
 # Dapr Configuration for the K8s side (Phase 1 cloud foundation, Task
-# 11.1). Mirrors `dapr/config.yaml` (the Phase 0 self-hosted shape) so
-# observable behaviour stays parity-equal across the two deployment
-# modes. mTLS off for parity with the local dev path; OpenTelemetry
-# Collector wiring lands at Task 11.3 (ADR-028 §"Observability stays
-# deferred to 11.3").
+# 11.1; observability wired at Task 11.3, ADR-030). Mirrors
+# `dapr/config.yaml` (the Phase 0 self-hosted shape) on the metric
+# enable + mTLS off axes; tracing diverges — Phase 0 uses `stdout:
+# true` for fast log inspection, Phase 1 routes spans to the OpenTelemetry
+# Collector via OTLP gRPC so they fan out to Tempo / Jaeger / Honeycomb
+# without a Dapr-config edit. The collector address is
+# `otel-collector-opentelemetry-collector.cds-observability.svc.cluster
+# .local:4317` — chart release `otel-collector` in the
+# `cds-observability` namespace (k8s/observability/, ADR-030).
+#
+# `samplingRate: "1"` keeps every span (research prototype scale; tens
+# of req/s, not thousands). Re-tune when load shapes change. mTLS off
+# stays parity-equal with the Phase 0 dev posture (ADR-016 §3).
 apiVersion: dapr.io/v1alpha1
 kind: Configuration
 metadata:
@@ -12,7 +20,10 @@ metadata:
 spec:
   tracing:
     samplingRate: "1"
-    stdout: true
+    otel:
+      endpointAddress: "otel-collector-opentelemetry-collector.cds-observability.svc.cluster.local:4317"
+      isSecure: false
+      protocol: grpc
   metric:
     enabled: true
   mtls:
