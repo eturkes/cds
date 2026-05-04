@@ -1299,6 +1299,290 @@ cloud-observability-smoke:
     echo "✓ cloud observability smoke green — collector + prometheus + grafana responsive"
 
 # =============================================================================
+# Phase 1 cloud axis close-out (Task 11.4) — end-to-end `contradictory-bound`
+# UNSAT smoke against the live kind cluster + OTel + Prometheus probes
+# =============================================================================
+# Per ADR-031. Two recipes form the close-out gate:
+#
+#   - cloud-axis-smoke : kubectl port-forward svc/cds-frontend → drive the
+#                        canonical contradictory-bound payload through the
+#                        BFF (`/api/{ingest,translate,deduce,solve}`),
+#                        assert `trace.sat == false` + `len(trace.muc) >= 2`,
+#                        then probe Prometheus for `dapr_http_server_request_count`
+#                        cardinality > 0 and the OTel Collector log stream
+#                        for spans tagged with both `cds-harness` and
+#                        `cds-kernel` app_ids. Optional `--assert-recheck-ok`
+#                        gate runs when CDS_KIMINA_URL is exported (the
+#                        `cds-kernel` Pod must reach Kimina from inside
+#                        the cluster — operators set
+#                        `kubectl set env deploy/cds-kernel -n cds
+#                        CDS_KIMINA_URL=...` before invoking this recipe).
+#   - cloud-tear-down  : chains cloud-observability-down + cloud-down +
+#                        kind-down so a single recipe rewinds the entire
+#                        cloud axis stack; idempotent on missing tooling.
+#
+# Pre-requisites: `just kind-up && just dapr-helm-install && just cloud-build
+# && just cloud-load && just cloud-up && just cloud-observability-up` so the
+# cluster + Dapr control plane + cds-* workloads + observability stack are
+# all live. Wait at least one Prometheus scrape interval (15s) after
+# `cloud-observability-up` before invoking this recipe so the PodMonitor's
+# first scrape lands.
+
+CLOUD_AXIS_LOCAL_PORT  := env_var_or_default('CLOUD_AXIS_LOCAL_PORT',  '14173')
+CLOUD_AXIS_PAYLOAD     := env_var_or_default('CLOUD_AXIS_PAYLOAD',     'data/sample/icu-monitor-02.json')
+CLOUD_AXIS_GUIDELINE   := env_var_or_default('CLOUD_AXIS_GUIDELINE',   'data/guidelines/contradictory-bound.txt')
+CLOUD_AXIS_RECORDED    := env_var_or_default('CLOUD_AXIS_RECORDED',    'data/guidelines/contradictory-bound.recorded.json')
+CLOUD_AXIS_DOC_ID      := env_var_or_default('CLOUD_AXIS_DOC_ID',      'contradictory-bound')
+CLOUD_AXIS_HTTP_BUDGET := env_var_or_default('CLOUD_AXIS_HTTP_BUDGET', '180')
+
+# End-to-end Phase 1 cloud axis close-out (Task 11.4 close-out gate).
+# Requires .bin/{kind,kubectl} + a live kind cluster + cloud-up + cloud-
+# observability-up. Recheck assertion is opt-in via CDS_KIMINA_URL.
+cloud-axis-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo="{{ justfile_directory() }}"
+    [ -x "$repo/.bin/kubectl" ] || \
+        { echo "kubectl missing — run \`just fetch-cloud\`"; exit 1; }
+    [ -x "$repo/.bin/kind" ] || \
+        { echo "kind missing — run \`just fetch-cloud\`"; exit 1; }
+    if ! "$repo/.bin/kind" get clusters 2>/dev/null | grep -qx "{{KIND_CLUSTER_NAME}}"; then
+        echo "kind cluster '{{KIND_CLUSTER_NAME}}' not present — run \`just kind-up\`"
+        exit 1
+    fi
+    KCTL=( "$repo/.bin/kubectl" --context "{{KUBECTL_CONTEXT}}" )
+
+    # Confirm the three cds-* deployments are Ready before we drive traffic.
+    for app in cds-harness cds-kernel cds-frontend; do
+        if ! "${KCTL[@]}" -n "{{CDS_NAMESPACE}}" get deployment/"$app" >/dev/null 2>&1; then
+            echo "deployment/$app missing in namespace {{CDS_NAMESPACE}} — run \`just cloud-up\`"
+            exit 1
+        fi
+    done
+    "${KCTL[@]}" -n "{{CDS_NAMESPACE}}" rollout status deployment/cds-frontend --timeout=2m
+    "${KCTL[@]}" -n "{{CDS_NAMESPACE}}" rollout status deployment/cds-harness  --timeout=2m
+    "${KCTL[@]}" -n "{{CDS_NAMESPACE}}" rollout status deployment/cds-kernel   --timeout=2m
+
+    # Confirm the observability stack is reachable in-cluster (smoke probes
+    # against the OTel Collector + Prometheus before the BFF run).
+    obs_missing=0
+    if ! "${KCTL[@]}" -n "{{OBSERVABILITY_NAMESPACE}}" get deployment/{{OTEL_COLLECTOR_RELEASE}}-opentelemetry-collector >/dev/null 2>&1; then
+        echo "OTel Collector deployment missing — run \`just cloud-observability-up\` (or set CLOUD_AXIS_SKIP_OBS=1 to bypass observability probes)"
+        obs_missing=1
+    fi
+    if ! "${KCTL[@]}" -n "{{OBSERVABILITY_NAMESPACE}}" get prometheus.monitoring.coreos.com/{{KPS_RELEASE}} >/dev/null 2>&1; then
+        echo "kube-prometheus-stack missing — run \`just cloud-observability-up\` (or set CLOUD_AXIS_SKIP_OBS=1)"
+        obs_missing=1
+    fi
+    if [ "$obs_missing" -ne 0 ] && [ "${CLOUD_AXIS_SKIP_OBS:-0}" != "1" ]; then
+        exit 1
+    fi
+
+    mkdir -p target
+
+    pf_pid_file="target/cloud-axis-port-forward.pid"
+    pf_log="target/cloud-axis-port-forward.log"
+    smoke_log="target/cloud-axis-smoke.log"
+
+    cleanup() {
+        if [ -f "$pf_pid_file" ]; then
+            pid=$(cat "$pf_pid_file")
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -TERM "$pid" 2>/dev/null || true
+                for _ in $(seq 1 50); do
+                    kill -0 "$pid" 2>/dev/null || break
+                    sleep 0.1
+                done
+                if kill -0 "$pid" 2>/dev/null; then
+                    kill -KILL "$pid" 2>/dev/null || true
+                fi
+            fi
+            rm -f "$pf_pid_file"
+        fi
+    }
+    trap cleanup EXIT INT TERM
+
+    echo "→ kubectl port-forward svc/cds-frontend {{CLOUD_AXIS_LOCAL_PORT}}:3000 (background)"
+    "${KCTL[@]}" -n "{{CDS_NAMESPACE}}" port-forward svc/cds-frontend \
+        "{{CLOUD_AXIS_LOCAL_PORT}}:3000" \
+        > "$pf_log" 2>&1 < /dev/null &
+    echo $! > "$pf_pid_file"
+
+    # Wait for the port-forward to accept connections before we POST.
+    for _ in $(seq 1 60); do
+        code=$(curl -s -o /dev/null -w '%{http_code}' \
+            "http://127.0.0.1:{{CLOUD_AXIS_LOCAL_PORT}}/" || echo 000)
+        if [ "$code" = "200" ]; then break; fi
+        sleep 0.5
+    done
+    if [ "${code:-000}" != "200" ]; then
+        echo "✗ cloud-axis-smoke: port-forward did not accept connections — see $pf_log"
+        tail -20 "$pf_log" || true
+        exit 1
+    fi
+    echo "✓ port-forward ready — driving canonical /api/* against cds-frontend"
+
+    # Drive ingest → translate → deduce → solve through the BFF and assert
+    # `trace.sat == false`. Optional /api/recheck step runs only when
+    # CDS_KIMINA_URL is set (the cds-kernel Pod must reach the URL from
+    # inside the cluster — operator's responsibility to wire env or a
+    # Service/Endpoints aimed at the host).
+    BFF_PORT="{{CLOUD_AXIS_LOCAL_PORT}}" \
+    PAYLOAD_PATH="{{CLOUD_AXIS_PAYLOAD}}" \
+    GUIDELINE_PATH="{{CLOUD_AXIS_GUIDELINE}}" \
+    RECORDED_PATH="{{CLOUD_AXIS_RECORDED}}" \
+    DOC_ID="{{CLOUD_AXIS_DOC_ID}}" \
+    HTTP_BUDGET="{{CLOUD_AXIS_HTTP_BUDGET}}" \
+    KIMINA_URL="${CDS_KIMINA_URL:-}" \
+    python3 - <<'PY' | tee "$smoke_log"
+    import json, os, sys, urllib.request, urllib.error
+
+    BFF = f"http://127.0.0.1:{os.environ['BFF_PORT']}"
+    BUDGET = int(os.environ['HTTP_BUDGET'])
+
+    def post(path, body):
+        url = f"{BFF}/{path}"
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(
+            url, method='POST', data=data,
+            headers={'content-type': 'application/json'},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=BUDGET) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            sys.stderr.write(f"✗ {path}: HTTP {e.code} {e.read().decode()[:500]}\n")
+            sys.exit(1)
+        except Exception as e:
+            sys.stderr.write(f"✗ {path}: {e}\n")
+            sys.exit(1)
+
+    envelope = json.load(open(os.environ['PAYLOAD_PATH']))
+    text     = open(os.environ['GUIDELINE_PATH']).read()
+    recorded = json.load(open(os.environ['RECORDED_PATH']))
+
+    print(">>> /api/ingest", file=sys.stderr)
+    payload = post('api/ingest', {'format': 'json', 'envelope': envelope})
+    assert isinstance(payload.get('samples'), list) and payload['samples'], \
+        'ingest returned empty samples'
+
+    print(">>> /api/translate", file=sys.stderr)
+    translate = post('api/translate', {
+        'doc_id': os.environ['DOC_ID'],
+        'text':   text,
+        'root':   recorded['root'],
+        'logic':  'QF_LRA',
+    })
+    matrix = translate['matrix']
+    assert matrix.get('logic') == 'QF_LRA', f"translate.matrix.logic={matrix.get('logic')}"
+
+    print(">>> /api/deduce", file=sys.stderr)
+    verdict = post('api/deduce', {'payload': payload})
+    assert isinstance(verdict.get('breach_summary'), dict), 'deduce missing breach_summary'
+
+    print(">>> /api/solve", file=sys.stderr)
+    trace = post('api/solve', {
+        'matrix':  matrix,
+        'options': {'timeout_ms': 30000},
+    })
+    assert trace.get('sat') is False, f"trace.sat={trace.get('sat')!r}, expected False"
+    assert isinstance(trace.get('muc'), list) and len(trace['muc']) >= 2, \
+        f"expected >=2 MUC entries, got {trace.get('muc')!r}"
+
+    summary = {
+        'trace_sat':          trace['sat'],
+        'trace_muc_len':      len(trace['muc']),
+        'breach_count':       len(verdict.get('breach_summary') or {}),
+        'matrix_assumptions': len(matrix.get('assumptions') or []),
+    }
+
+    if os.environ.get('KIMINA_URL'):
+        print(">>> /api/recheck (CDS_KIMINA_URL set)", file=sys.stderr)
+        recheck = post('api/recheck', {
+            'trace':   trace,
+            'options': {
+                'kimina_url': os.environ['KIMINA_URL'],
+                'timeout_ms': 60000,
+                'custom_id':  'cds-cloud-axis-smoke',
+            },
+        })
+        assert recheck.get('ok') is True, f"recheck.ok={recheck.get('ok')!r}, expected True"
+        summary['recheck_ok'] = recheck['ok']
+    else:
+        print(
+            ">>> /api/recheck SKIPPED (CDS_KIMINA_URL unset; deferrable per ADR-031)",
+            file=sys.stderr,
+        )
+
+    print('\n✓ cloud-axis-smoke /api/* drive complete', file=sys.stderr)
+    print(json.dumps(summary, indent=2))
+    PY
+
+    if [ "${CLOUD_AXIS_SKIP_OBS:-0}" = "1" ]; then
+        echo "→ observability probes skipped (CLOUD_AXIS_SKIP_OBS=1)"
+    else
+        echo "→ Prometheus probe: dapr_http_server_request_count cardinality"
+        prom_url="http://{{KPS_RELEASE}}-prometheus.{{OBSERVABILITY_NAMESPACE}}.svc.cluster.local:9090"
+        # Allow a couple of scrape intervals to elapse so the metric has
+        # at least one sample; PodMonitor scrapes at 15s.
+        prom_ok=0
+        for attempt in $(seq 1 6); do
+            if "${KCTL[@]}" -n "{{OBSERVABILITY_NAMESPACE}}" run "cloud-axis-prom-$$-$attempt" \
+                    --rm --image=curlimages/curl:latest \
+                    --restart=Never --quiet --attach \
+                    --command -- curl -fsS --max-time 10 \
+                    "${prom_url}/api/v1/query?query=count(dapr_http_server_request_count)" \
+                    > "target/cloud-axis-prom-$attempt.json" 2>&1; then
+                if grep -q '"resultType":"vector"' "target/cloud-axis-prom-$attempt.json" \
+                    && ! grep -q '"result":\[\]' "target/cloud-axis-prom-$attempt.json"; then
+                    prom_ok=1
+                    break
+                fi
+            fi
+            sleep 5
+        done
+        if [ "$prom_ok" = "1" ]; then
+            echo "  ✓ Prometheus has dapr_http_server_request_count samples"
+        else
+            echo "  ✗ Prometheus did not return non-empty cardinality after 6 attempts"
+            exit 1
+        fi
+
+        echo "→ OTel Collector log probe: spans tagged cds-harness AND cds-kernel"
+        # The debug exporter dumps OTLP spans (with resource attributes
+        # incl. `app_id` from the Dapr side and Pod metadata from the
+        # kubernetesattributes preset) to stdout. Tail the most recent
+        # window of logs and grep for both app_ids.
+        otel_log="target/cloud-axis-otel.log"
+        "${KCTL[@]}" -n "{{OBSERVABILITY_NAMESPACE}}" logs \
+            "deployment/{{OTEL_COLLECTOR_RELEASE}}-opentelemetry-collector" \
+            --tail=2000 > "$otel_log" 2>&1 || true
+        harness_hits=$(grep -c "cds-harness" "$otel_log" 2>/dev/null || echo 0)
+        kernel_hits=$(grep -c "cds-kernel"  "$otel_log" 2>/dev/null || echo 0)
+        echo "  cds-harness mentions=$harness_hits, cds-kernel mentions=$kernel_hits"
+        if [ "${harness_hits:-0}" -gt 0 ] && [ "${kernel_hits:-0}" -gt 0 ]; then
+            echo "  ✓ OTel Collector log carries spans for both sidecars"
+        else
+            echo "  ✗ OTel Collector log missing one or both app_ids — see $otel_log"
+            exit 1
+        fi
+    fi
+
+    echo "✓ cloud-axis-smoke complete — see $smoke_log for the BFF summary"
+
+# Symmetric tear-down for the entire Phase 1 cloud axis. Chains the
+# observability stack down, then the cds-* workloads, then the kind
+# cluster itself. Idempotent on missing tooling — each stage gates on
+# its own kubectl / helm / kind binary and exits cleanly if absent.
+cloud-tear-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just cloud-observability-down >/dev/null 2>&1 || true
+    just cloud-down              >/dev/null 2>&1 || true
+    just kind-down               >/dev/null 2>&1 || true
+    echo "✓ cloud-tear-down complete — observability + workloads + cluster removed"
+
+# =============================================================================
 # Python (uv + ruff + pytest)
 # =============================================================================
 

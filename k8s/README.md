@@ -1,9 +1,9 @@
 # Phase 1 Cloud — Kubernetes manifests + kind cluster bootstrap
 
 > **Status:** Foundation (Task 11.1, ADR-028) + service deployment
-> (Task 11.2, ADR-029) + observability (Task 11.3, ADR-030).
-> End-to-end `contradictory-bound` smoke against the kind cluster
-> closes the cloud axis at Task 11.4.
+> (Task 11.2, ADR-029) + observability (Task 11.3, ADR-030) +
+> end-to-end close-out (Task 11.4, ADR-031). **Cloud axis CLOSED.**
+> Phase 1 ZK toolchain remains open at Task 12.1.
 
 ## Layout
 
@@ -38,6 +38,9 @@ just cloud-smoke              # in-cluster /healthz round-trip across the three 
 just cloud-observability-up   # helm install OTel Collector + kube-prometheus-stack;
                               # apply Dapr PodMonitors + Grafana dashboard ConfigMap
 just cloud-observability-smoke# in-cluster probes for collector + prometheus + grafana
+just cloud-axis-smoke         # end-to-end contradictory-bound UNSAT through the BFF
+                              # (`kubectl port-forward svc/cds-frontend`) + Prometheus
+                              # cardinality probe + OTel Collector span probe
 ```
 
 Status / inspection:
@@ -54,6 +57,8 @@ just cloud-down          # deletes workloads + components + config + namespace
                          # (cluster preserved)
 just kind-down           # destroys the kind cluster (helm install vanishes with it)
 just cloud-clean         # alias for kind-down
+just cloud-tear-down     # full reverse-order rewind: observability-down →
+                         # cloud-down → kind-down (idempotent on missing tools)
 ```
 
 ## Container runtime

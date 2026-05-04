@@ -6,10 +6,91 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 11.3 — Cloud observability. Shipped the OpenTelemetry Collector + kube-prometheus-stack scaffold for the Phase 1 cloud axis. New `k8s/observability/` carries six files: **namespace.yaml** (`cds-observability` Namespace, kept distinct from `cds` so observability lifecycle is independent of cds-* workloads), **otel-collector-values.yaml** (helm values for `open-telemetry/opentelemetry-collector` 0.146.1 — mode: deployment, single replica, `presets.kubernetesAttributes.enabled: true` for k8s-metadata enrichment, OTLP gRPC :4317 + OTLP HTTP :4318 receivers, batch + memory_limiter processors, debug exporter for traces, debug + prometheus exporters for metrics on :8889), **kube-prometheus-stack-values.yaml** (helm values for `prometheus-community/kube-prometheus-stack` 84.5.0 — `fullnameOverride: kube-prometheus-stack`, all four `*SelectorNilUsesHelmValues: false` so PodMonitor / ServiceMonitor / Probe / Rule CRs in any namespace are picked up, Prometheus 7d retention + 10Gi PVC, Grafana 5Gi PVC + sidecar dashboard discovery on `grafana_dashboard: "1"` label across ALL namespaces + admin password `cds-admin`, Alertmanager **disabled** for foundation, defaultRules + node-exporter + kube-state-metrics enabled), **dapr-podmonitor.yaml** (two PodMonitor CRs — `dapr-sidecars-cds` namespaceSelector `[cds]` + matchLabels `app.kubernetes.io/part-of: cds` scraping port `dapr-metrics` at 15s; `dapr-control-plane` namespaceSelector `[dapr-system]` + matchLabels `app.kubernetes.io/part-of: dapr` scraping port `metrics` at 15s — both live in `cds-observability` because PodMonitors don't have to live in their target namespace), **grafana-dapr-dashboard-cm.yaml** (ConfigMap `cds-dapr-dashboard` labelled `grafana_dashboard: "1"` so the kube-prometheus-stack grafana sidecar auto-loads it; carries a 4-panel starter dashboard `uid: cds-dapr-sidecars` querying `dapr_http_server_request_count` rate, `dapr_http_server_latency_bucket` p95, service-invocation rate, and `up{job=~"dapr-sidecars-cds.*"}` count — full upstream Dapr dashboards (system-services, sidecar, actor) deferred to Phase 2 import), **README.md** (layout + bring-up + version pins + Phase parity). Modified `k8s/dapr-config.yaml`: replaced `tracing.stdout: true` with `tracing.otel.endpointAddress: otel-collector-opentelemetry-collector.cds-observability.svc.cluster.local:4317` + `isSecure: false` + `protocol: grpc` (the chart-release-name → service-name pattern); kept `samplingRate: "1"`, `metric.enabled: true`, `mtls.enabled: false`. Phase 0 `dapr/config.yaml` UNCHANGED (`stdout: true` stays for the fast local-dev log loop — path divergence is intentional). Modified `k8s/README.md`: added observability row + bring-up commands; banner status updated to include 11.3. Justfile additions (4 recipes + 6 constants): `cloud-observability-up` (gates `.bin/helm` + `.bin/kubectl`; `helm repo add` open-telemetry + prometheus-community + `repo update`; two `helm upgrade --install` calls into `cds-observability` namespace with the values files + `--wait --timeout 5m`/`10m`; `kubectl apply` PodMonitor + dashboard ConfigMap), `cloud-observability-down` (helm uninstall both releases + delete manifests + delete namespace; cluster + Dapr control plane preserved), `cloud-observability-status` (`kubectl get pods/svc -n cds-observability`), `cloud-observability-smoke` (in-cluster `kubectl run --rm curlimages/curl:latest --restart=Never` probing OTel Collector health on :13133, Prometheus `/-/healthy` on :9090, Grafana `/api/health` on :80 via in-cluster Service DNS — Task 11.3 foundation gate; live span propagation + dashboard query smoke is Task 11.4's gate). Pinned constants: `OBSERVABILITY_DIR`, `OBSERVABILITY_NAMESPACE` (`cds-observability`), `OTEL_COLLECTOR_CHART_VERSION` (`0.146.1`), `KPS_CHART_VERSION` (`84.5.0`), `OTEL_COLLECTOR_RELEASE` (`otel-collector`), `KPS_RELEASE` (`kube-prometheus-stack`). Web-searches executed at decision time (Plan §10 step 4): `"OpenTelemetry collector helm chart 2026 kubernetes deployment latest version"` → chart family `open-telemetry/opentelemetry-collector` on `https://open-telemetry.github.io/opentelemetry-helm-charts`; modes deployment/daemonset/statefulset; single-replica deployment is local-cluster default; `"opentelemetry-collector helm chart latest version April 2026 0.1 release"` → 0.146.1 stable line; `"kube-prometheus-stack helm chart version 2026 latest release prometheus operator grafana"` → 84.5.0 (2026-03-30); operator-mode (PodMonitor / ServiceMonitor / PrometheusRule CRDs) is 2026 SOTA; `"Dapr observability OpenTelemetry collector OTLP tracing config 2026 zipkin endpoint kubernetes"` → Dapr 1.17 OTLP-native via `spec.tracing.otel.endpointAddress` (replaces `tracing.zipkin.endpointAddress` legacy); `"Dapr metrics prometheus scrape ServiceMonitor 2026 dashboard grafana kubernetes"` → Dapr sidecar /metrics on port 9090 default; PodMonitor with `namespaceSelector` + label selector + `targetPort: 9090` (port name `dapr-metrics` in 1.17+) is the recommended pattern. Final gate (offline only — live recipes gated as expected): `uv run pytest -q` → **233 pass + 1 Kimina-skipped** (219 → 233 = 14 new `test_k8s_observability.py` cases — directory presence, namespace shape, OTel Collector values shape (mode + ports + receivers + pipeline), kube-prometheus-stack values shape (Prometheus cross-namespace selectors + Grafana sidecar dashboard label), Dapr PodMonitor pair shape (sidecars + control plane, namespaceSelector + matchLabels parity), grafana_dashboard label discovery cross-check, Dapr config OTLP endpoint matches chart release-name → service-name pattern, Justfile registers all four recipes + six constants + 0.146.1 / 84.5.0 chart-version pins, up + smoke recipes invoke right helm releases / health endpoints); `uv run ruff check .` → clean; `cargo check --workspace --quiet` → clean (no Rust touchpoints); `just env-verify` → clean (no new lines — observability uses the existing `.bin/{helm,kubectl}` from `fetch-cloud`); `just --list | grep cloud-observability` → four new recipes registered. Existing `test_dapr_config_well_formed` (in `test_k8s_foundation.py`) retargeted from `tracing.stdout: true` to OTLP endpoint assertion + `metric.enabled: true` parity — still 14 foundation tests pass. `just cloud-observability-up && just cloud-observability-smoke` is the live integration gate (gated on host docker/podman + `.bin/{kind,kubectl,helm}` + a running kind cluster + `dapr-helm-install` + `cloud-up`); not run on this dev box because the gate dependencies are not staged. Decisions captured in **ADR-030 — Phase 1 cloud observability**. **No PHASE flip** (1 → 2 deferred to Task 12.4 per ADR-024 §4). **No Cargo workspace changes; no Python source changes; no frontend source changes — only k8s manifests + tests + Justfile + memory.**
-- **Next up:** **Task 11.4 — Cloud axis close-out.** End-to-end `contradictory-bound` UNSAT smoke against the live kind cluster, with span propagation visible in OTel Collector logs + a working Grafana dashboard query (`dapr_http_server_request_count` cardinality > 0). Likely shape: new `cloud-axis-smoke` (or `cloud-pipeline`) Justfile recipe that brings up `kind-up + dapr-helm-install + cloud-build + cloud-load + cloud-up + cloud-observability-up`, drives a guideline payload through the BFF (or directly through cds-harness Service DNS), asserts the verdict matches `data/guidelines/contradictory-bound.recorded.json`'s expected UNSAT, then probes the OTel Collector logs for at least one span carrying both cds-harness + cds-kernel app_ids; `cloud-tear-down` symmetric tear-down recipe. ADR-031 expected. May also need a Kimina deployment (Service + Deployment) in `cds` namespace if `/v1/recheck` is to be exercised end-to-end (deferrable behind a flag). Phase 1 cloud axis closes here; PHASE flip 1 → 2 still deferred to Task 12.4.
+- **Last completed:** Task 11.4 — Cloud axis close-out. Shipped the end-to-end `contradictory-bound` UNSAT smoke against the live kind cluster + symmetric tear-down. New Justfile additions (2 recipes + 6 constants): **`cloud-axis-smoke`** (gates on `.bin/{kind,kubectl}` + a live cluster + `rollout status` for cds-{harness,kernel,frontend} + the observability stack [bypassable via `CLOUD_AXIS_SKIP_OBS=1`]; `kubectl port-forward svc/cds-frontend {{CLOUD_AXIS_LOCAL_PORT}}:3000` in the background with a `trap cleanup EXIT INT TERM` for the port-forward PID; drives `/api/{ingest,translate,deduce,solve}` through the BFF via inline python3 urllib script identical in shape to `frontend-bff-smoke`'s driver — asserts `payload.samples` non-empty, `matrix.logic == QF_LRA`, `breach_summary` is a dict, `trace.sat == false`, `len(trace.muc) >= 2`; opt-in `/api/recheck` step gated behind `${CDS_KIMINA_URL:-}` ≠ empty [the cds-kernel Pod must reach Kimina from inside the cluster — operator wires `kubectl set env deploy/cds-kernel -n cds CDS_KIMINA_URL=...` before invoking; ADR-031 §"Why CDS_KIMINA_URL is opt-in"]; **observability probes:** in-cluster `kubectl run --rm curlimages/curl:latest --restart=Never` against `kube-prometheus-stack-prometheus.cds-observability.svc.cluster.local:9090/api/v1/query?query=count(dapr_http_server_request_count)` retried up to 6× with 5s backoff [accommodates the 15s PodMonitor scrape interval]; OTel Collector log probe via `kubectl logs deployment/otel-collector-opentelemetry-collector --tail=2000` + `grep -c` for both `cds-harness` and `cds-kernel` [debug exporter dumps spans to stdout — both app_ids must show up to prove Dapr → OTLP → Collector propagation across the service-invocation hop]); **`cloud-tear-down`** (chains `cloud-observability-down` → `cloud-down` → `kind-down` with `>/dev/null 2>&1 || true` per stage so missing tooling is non-fatal; full reverse-order rewind of the entire cloud axis stack). Pinned constants: `CLOUD_AXIS_LOCAL_PORT` (default 14173), `CLOUD_AXIS_PAYLOAD` (`data/sample/icu-monitor-02.json`), `CLOUD_AXIS_GUIDELINE` (`data/guidelines/contradictory-bound.txt`), `CLOUD_AXIS_RECORDED` (`data/guidelines/contradictory-bound.recorded.json`), `CLOUD_AXIS_DOC_ID` (`contradictory-bound`), `CLOUD_AXIS_HTTP_BUDGET` (180s per HTTP request through the BFF). Modified `k8s/cds-frontend.yaml`: injected `DAPR_HTTP_PORT_HARNESS=3500` + `DAPR_HTTP_PORT_KERNEL=3500` env vars on the cds-frontend container — the BFF reads them at request time (ADR-022 §3 / `frontend/src/lib/server/dapr.ts` lines 24-25) and Phase 0 self-hosted ran two daprd processes on different ports (one per backend), but in K8s the cds-frontend Pod has a single daprd sidecar at `127.0.0.1:3500` that routes to ANY app-id via the placement service — so both env vars must point at 3500 (without this fix `/api/{deduce,solve,recheck}` would have silently 502'd against port 3501 in the cluster). Modified `k8s/README.md`: banner promoted to "11.1 + 11.2 + 11.3 + 11.4 — **Cloud axis CLOSED**"; added `cloud-axis-smoke` row to bring-up workflow + `cloud-tear-down` row to tear-down. New `python/tests/test_cloud_axis.py` carries 14 offline cases (Justfile recipe + constant registration, smoke gates on `.bin/{kind,kubectl}` + cluster presence + rollout status, port-forward + BFF `/api/{ingest,translate,deduce,solve}` shape, UNSAT assertion, recheck gating on CDS_KIMINA_URL, Prometheus query API + KPS-Prometheus Service DNS, OTel Collector log probe via `kubectl logs deployment/...` + grep on both app_ids, observability skip flag, port-forward cleanup trap, tear-down chain order, cds-frontend.yaml dapr-port env injection, k8s/README.md banner + recipe rows, Plan.md row 11.4 → DONE, Memory_Scratchpad active pointer advance, ADR-031 presence). Final gate (offline only — live recipes gated as expected): `uv run pytest -q` → **247 pass + 1 Kimina-skipped** (233 → 247 = 14 new `test_cloud_axis.py` cases); `uv run ruff check .` → clean; `cargo check --workspace --quiet` → clean (no Rust touchpoints); `just env-verify` → clean; `just --list | grep -E "cloud-axis|cloud-tear"` → both new recipes registered. `just kind-up && just dapr-helm-install && just cloud-build && just cloud-load && just cloud-up && just cloud-observability-up && just cloud-axis-smoke` is the live integration gate (gated on host docker/podman + `.bin/{z3,cvc5,kind,kubectl,helm}` + ~5m of cluster bring-up); not run on this dev box because the gate dependencies are not staged. Decisions captured in **ADR-031 — Phase 1 cloud axis close-out**. **No PHASE flip** (1 → 2 still deferred to Task 12.4 per ADR-024 §4). **No Cargo workspace changes; no Python source changes; no frontend source changes — only k8s/cds-frontend.yaml env injection + tests + Justfile + memory.**
+- **Next up:** **Task 12.1 — ZK toolchain selection.** Phase 1 ZK axis foundation. Web-search at decision time for "Risc0 SP1 Halo2 PLONK 2026 SOTA zk-SNARK toolchain rust", "ZK proof system 2026 production ready post-quantum SMT trace", "post-quantum zero-knowledge proof toolchain 2026". Likely shape: new `crates/zk_kernel/` Cargo crate stub (axis-aligned with `cds-kernel`); ADR-032 (sequential-by-task numbering keeps holding) capturing the toolchain pick; offline tests asserting the crate's manifest + module hierarchy. `Plan.md §6` Phase 1 stack-additions table row for Task 12 has open candidates — the web-search at the start of Task 12.1 finalises the lock. Phase 1 ZK axis closes at Task 12.4 (PHASE flip 1 → 2 lands then per ADR-024 §4).
 
-> **Phase 1 axis 11 (Cloud) progress: 11.1 + 11.2 + 11.3 DONE.** The strict §8.2 ordering rule selects `11.4` next. PHASE constants stay at 1 across Phase 1 and flip 1 → 2 at Task 12.4 close-out (ADR-024 §4).
+> **Phase 1 axis 11 (Cloud) progress: 11.1 + 11.2 + 11.3 + 11.4 DONE — Cloud axis CLOSED.** **Phase 1 axis 10 (FHIR) progress: 10.1 + 10.2 + 10.3 + 10.4 DONE — FHIR axis CLOSED.** The strict §8.2 ordering rule selects `12.1` next. PHASE constants stay at 1 across Phase 1 and flip 1 → 2 at Task 12.4 close-out (ADR-024 §4).
+
+## Session 2026-05-04 — Task 11.4 close-out (ADR-031) — Cloud axis CLOSED
+
+Closed the Phase 1 cloud axis. ADR-028 §"Live cluster bring-up + smoke
+at 11.1 inverts the foundation→integration split" deferred the
+end-to-end gate to 11.4; ADR-029 §"Live `cloud-build && cloud-load &&
+cloud-up && cloud-smoke` gate at 11.2 inverts the split a second time"
+deferred it again so observability could land first; ADR-030 §"Live
+`cloud-observability-up && cloud-observability-smoke` gate at 11.3
+inverts the split a third time" deferred it once more so the
+close-out smoke could exercise span propagation. 11.4 finally lands
+the live gate.
+
+**End-to-end driver path** (BFF over `kubectl port-forward`):
+1. `kubectl port-forward svc/cds-frontend 14173:3000` in background.
+2. POST `/api/ingest` with `data/sample/icu-monitor-02.json` →
+   ClinicalTelemetryPayload.
+3. POST `/api/translate` with `data/guidelines/contradictory-bound.txt`
+   + `contradictory-bound.recorded.json#root` → SMT_Constraint_Matrix.
+4. POST `/api/deduce` with the payload → BreachVerdict
+   (`breach_summary` shape).
+5. POST `/api/solve` with the matrix → Formal_Verification_Trace
+   (`sat == false`, `len(muc) >= 2`).
+6. **Optional** POST `/api/recheck` (only when `CDS_KIMINA_URL` is
+   set + the cds-kernel Pod can reach it from inside the cluster).
+
+**Observability probes** (post-smoke, fail-loud):
+- Prometheus `count(dapr_http_server_request_count) > 0` via the
+  in-cluster Prometheus HTTP API (kubectl run curl pod, retried up
+  to 6× with 5s backoff to absorb the PodMonitor's 15s scrape
+  cadence).
+- OTel Collector log stream contains spans tagged with both
+  `cds-harness` AND `cds-kernel` (the contrib collector's debug
+  exporter writes OTLP spans to stdout — `kubectl logs` + `grep`
+  is sufficient at this Phase 1 maturity; richer trace queries
+  land at Phase 2 once Tempo/Jaeger arrives).
+
+**Why kubectl port-forward, not an in-cluster Job.** The driver is a
+pure JSON-over-HTTP loop — no in-cluster privilege required. A Job
+would need ConfigMap-mounted guideline + recorded fixtures plus a
+shared image to host the python3 driver, which adds two
+responsibilities (the Job manifest + the image). `kubectl
+port-forward` reuses the host's python3 + the canonical fixture
+files on disk; teardown is a single PID kill. Re-evaluate when
+ingress lands at Phase 2.
+
+**Why CDS_KIMINA_URL is opt-in.** The cds-kernel container does NOT
+ship with `CDS_KIMINA_URL` baked in (ADR-029 §"Why no Lean inside
+cds-kernel"). Wiring it requires either an in-cluster Kimina
+deployment or `kubectl set env deploy/cds-kernel -n cds
+CDS_KIMINA_URL=http://host.docker.internal:5000` before invoking
+the smoke. Both are operator-side concerns; the smoke recipe
+defaults to the dependency-free path (ingest→translate→deduce→solve)
+and emits a loud `>>> /api/recheck SKIPPED` when the env is unset.
+
+**Why DAPR_HTTP_PORT_{HARNESS,KERNEL}=3500 in cds-frontend.yaml.**
+The BFF reads these at request time — Phase 0 self-hosted ran two
+daprd processes on different ports (one per backend), so the BFF
+defaults to 3500 / 3501. In K8s the BFF Pod gets ONE daprd sidecar
+listening on `127.0.0.1:3500` that routes to any app-id via
+placement. Without the env injection, `/api/{deduce,solve,recheck}`
+would silently 502 against port 3501 in the cluster (a Phase 0 test
+contract that K8s breaks). The fix is surgical — two env entries
+on the cds-frontend container — and the test
+`test_cds_frontend_injects_dapr_http_ports` is the regression
+tripwire.
+
+**Why CLOUD_AXIS_SKIP_OBS=1 bypass.** The smoke serves two operator
+modes: (a) full close-out gate (observability up + spans + metrics
+checked); (b) BFF-only smoke when an operator deferred
+`cloud-observability-up` to save host resources. The skip flag
+gives mode (b) without forking the recipe. The default is mode (a).
+
+**Why a 6×5s retry on Prometheus.** PodMonitor scrapes at 15s.
+`cloud-axis-smoke` may finish driving the BFF before the first
+post-smoke scrape lands. Six attempts × 5s = 30s budget covers two
+scrape intervals comfortably; 15s alone wouldn't.
+
+**Why no PHASE flip.** ADR-024 §4 binds: PHASE constants stay at 1
+across all Phase 1 sub-tasks and flip 1 → 2 at Task 12.4 close-out.
+Cloud axis closes here, ZK axis is still open.
 
 ## Session 2026-05-04 — Task 11.3 close-out (ADR-030) — Cloud observability INTEGRATED
 

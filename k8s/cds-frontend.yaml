@@ -49,6 +49,15 @@ spec:
               value: "0.0.0.0"
             - name: PORT
               value: "3000"
+            # The Dapr injector exposes this pod's daprd HTTP surface
+            # at 127.0.0.1:3500. The BFF reads HARNESS / KERNEL ports
+            # separately (Phase 0 self-hosted ran two daprd processes on
+            # different ports — ADR-022 §3); inside a single K8s pod
+            # both invocations route through the one sidecar at 3500.
+            - name: DAPR_HTTP_PORT_HARNESS
+              value: "3500"
+            - name: DAPR_HTTP_PORT_KERNEL
+              value: "3500"
           readinessProbe:
             httpGet:
               path: /

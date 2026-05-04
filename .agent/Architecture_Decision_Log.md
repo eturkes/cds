@@ -4651,3 +4651,224 @@ Task 11.4 (cloud axis close-out) → ADR-031 expected; ZK toolchain
 remains planning intent only.
 
 ---
+
+## ADR-031 — Phase 1 cloud axis close-out: kubectl port-forward + BFF /api/* drive + OTel/Prometheus probe + DAPR_HTTP_PORT env injection (Task 11.4)
+
+**Status:** Accepted (Phase 1 cloud axis close-out — **Cloud axis CLOSED**)
+**Date:** 2026-05-04
+
+**Context.** ADR-028 (Task 11.1, foundation), ADR-029 (Task 11.2,
+service deployment), and ADR-030 (Task 11.3, observability) each
+deferred the live end-to-end gate to 11.4. The close-out smoke must
+exercise (a) the canonical `contradictory-bound` UNSAT verdict
+through the BFF, (b) Dapr → OTLP span propagation across the
+service-invocation hop (cds-frontend → cds-harness, cds-frontend →
+cds-kernel), and (c) the PodMonitor scrape pipeline (Dapr metrics
+visible to Prometheus). No new vendor lock is required — the
+components are all wired at 11.1 / 11.2 / 11.3. The decision is how
+the smoke composes them.
+
+11.4 is the integration test of the entire 11.x stack: the live
+gate passes only when all four sub-tasks (foundation + services +
+observability + close-out smoke) work together end-to-end. With
+ADR-031 accepted, the Phase 1 cloud axis closes.
+
+**Decision.**
+
+1. **kubectl port-forward as the driver path.** New
+   `cloud-axis-smoke` Justfile recipe runs
+   `kubectl port-forward svc/cds-frontend
+   {{CLOUD_AXIS_LOCAL_PORT}}:3000` in the background (default port
+   14173 to avoid colliding with `frontend-bff-smoke`'s 4173) under
+   a `trap cleanup EXIT INT TERM` block that kills the port-forward
+   PID. The driver is an inline `python3 - <<'PY'` urllib script —
+   identical in shape to `frontend-bff-smoke` — that POSTs to
+   `/api/{ingest,translate,deduce,solve}` against
+   `http://127.0.0.1:{{CLOUD_AXIS_LOCAL_PORT}}` with the canonical
+   on-disk fixtures (`data/sample/icu-monitor-02.json`,
+   `data/guidelines/contradictory-bound.txt`,
+   `data/guidelines/contradictory-bound.recorded.json`) and asserts
+   `payload.samples` non-empty + `matrix.logic == "QF_LRA"` +
+   `breach_summary` is a dict + `trace.sat is False` +
+   `len(trace["muc"]) >= 2`. No in-cluster Job, no ConfigMap fixture
+   mounts, no shared driver image — the host's python3 + the
+   on-disk fixtures are the surface.
+
+2. **`/api/recheck` is opt-in (gated on `${CDS_KIMINA_URL:-}`).** The
+   cds-kernel image does NOT ship with `CDS_KIMINA_URL` baked in
+   (ADR-029 §"Why no Lean inside cds-kernel"). End-to-end
+   `/api/recheck` would force either an in-cluster Kimina deployment
+   (Service + Deployment + image pin) or operator-side
+   `kubectl set env deploy/cds-kernel -n cds CDS_KIMINA_URL=...`
+   wiring before invoking the smoke. Both are operator concerns. The
+   recipe defaults to the dependency-free path
+   (ingest → translate → deduce → solve = UNSAT verdict) and emits a
+   loud `>>> /api/recheck SKIPPED (CDS_KIMINA_URL unset)` when the
+   env is absent. When set, the recipe POSTs `/api/recheck` and
+   asserts `recheck.kind == "lean_unsat"`.
+
+3. **Observability probes (post-smoke, fail-loud).**
+
+   - **Prometheus probe.** In-cluster
+     `kubectl run --rm curlimages/curl:latest --restart=Never -n
+     cds -- curl -fsS
+     "http://kube-prometheus-stack-prometheus.cds-observability.svc.cluster.local:9090/api/v1/query?query=count(dapr_http_server_request_count)"`
+     retried up to 6× with a 5s sleep between attempts. The retry
+     budget (30s) covers two PodMonitor scrape intervals (15s each);
+     a single attempt would race the scrape pipeline. The query
+     `count(dapr_http_server_request_count)` is cardinality-only —
+     a non-zero result proves Dapr → PodMonitor → Prometheus works
+     end-to-end without depending on a specific app-id label that
+     might rename across Dapr releases.
+   - **OTel Collector log probe.**
+     `kubectl logs deployment/{{OTEL_COLLECTOR_RELEASE}}-opentelemetry-collector
+     -n {{OBSERVABILITY_NAMESPACE}} --tail=2000` piped through
+     `grep -c "cds-harness"` and `grep -c "cds-kernel"` — both must
+     be non-zero. The contrib collector's `debug` exporter dumps
+     OTLP spans to stdout in human-readable form, so `grep` on
+     app-id suffices at this Phase 1 maturity. Tempo / Jaeger query
+     APIs are a Phase 2 reopener (ADR-030 §"Alternatives rejected:
+     Inline Tempo / Loki for trace + log backend").
+
+4. **DAPR_HTTP_PORT_{HARNESS,KERNEL}=3500 env injection on
+   cds-frontend.yaml.** The BFF reads `DAPR_HTTP_PORT_HARNESS`
+   (default 3500) and `DAPR_HTTP_PORT_KERNEL` (default 3501) at
+   request time (`frontend/src/lib/server/dapr.ts` lines 24–25).
+   Phase 0 self-hosted runs two daprd processes on different ports
+   (one per backend), so the defaults ARE correct for the
+   self-hosted path. In K8s the cds-frontend Pod gets ONE daprd
+   sidecar on `127.0.0.1:3500` that routes to ANY app-id via
+   placement — so both env vars must point at 3500. Without this
+   fix `/api/{deduce,solve,recheck}` would silently 502 against
+   port 3501 in the cluster. The fix is two env entries on the
+   cds-frontend container; the regression tripwire is
+   `test_cds_frontend_injects_dapr_http_ports` in
+   `python/tests/test_cloud_axis.py`.
+
+5. **`CLOUD_AXIS_SKIP_OBS=1` bypass.** The smoke recipe gates on
+   the observability stack rollout (`kubectl rollout status` for
+   both `otel-collector-opentelemetry-collector` Deployment and
+   `kube-prometheus-stack-prometheus` StatefulSet) and runs the
+   Prometheus + OTel probes by default. Operators who deferred
+   `cloud-observability-up` for resource reasons can set
+   `CLOUD_AXIS_SKIP_OBS=1` to skip both gates, leaving only the BFF
+   `/api/{ingest,translate,deduce,solve}` UNSAT path. Default is
+   the full close-out gate.
+
+6. **`cloud-tear-down` symmetric rewind.** Companion recipe chains
+   `just cloud-observability-down >/dev/null 2>&1 || true; just
+   cloud-down >/dev/null 2>&1 || true; just kind-down >/dev/null
+   2>&1 || true` so a missing tool / already-torn-down state is
+   non-fatal. The order matches the reverse of bring-up
+   (`fetch-cloud → kind-up → dapr-helm-install → cloud-build →
+   cloud-load → cloud-up → cloud-observability-up →
+   cloud-axis-smoke`). `cloud-clean` (alias for `kind-down`) is the
+   existing nuke-all shortcut; `cloud-tear-down` is the graceful
+   rewind.
+
+7. **Pinned constants.** `CLOUD_AXIS_LOCAL_PORT` (default 14173,
+   chosen to avoid `frontend-bff-smoke`'s 4173); `CLOUD_AXIS_PAYLOAD`
+   (`data/sample/icu-monitor-02.json`); `CLOUD_AXIS_GUIDELINE`
+   (`data/guidelines/contradictory-bound.txt`);
+   `CLOUD_AXIS_RECORDED`
+   (`data/guidelines/contradictory-bound.recorded.json`);
+   `CLOUD_AXIS_DOC_ID` (`contradictory-bound`);
+   `CLOUD_AXIS_HTTP_BUDGET` (180 s per BFF request — covers the
+   worst-case Lean re-check round-trip when CDS_KIMINA_URL is set).
+
+**Consequences.**
+
+1. **Cloud axis CLOSED at 11.4.** Plan §6 axis 11 (Cloud) progress
+   is 11.1 + 11.2 + 11.3 + 11.4 DONE. PHASE constants stay at 1
+   (ADR-024 §4 binds the flip 1 → 2 to Task 12.4 close-out).
+2. **Live gate** (`just kind-up && just dapr-helm-install && just
+   cloud-build && just cloud-load && just cloud-up && just
+   cloud-observability-up && just cloud-axis-smoke`) is the
+   end-to-end integration test. Offline tests in
+   `python/tests/test_cloud_axis.py` (14 cases) cover the static
+   surface (recipe + constant registration, gate predicates, BFF
+   URL shape, UNSAT assertion structure, recheck gating,
+   observability probe shapes, port-forward cleanup, tear-down chain
+   order, env injection on cds-frontend.yaml, k8s/README + Plan +
+   scratchpad + ADR cross-checks). The live gate is gated on host
+   docker/podman + `.bin/{z3,cvc5,kind,kubectl,helm}` + ~5m of
+   cluster bring-up; not run on this dev box.
+3. **BFF port-routing fix** is K8s-specific. Phase 0 self-hosted
+   path (`dapr-pipeline` recipe + frontend dev server reading the
+   default 3500 / 3501) is unchanged and continues to pass
+   `frontend-bff-smoke`. Phase 0 / Phase 1 path divergence is
+   intentional and documented at ADR-031 §"DAPR_HTTP_PORT env
+   injection".
+4. **Kimina / Lean re-check** stays out of the cluster default.
+   Operators who want full end-to-end through `/api/recheck` wire
+   CDS_KIMINA_URL on the cds-kernel Deployment before invoking the
+   smoke. The default close-out gate is dependency-free.
+5. **Dapr 1.17 + OTel Collector 0.146.1 + kube-prometheus-stack
+   84.5.0 compatibility** is now proven end-to-end. PodMonitor
+   scrapes Dapr sidecars at 15s; debug exporter logs OTLP spans
+   visible via `kubectl logs`; Prometheus query API serves
+   cardinality counts. Phase 2 reopeners can swap any one component
+   (e.g. Tempo for the trace backend) without redoing the
+   close-out.
+6. **No PHASE flip.** Task 12.4 (ZK axis close-out) is the next
+   PHASE-flip event per ADR-024 §4. Phase 1 ZK axis (12.1 → 12.4)
+   remains open.
+
+**Alternatives rejected.**
+
+- **In-cluster Kubernetes Job as the smoke driver.** Would require
+  ConfigMap-mounted guideline + recorded fixtures + a shared image
+  to host the python3 driver. Adds two responsibilities (the Job
+  manifest + the driver image) for no incremental coverage. kubectl
+  port-forward reuses the host's python3 + on-disk fixtures;
+  teardown is a single PID kill. Reopen at Phase 2 if CI runs
+  without host python3.
+- **Ingress controller for external smoke driver access.** ADR-028
+  §1 reserved the kind cluster's 80→8090 / 443→8443 host port
+  mappings for a future ingress controller, but wiring nginx-ingress
+  / traefik is a Phase 2 release concern. kubectl port-forward is
+  the foundation-level local-access path.
+- **In-cluster Kimina deployment as a hard gate.** Would force a
+  `kimina-lean-server` Deployment + Service + image pin in the
+  `cds` namespace + a `CDS_KIMINA_URL` env entry on cds-kernel.
+  Adds a Lean toolchain dependency to the cluster lifecycle for a
+  single optional step (`/api/recheck`). The opt-in env-flag
+  pattern keeps the close-out smoke dependency-free while
+  preserving the upgrade path.
+- **Mandatory `/api/recheck` (no opt-in).** Would break the
+  default-zero-config contract — every operator running the smoke
+  would need a Kimina endpoint reachable from inside the cluster.
+  ADR-029 §"Why no Lean inside cds-kernel" set the precedent:
+  Kimina is external. The smoke matches.
+- **Span-based Prometheus query (e.g. by app-id label).** Tempting
+  for richer telemetry assertions but couples the smoke to specific
+  Dapr label conventions (`app_id` vs `dapr_app_id` has shifted
+  across releases). `count(dapr_http_server_request_count)` is
+  cardinality-only and survives label renames. Richer queries land
+  at Phase 2 once dashboard PRD'd queries stabilise.
+- **Single-attempt Prometheus probe.** PodMonitor scrapes at 15s;
+  a single attempt right after the BFF smoke completes will race
+  the first post-smoke scrape. 6× × 5s = 30s budget covers two
+  scrape intervals comfortably.
+- **Asserting both `cds-harness` AND `cds-kernel` in the OTel
+  debug log via a single combined regex.** Brittle to
+  debug-exporter format changes (e.g. JSON vs key-value). Two
+  separate `grep -c` calls fail loud individually if either app-id
+  is missing.
+- **Per-test override of the OTLP `tracing.endpointAddress`.**
+  ADR-030 already locked the OTLP endpoint at
+  `k8s/dapr-config.yaml`; per-test overrides would diverge from the
+  production config. The smoke uses the production OTLP path
+  as-is.
+- **PHASE flip at 11.4.** Tempting because the Cloud axis closes
+  here, but ADR-024 §4 binds: PHASE constants stay at 1 across all
+  Phase 1 sub-tasks and flip 1 → 2 at Task 12.4 close-out. Cloud
+  axis closes here, ZK axis is still open.
+
+**ADR numbering note.** Sequential-by-task continues: ADR-028 →
+Task 11.1, ADR-029 → Task 11.2, ADR-030 → Task 11.3, ADR-031 →
+Task 11.4 (this entry — Cloud axis CLOSED). ZK toolchain (Task
+12.1) → ADR-032 expected. ADR-024's pre-allocation note remains
+planning intent only.
+
+---
