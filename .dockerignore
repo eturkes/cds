@@ -1,0 +1,65 @@
+# =============================================================================
+# Docker build-context exclusions (Phase 1 cloud, Task 11.2, ADR-029).
+# =============================================================================
+# Trims the build context shipped to docker/podman per `cloud-build` recipe.
+# Each Dockerfile uses an explicit COPY directive — anything not whitelisted
+# below stays out of the build cache + final image.
+
+# -- VCS + agent state --
+.git
+.gitignore
+.agent
+.scratch
+
+# -- Caches --
+.ruff_cache
+.pytest_cache
+.mypy_cache
+.cache
+**/__pycache__
+**/*.py[cod]
+**/.svelte-kit
+**/.vite
+**/.bun
+*.tsbuildinfo
+
+# -- Build artifacts (re-built fresh in each builder stage) --
+target
+**/build
+**/dist
+**/node_modules
+.venv
+venv
+
+# -- Env files / local data --
+.env
+.env.*
+*.local.json
+*.local.csv
+data/raw
+data/cache
+data/derived
+
+# -- Project-local binary cache --
+# .bin/z3 + .bin/cvc5 are explicitly COPY'd into the cds-kernel image; nothing
+# below is. Listed individually so future additions are explicit choices.
+.bin/.dapr
+.bin/.hfs
+.bin/dapr
+.bin/lean
+.bin/lake
+.bin/kind
+.bin/kubectl
+.bin/helm
+
+# -- Test + dev artifacts (not needed at image build time) --
+frontend/test-results
+frontend/playwright-report
+frontend/playwright/.cache
+
+# -- Editor / OS --
+.idea
+.vscode
+*.swp
+.DS_Store
+Thumbs.db

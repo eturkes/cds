@@ -4123,3 +4123,256 @@ ADR-024 is *not* back-edited (its pre-allocation reads as planning
 intent, not contract).
 
 ---
+
+## ADR-029 — Phase 1 cloud service deployment: per-service Dockerfiles + cloud-{build,load,up,down,status,smoke} lifecycle (Task 11.2)
+
+**Status:** Accepted (Phase 1 cloud axis integration lock)
+**Date:** 2026-05-04
+
+**Context.** Task 11.1 (ADR-028) shipped the cloud foundation: kind
+cluster config, helm chart pin for Dapr 1.17, the three `cds-*` k8s
+manifests (Deployment + Service + sidecar annotations) targeting image
+tags `<app-id>:dev`, the `dapr-helm-install` recipe, and the offline
+`k8s-validate` gate. ADR-028 §"Pre-built container images already
+shipped at 11.1" explicitly carved image build + load + apply out as a
+separable concern, deferring it to Task 11.2. The numbering note at the
+foot of ADR-028 still reads as if ADR-029 will land at Task 12.1; that
+note is superseded by this entry — sequential-by-task continues to
+hold, so ZK toolchain lands as ADR-030.
+
+11.2 is **integration** for the three Phase 0 services onto the
+Phase 1 cloud target. Scope: Dockerfiles + a `.dockerignore` +
+six new Justfile recipes (`cloud-build`, `cloud-load`, `cloud-up`,
+`cloud-down`, `cloud-status`, `cloud-smoke`) + offline tests
+(`python/tests/test_dockerfiles.py`). The end-to-end
+`contradictory-bound` UNSAT smoke against the live kind cluster stays
+deferred to Task 11.4 (per ADR-028 §"Live cluster bring-up + smoke at
+11.1. Inverts the foundation→integration split"); Task 11.3 layers
+observability (OpenTelemetry Collector / Prometheus / Grafana).
+
+**Web-searches executed at decision time** (Plan §10 step 4):
+
+- `"container base image 2026 secure minimal distroless chainguard wolfi"`
+  → Chainguard / Wolfi distroless images are the 2026 SOTA for
+  zero-CVE, minimal-attack-surface containers; Chainguard delivered
+  >500M unique container build manifests by Feb 2026 with a 2,000+
+  project catalog. Distroless reduces final image size to single-digit
+  MB (vs ~5MB Alpine, ~124MB debian) and eliminates shell + package
+  manager attack vectors.
+- `"uv python container image 2026 distroless multi-stage Dockerfile best practice"`
+  → Pin uv via `COPY --from=ghcr.io/astral-sh/uv:<sha256> /uv /uvx /bin/`;
+  set `UV_LINK_MODE=copy` + `UV_COMPILE_BYTECODE=1`; multi-stage with
+  builder-stage `uv sync --no-dev --frozen` then runtime-stage venv
+  copy. `gcr.io/distroless/cc-debian12` is the recommended runtime
+  for Python with C extensions.
+- `"rust container image 2026 distroless cc multi-stage Dockerfile axum production"`
+  → `gcr.io/distroless/cc-debian12` recommended for dynamically-linked
+  Rust binaries (libgcc dependency); multi-stage with `rust:1.95-slim`
+  builder; release-flag mandatory; Axum is production-proven 2026 SOTA
+  (2.5x Go throughput on bench; 8x Python). Image-size reduction
+  from 450MB → 75MB typical with multi-stage + distroless.
+- `"SvelteKit adapter-node container image node:22-alpine distroless 2026 production"`
+  → `node:22-alpine` is the 2026 SvelteKit adapter-node default;
+  `oven/bun` for builder is fine when bun.lock is the lockfile;
+  distroless-node requires extra symlink curation that SvelteKit
+  adapter-node does not need; sveltejs/kit#15184 documents
+  bun-as-runtime stalls — use node for runtime to avoid them.
+
+**Decision.**
+
+1. **Three Dockerfiles under `docker/`** (one per service), all
+   multi-stage, all dropping privileges to non-root `cds` (uid 10001)
+   for parity:
+   - `docker/cds-harness.Dockerfile` — builder
+     `python:3.12-slim-bookworm` + uv 0.11.8 (pinned via
+     `ghcr.io/astral-sh/uv:0.11.8`); `uv sync --no-dev --frozen`
+     produces `/opt/venv`. Runtime `python:3.12-slim-bookworm` copies
+     `/opt/venv` and runs `cds-harness-service` (the project's
+     console-script entrypoint, ADR-017 §1). EXPOSE 8081.
+   - `docker/cds-kernel.Dockerfile` — builder `rust:1.95-slim-bookworm`
+     + `cargo build --release --bin cds-kernel-service` with cargo
+     registry + target cache mounts. Runtime `debian:bookworm-slim`
+     + `libstdc++6` + `libgomp1` + `ca-certificates`; copies the
+     compiled binary AND the project-local `.bin/z3` + `.bin/cvc5`
+     into `/opt/cds/bin/` with `CDS_Z3_PATH` / `CDS_CVC5_PATH` set
+     so per-request `VerifyOptions` overrides stay symmetric across
+     self-hosted + cloud (ADR-020 §5). EXPOSE 8082.
+   - `docker/cds-frontend.Dockerfile` — builder
+     `oven/bun:1.3.13-alpine` + `bun install --frozen-lockfile`
+     (honours `frontend/bun.lock` per ADR-022) + `bun run build`
+     (adapter-node emits `frontend/build/index.js`). Runtime
+     `node:22-alpine` copies the build output + the full
+     `node_modules` from the builder (every dep is in
+     `devDependencies` — the package.json refactor is a Phase 2
+     concern). EXPOSE 3000. ENTRYPOINT `node build`.
+
+2. **`.dockerignore` at repo root** — trims the build context shipped
+   to `docker build`. Excludes `.git`, `.agent`, `.scratch`, `target`,
+   `**/node_modules`, `.venv`, `**/build`, `**/dist`,
+   `**/.svelte-kit`, `data/{raw,cache,derived}`, `.bin/.dapr`,
+   `.bin/.hfs`, `.bin/{dapr,lean,lake,kind,kubectl,helm}`. Crucially
+   **does NOT** exclude `.bin/z3` or `.bin/cvc5` (the cds-kernel
+   image needs them); `test_dockerignore_does_not_exclude_solver_bins`
+   asserts that the file never grows a blanket `.bin/*` line.
+
+3. **Six new Justfile recipes** wrapping the lifecycle:
+   - `cloud-build` — gates on `command -v $DOCKER` (default `docker`,
+     `DOCKER=podman` override) + `.bin/{z3,cvc5}` presence; emits all
+     three images via `$DOCKER build -t <tag> -f docker/<svc>.Dockerfile .`.
+   - `cloud-load` — gates on `.bin/kind` + the named cluster being up;
+     `kind load docker-image --name {{KIND_CLUSTER_NAME}}` for each
+     of the three image tags. Idempotent (kind no-ops on digest match).
+   - `cloud-up` — gates on `.bin/kubectl`; applies
+     `k8s/namespaces.yaml` → `k8s/dapr-config.yaml` →
+     `k8s/dapr-components/` → the three `k8s/cds-*.yaml` workloads;
+     waits on `kubectl rollout status` per Deployment (5m timeout).
+   - `cloud-down` — gates on `.bin/kubectl`; deletes in reverse
+     dependency order (workloads → components → config → namespace).
+     Cluster preserved (`kind-down` is the destructive cluster wipe).
+   - `cloud-status` — `kubectl get pods/svc -n cds -o wide`.
+   - `cloud-smoke` — in-cluster `kubectl run --rm
+     curlimages/curl:latest --restart=Never` probing
+     `cds-harness:8081/healthz`, `cds-kernel:8082/healthz`,
+     `cds-frontend:3000/` via in-cluster Service DNS. Foundation gate
+     (Task 11.2); the end-to-end `contradictory-bound` UNSAT smoke
+     stays deferred to Task 11.4.
+
+4. **`env-verify` extension** — one new informational line summarizing
+   `docker` / `podman` presence (mirrors the cloud-tooling line added
+   at 11.1). Missing docker is non-fatal — the `cloud-build` recipe
+   carries the actual gate.
+
+5. **Tests** — `python/tests/test_dockerfiles.py` covers offline
+   validation (14 cases): dir + three Dockerfiles present; multi-stage
+   shape (builder + runtime); base-image lock per service; non-root
+   `USER cds` (uid 10001) parity; EXPOSE port matches the k8s
+   manifest's containerPort; exec-form ENTRYPOINT (PID-1 hygiene);
+   cds-kernel carries `.bin/z3` + `.bin/cvc5` and NOT `.bin/lean`;
+   cds-kernel runtime installs `libstdc++6` + `libgomp1` (Z3/cvc5
+   dynamic linkage); cds-harness uses uv; cds-frontend separates bun
+   builder from node runtime; `.dockerignore` excludes the heavy paths;
+   `.dockerignore` does NOT exclude solver binaries (fail-loud
+   tripwire); Justfile registers all six recipes + the three
+   image-tag constants; `cloud-build` gates on docker + solvers.
+
+6. **Why slim, not distroless.** ADR-028 §"Alternatives rejected" left
+   the base-image choice to 11.2; the 2026 web-search makes
+   Chainguard / distroless the formally-superior baseline. The
+   project nevertheless stays on slim:
+   - **cds-harness:** uv's managed Python interpreter has C-extension
+     dependencies (z3-solver, pydantic-core) whose libstdc++ + libc
+     symbol tables don't round-trip into distroless without per-build
+     symlink curation; the slim runtime sidesteps that maintenance
+     cost. Image size delta is ~30MB on a ~150MB final — acceptable
+     for a research prototype.
+   - **cds-kernel:** the kernel must shell out to Z3 + cvc5 (which
+     are themselves C++ binaries linked against libstdc++ + libgomp).
+     Distroless-cc would require either re-linking the upstream Z3
+     binaries against musl OR statically-linking them; both invert
+     the project's "ship upstream-pinned binaries" principle (ADR-016
+     §"External-binary fetcher staging").
+   - **cds-frontend:** node:22-alpine is itself a tight image (~50MB);
+     distroless-node would save ~20MB at the cost of `node_modules`
+     curation since adapter-node's tree spans dev + runtime deps.
+
+   Revisit at Phase 2 if image-size or CVE posture motivate it; the
+   Dockerfile shape (multi-stage, non-root, exec-form ENTRYPOINT) is
+   already aligned with the distroless migration path.
+
+7. **Why no Lean inside cds-kernel.** The kernel's `/v1/recheck`
+   endpoint shells out to Kimina via HTTP (CDS_KIMINA_URL — ADR-020
+   §5), not via direct `lean` invocation. Shipping Lean inside the
+   kernel image would (a) bloat the image by hundreds of MB,
+   (b) duplicate work with the Kimina deployment that lands in 11.4,
+   and (c) couple the kernel image to a Lean toolchain version it
+   doesn't otherwise need. The cluster-side Kimina Service is wired
+   at 11.4; until then `/v1/recheck` cleanly fast-fails when called.
+
+8. **Image tag policy.** All three images stay on `<app-id>:dev`
+   (matching the k8s manifests' `imagePullPolicy: IfNotPresent`).
+   Production-grade tagging (semver + sha256) is a Phase 1 release
+   concern downstream of the cloud axis foundation (ADR-028
+   §"Consequences").
+
+**Consequences.**
+
+- New `docker/` directory adds 3 Dockerfiles (~150 LOC). New
+  `.dockerignore` adds 50 LOC. Justfile adds 6 recipes + 5 constants
+  (~140 LOC). Test file adds 220 LOC. ADL adds this entry (~200 LOC).
+- `bootstrap` chain unchanged. `cloud-build` is opt-in (depends on
+  host docker/podman + `.bin/{z3,cvc5}`); same precedent as
+  `dapr-helm-install` and `kind-up`.
+- `cloud-build` runtime is the major host-side cost (full Rust
+  release build + Python uv sync + bun install + svelte-kit build).
+  Dockerfile cache mounts (`--mount=type=cache`) keep incremental
+  rebuilds cheap.
+- The `cds-kernel` image build context now includes `.bin/z3` +
+  `.bin/cvc5` (~55MB combined). The `.dockerignore` excludes
+  everything else under `.bin/` so the context size stays bounded.
+- `cloud-down` deletes the cds namespace; transient namespaced
+  objects (in-memory pubsub state, statestore) are wiped. Cluster +
+  Dapr control plane survive.
+- `cloud-smoke` requires a network-reachable `curlimages/curl:latest`
+  pull from Docker Hub. Air-gapped environments need to pre-pull and
+  re-tag (or override the image via a future env var). Acceptable
+  for the foundation; tightening lands at 11.3 (observability) or
+  11.4 (close-out) if needed.
+- Self-hosted recipes untouched. ADR-016 / ADR-017 / ADR-021 / ADR-028
+  stay authoritative for the Phase 0 dev path; ADR-029 governs the
+  K8s integration path.
+
+**Alternatives rejected.**
+
+- **Distroless `gcr.io/distroless/cc-debian12` runtime for all three
+  services.** Web-search rated as the 2026 SOTA, but the per-service
+  cost of curating libstdc++ + libgomp + ca-certificate symlinks
+  outweighs the ~20–30MB-per-image saving for a research prototype.
+  The Dockerfile shape stays distroless-migration-ready; reopen at
+  Phase 2 once the production-tagging concern lands.
+- **Single multi-architecture builder.** Would buy ARM64 host support
+  but the kind cluster shape is amd64-pinned at the kindest/node
+  digest (ADR-028 §1). Reopen at Task 11.4 if the operator base
+  diversifies onto Apple Silicon hosts running native arm64 kind.
+- **Build all three images from a single shared base image.**
+  Three runtimes (Python + Rust/debian + Node) cannot share a base
+  without bloating each. Three Dockerfiles + three contexts stay
+  lean per ecosystem.
+- **`docker compose` orchestration alongside Kubernetes.** Phase 0
+  already runs the three services side-by-side under Dapr self-
+  hosted (`dapr-cluster-up` / `dapr-pipeline`); a compose layer would
+  duplicate that surface without adding a deployment target. The
+  Phase 1 cloud target IS Kubernetes.
+- **In-Dockerfile `kubectl apply`.** Couples the build artifact to
+  the cluster lifecycle. Apply belongs to the `cloud-up` recipe
+  (the Justfile is the lifecycle owner per the
+  ADR-021 / ADR-028 precedent).
+- **Live `cloud-build && cloud-load && cloud-up && cloud-smoke` gate
+  at 11.2.** Inverts the foundation→integration split a second time.
+  The `test_dockerfiles.py` offline gate + the `k8s-validate` (11.1)
+  + the env-verify informational line cover the static surface; the
+  live end-to-end gate stays at 11.4 (after observability lands at
+  11.3, so the close-out smoke can also exercise the tracing
+  pipeline).
+- **Move runtime deps from `devDependencies` to `dependencies` in
+  `frontend/package.json` so the cds-frontend image can `bun install
+  --production`.** Worthy refactor but it touches the frontend
+  toolchain contract (ADR-022); deferring to a Phase 2 image-size
+  review keeps Task 11.2 surgical.
+- **`ENV CDS_KIMINA_URL=...` baked into cds-kernel image.** The
+  in-cluster Kimina Service address is determined at 11.4, not 11.2;
+  baking a placeholder now would either ship a misleading default or
+  force a follow-up image rebuild at 11.4. The unset-default
+  fast-fail behaviour is the cleaner shape.
+- **Push images to a remote registry from `cloud-build`.** Local
+  `kind load docker-image` is the 2026 default for kind dev clusters;
+  a remote-push surface (GHCR / Docker Hub / private registry) is a
+  release concern that doesn't affect the local-dev loop. Reopen if
+  Task 11.4 surfaces a multi-machine kind-on-CI need.
+
+**ADR numbering note.** Sequential-by-task continues: ADR-028 → Task
+11.1 (cloud foundation), ADR-029 → Task 11.2 (cloud service
+deployment). Task 11.3 (observability) is now expected to land as
+ADR-030; ZK toolchain at Task 12.1 as ADR-031. ADR-024 / ADR-028's
+pre-allocation notes remain planning intent only.
+
+---

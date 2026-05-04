@@ -1,10 +1,10 @@
 # Phase 1 Cloud — Kubernetes manifests + kind cluster bootstrap
 
-> **Status:** Foundation only (Task 11.1, ADR-028). Container images
-> + cluster bring-up smoke land at Task 11.2; observability stack
-> (OpenTelemetry Collector / Prometheus / Grafana) lands at Task 11.3;
-> end-to-end `contradictory-bound` smoke against the kind cluster
-> closes the cloud axis at Task 11.4.
+> **Status:** Foundation (Task 11.1, ADR-028) + service deployment
+> (Task 11.2, ADR-029). Observability stack (OpenTelemetry Collector
+> / Prometheus / Grafana) lands at Task 11.3; end-to-end
+> `contradictory-bound` smoke against the kind cluster closes the
+> cloud axis at Task 11.4.
 
 ## Layout
 
@@ -19,24 +19,47 @@
 | `cds-kernel.yaml`                        | Rust kernel Deployment + Service (8082, app-id `cds-kernel`).           |
 | `cds-frontend.yaml`                      | SvelteKit BFF Deployment + Service (3000, app-id `cds-frontend`).       |
 
+The matching Dockerfiles live under `docker/` (Task 11.2, ADR-029):
+`docker/cds-{harness,kernel,frontend}.Dockerfile`. The repo-root
+`.dockerignore` trims the build context so each image stays lean.
+
 ## Bring-up (operator workflow)
 
 ```sh
 just fetch-cloud         # stages kind + kubectl + helm under .bin/
+just fetch-bins          # stages .bin/{z3,cvc5} for the cds-kernel image
 just kind-up             # spins up the kind cluster
 just dapr-helm-install   # installs Dapr 1.17 control plane via helm
-kubectl apply -f k8s/namespaces.yaml
-kubectl apply -f k8s/dapr-config.yaml
-kubectl apply -f k8s/dapr-components/
-# Container images + apply -f k8s/cds-*.yaml lands at Task 11.2.
+just cloud-build         # builds cds-{harness,kernel,frontend}:dev images
+just cloud-load          # loads them into the kind cluster
+just cloud-up            # applies namespace + config + components + workloads;
+                         # waits for rollouts (5m timeout per Deployment)
+just cloud-smoke         # in-cluster /healthz round-trip across the three apps
+```
+
+Status / inspection:
+
+```sh
+just cloud-status        # kubectl get pods/svc -n cds -o wide
+just kind-status         # cluster + nodes + cross-namespace pod inventory
 ```
 
 Tear-down:
 
 ```sh
+just cloud-down          # deletes workloads + components + config + namespace
+                         # (cluster preserved)
 just kind-down           # destroys the kind cluster (helm install vanishes with it)
 just cloud-clean         # alias for kind-down
 ```
+
+## Container runtime
+
+The `cloud-build` recipe defaults to `docker`. Override with
+`DOCKER=podman` if podman is preferred — the build / load surface is
+identical. Live builds require the host docker/podman daemon to be
+running; the recipe gates on `command -v $DOCKER` and exits cleanly
+with a loud notice if missing.
 
 ## Versions (locked at decision time, ADR-028)
 

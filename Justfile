@@ -75,6 +75,13 @@ env-verify:
     else
         printf "  .bin/ missing cloud tools: %s (run: just fetch-cloud — Phase 1 cloud axis only)\n" "${cloud_missing[*]}"
     fi
+    if command -v docker >/dev/null 2>&1; then
+        echo "  docker present ($(docker --version 2>&1 | head -1))"
+    elif command -v podman >/dev/null 2>&1; then
+        echo "  podman present ($(podman --version 2>&1 | head -1)) — set DOCKER=podman for cloud-build"
+    else
+        echo "  docker/podman missing (Phase 1 cloud-build only — install host-side or set DOCKER=<tool>)"
+    fi
     [ "$fail" = "0" ] || { echo "Required tooling missing — see above."; exit 1; }
     echo "✓ environment verified"
 
@@ -987,6 +994,165 @@ k8s-validate:
 # with it). Provided for naming parity with `dapr-clean` / `fhir-clean`.
 cloud-clean: kind-down
     @echo "✓ cloud clean"
+
+# =============================================================================
+# Phase 1 cloud service deployment (Task 11.2) — image build + load + apply
+# =============================================================================
+# Per ADR-029. Five recipes form the lifecycle:
+#   - cloud-build  : build all three cds-* container images locally
+#   - cloud-load   : `kind load docker-image` for the three images
+#   - cloud-up     : kubectl apply -f k8s/{namespaces, dapr-config,
+#                    dapr-components/, cds-*.yaml}; wait for rollout
+#   - cloud-down   : delete the workloads + components + config + namespace
+#                    (cluster preserved — use `kind-down` to destroy it)
+#   - cloud-status : kubectl get pods/svc -n cds
+#   - cloud-smoke  : in-cluster `kubectl run` of curlimages/curl probing
+#                    /healthz on cds-{harness,kernel} + / on cds-frontend
+#                    via in-cluster Service DNS. Foundation gate (Task 11.2);
+#                    end-to-end `contradictory-bound` UNSAT lands at 11.4.
+#
+# Each recipe is gated on its required tool ($DOCKER for build; .bin/kind
+# for load; .bin/kubectl for up/down/status/smoke) and exits cleanly with a
+# loud notice if the tool is missing — same precedent as `dapr-helm-install`
+# / `kind-up` (Task 11.1). $DOCKER defaults to `docker`; override `DOCKER=podman`
+# when podman is preferred (the build / load surface is identical between them).
+
+DOCKER_DIR              := justfile_directory() + "/docker"
+CDS_HARNESS_IMAGE       := env_var_or_default('CDS_HARNESS_IMAGE',  'cds-harness:dev')
+CDS_KERNEL_IMAGE        := env_var_or_default('CDS_KERNEL_IMAGE',   'cds-kernel:dev')
+CDS_FRONTEND_IMAGE      := env_var_or_default('CDS_FRONTEND_IMAGE', 'cds-frontend:dev')
+CDS_NAMESPACE           := env_var_or_default('CDS_NAMESPACE',      'cds')
+DOCKER                  := env_var_or_default('DOCKER',             'docker')
+
+# Build all three cds-* images. Gated on $DOCKER (default `docker`).
+# Requires .bin/{z3,cvc5} for the cds-kernel image's solver layer
+# (`just fetch-bins` if missing).
+cloud-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v "{{DOCKER}}" >/dev/null 2>&1; then
+        echo "{{DOCKER}} missing — install Docker or podman (alias DOCKER=podman) and re-run"
+        exit 1
+    fi
+    if [ ! -x "{{ justfile_directory() }}/.bin/z3" ] || [ ! -x "{{ justfile_directory() }}/.bin/cvc5" ]; then
+        echo ".bin/z3 + .bin/cvc5 missing — run \`just fetch-bins\` (cds-kernel image needs them)"
+        exit 1
+    fi
+    echo "→ building {{CDS_HARNESS_IMAGE}}"
+    "{{DOCKER}}" build -t "{{CDS_HARNESS_IMAGE}}" \
+        -f "{{DOCKER_DIR}}/cds-harness.Dockerfile" \
+        "{{ justfile_directory() }}"
+    echo "→ building {{CDS_KERNEL_IMAGE}}"
+    "{{DOCKER}}" build -t "{{CDS_KERNEL_IMAGE}}" \
+        -f "{{DOCKER_DIR}}/cds-kernel.Dockerfile" \
+        "{{ justfile_directory() }}"
+    echo "→ building {{CDS_FRONTEND_IMAGE}}"
+    "{{DOCKER}}" build -t "{{CDS_FRONTEND_IMAGE}}" \
+        -f "{{DOCKER_DIR}}/cds-frontend.Dockerfile" \
+        "{{ justfile_directory() }}"
+    echo "✓ images built: {{CDS_HARNESS_IMAGE}} {{CDS_KERNEL_IMAGE}} {{CDS_FRONTEND_IMAGE}}"
+
+# Load the three locally-built images into the kind cluster. Idempotent —
+# kind load is a no-op if the digest already matches. Requires `kind-up` first.
+cloud-load:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -x "{{ justfile_directory() }}/.bin/kind" ] || \
+        { echo "kind missing — run \`just fetch-cloud\`"; exit 1; }
+    if ! "{{ justfile_directory() }}/.bin/kind" get clusters 2>/dev/null | grep -qx "{{KIND_CLUSTER_NAME}}"; then
+        echo "kind cluster '{{KIND_CLUSTER_NAME}}' not present — run \`just kind-up\`"
+        exit 1
+    fi
+    for img in "{{CDS_HARNESS_IMAGE}}" "{{CDS_KERNEL_IMAGE}}" "{{CDS_FRONTEND_IMAGE}}"; do
+        echo "→ kind load docker-image $img"
+        "{{ justfile_directory() }}/.bin/kind" load docker-image \
+            --name "{{KIND_CLUSTER_NAME}}" "$img"
+    done
+    echo "✓ images loaded into kind cluster '{{KIND_CLUSTER_NAME}}'"
+
+# Apply namespace + Dapr Configuration + Components + the three workload
+# manifests. Waits for each Deployment to roll out (timeout 5m). Requires
+# kubectl, an active kind cluster, and Dapr installed (`just dapr-helm-install`).
+cloud-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -x "{{ justfile_directory() }}/.bin/kubectl" ] || \
+        { echo "kubectl missing — run \`just fetch-cloud\`"; exit 1; }
+    KCTL=( "{{ justfile_directory() }}/.bin/kubectl" --context "{{KUBECTL_CONTEXT}}" )
+    echo "→ applying namespace + Dapr config + components"
+    "${KCTL[@]}" apply -f "{{K8S_DIR}}/namespaces.yaml"
+    "${KCTL[@]}" apply -f "{{K8S_DIR}}/dapr-config.yaml"
+    "${KCTL[@]}" apply -f "{{K8S_DIR}}/dapr-components/"
+    echo "→ applying workloads"
+    "${KCTL[@]}" apply -f "{{K8S_DIR}}/cds-harness.yaml"
+    "${KCTL[@]}" apply -f "{{K8S_DIR}}/cds-kernel.yaml"
+    "${KCTL[@]}" apply -f "{{K8S_DIR}}/cds-frontend.yaml"
+    echo "→ waiting for rollouts (timeout 5m each)"
+    for app in cds-harness cds-kernel cds-frontend; do
+        "${KCTL[@]}" -n "{{CDS_NAMESPACE}}" rollout status \
+            deployment/"$app" --timeout=5m
+    done
+    echo "✓ cloud up — three deployments ready in namespace '{{CDS_NAMESPACE}}'"
+
+# Tear down workloads + components + Dapr config + namespace. Cluster
+# preserved (use `just kind-down` to destroy the cluster itself).
+cloud-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -x "{{ justfile_directory() }}/.bin/kubectl" ] || \
+        { echo "kubectl missing — nothing to tear down"; exit 0; }
+    KCTL=( "{{ justfile_directory() }}/.bin/kubectl" --context "{{KUBECTL_CONTEXT}}" )
+    for f in cds-frontend.yaml cds-kernel.yaml cds-harness.yaml; do
+        "${KCTL[@]}" delete -f "{{K8S_DIR}}/$f" --ignore-not-found
+    done
+    "${KCTL[@]}" delete -f "{{K8S_DIR}}/dapr-components/" --ignore-not-found
+    "${KCTL[@]}" delete -f "{{K8S_DIR}}/dapr-config.yaml" --ignore-not-found
+    "${KCTL[@]}" delete -f "{{K8S_DIR}}/namespaces.yaml" --ignore-not-found
+    echo "✓ cloud down — namespace + workloads removed (cluster preserved)"
+
+# Print pod + service inventory in the cds namespace.
+cloud-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -x "{{ justfile_directory() }}/.bin/kubectl" ] || \
+        { echo "kubectl missing — run \`just fetch-cloud\`"; exit 0; }
+    KCTL=( "{{ justfile_directory() }}/.bin/kubectl" --context "{{KUBECTL_CONTEXT}}" )
+    echo "::: pods in {{CDS_NAMESPACE}} :::"
+    "${KCTL[@]}" -n "{{CDS_NAMESPACE}}" get pods -o wide || true
+    echo
+    echo "::: services in {{CDS_NAMESPACE}} :::"
+    "${KCTL[@]}" -n "{{CDS_NAMESPACE}}" get svc || true
+
+# Cluster-side smoke gate (Task 11.2): kubectl-run a transient curl pod
+# against /healthz on cds-harness + cds-kernel and / on cds-frontend, all
+# via in-cluster Service DNS. Returns non-zero on any probe failure.
+# End-to-end `contradictory-bound` UNSAT smoke is Task 11.4's gate.
+cloud-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -x "{{ justfile_directory() }}/.bin/kubectl" ] || \
+        { echo "kubectl missing — run \`just fetch-cloud\`"; exit 1; }
+    KCTL=( "{{ justfile_directory() }}/.bin/kubectl" --context "{{KUBECTL_CONTEXT}}" )
+    fail=0
+    for entry in \
+        "cds-harness:8081:/healthz" \
+        "cds-kernel:8082:/healthz" \
+        "cds-frontend:3000:/" ; do
+        IFS=":" read -r app port path <<< "$entry"
+        url="http://${app}.{{CDS_NAMESPACE}}.svc.cluster.local:${port}${path}"
+        echo "→ probing $url"
+        if "${KCTL[@]}" -n "{{CDS_NAMESPACE}}" run "cloud-smoke-${app}-$$" \
+                --rm --image=curlimages/curl:latest \
+                --restart=Never --quiet --attach \
+                --command -- curl -fsS --max-time 10 "$url" >/dev/null 2>&1; then
+            echo "  ✓ $app"
+        else
+            echo "  ✗ $app"
+            fail=1
+        fi
+    done
+    [ "$fail" = "0" ] || { echo "cloud smoke FAILED"; exit 1; }
+    echo "✓ cloud smoke green — three /healthz endpoints responsive"
 
 # =============================================================================
 # Python (uv + ruff + pytest)
