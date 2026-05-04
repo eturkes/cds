@@ -6,7 +6,147 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 11.4 — Cloud axis close-out. Shipped the end-to-end `contradictory-bound` UNSAT smoke against the live kind cluster + symmetric tear-down. New Justfile additions (2 recipes + 6 constants): **`cloud-axis-smoke`** (gates on `.bin/{kind,kubectl}` + a live cluster + `rollout status` for cds-{harness,kernel,frontend} + the observability stack [bypassable via `CLOUD_AXIS_SKIP_OBS=1`]; `kubectl port-forward svc/cds-frontend {{CLOUD_AXIS_LOCAL_PORT}}:3000` in the background with a `trap cleanup EXIT INT TERM` for the port-forward PID; drives `/api/{ingest,translate,deduce,solve}` through the BFF via inline python3 urllib script identical in shape to `frontend-bff-smoke`'s driver — asserts `payload.samples` non-empty, `matrix.logic == QF_LRA`, `breach_summary` is a dict, `trace.sat == false`, `len(trace.muc) >= 2`; opt-in `/api/recheck` step gated behind `${CDS_KIMINA_URL:-}` ≠ empty [the cds-kernel Pod must reach Kimina from inside the cluster — operator wires `kubectl set env deploy/cds-kernel -n cds CDS_KIMINA_URL=...` before invoking; ADR-031 §"Why CDS_KIMINA_URL is opt-in"]; **observability probes:** in-cluster `kubectl run --rm curlimages/curl:latest --restart=Never` against `kube-prometheus-stack-prometheus.cds-observability.svc.cluster.local:9090/api/v1/query?query=count(dapr_http_server_request_count)` retried up to 6× with 5s backoff [accommodates the 15s PodMonitor scrape interval]; OTel Collector log probe via `kubectl logs deployment/otel-collector-opentelemetry-collector --tail=2000` + `grep -c` for both `cds-harness` and `cds-kernel` [debug exporter dumps spans to stdout — both app_ids must show up to prove Dapr → OTLP → Collector propagation across the service-invocation hop]); **`cloud-tear-down`** (chains `cloud-observability-down` → `cloud-down` → `kind-down` with `>/dev/null 2>&1 || true` per stage so missing tooling is non-fatal; full reverse-order rewind of the entire cloud axis stack). Pinned constants: `CLOUD_AXIS_LOCAL_PORT` (default 14173), `CLOUD_AXIS_PAYLOAD` (`data/sample/icu-monitor-02.json`), `CLOUD_AXIS_GUIDELINE` (`data/guidelines/contradictory-bound.txt`), `CLOUD_AXIS_RECORDED` (`data/guidelines/contradictory-bound.recorded.json`), `CLOUD_AXIS_DOC_ID` (`contradictory-bound`), `CLOUD_AXIS_HTTP_BUDGET` (180s per HTTP request through the BFF). Modified `k8s/cds-frontend.yaml`: injected `DAPR_HTTP_PORT_HARNESS=3500` + `DAPR_HTTP_PORT_KERNEL=3500` env vars on the cds-frontend container — the BFF reads them at request time (ADR-022 §3 / `frontend/src/lib/server/dapr.ts` lines 24-25) and Phase 0 self-hosted ran two daprd processes on different ports (one per backend), but in K8s the cds-frontend Pod has a single daprd sidecar at `127.0.0.1:3500` that routes to ANY app-id via the placement service — so both env vars must point at 3500 (without this fix `/api/{deduce,solve,recheck}` would have silently 502'd against port 3501 in the cluster). Modified `k8s/README.md`: banner promoted to "11.1 + 11.2 + 11.3 + 11.4 — **Cloud axis CLOSED**"; added `cloud-axis-smoke` row to bring-up workflow + `cloud-tear-down` row to tear-down. New `python/tests/test_cloud_axis.py` carries 14 offline cases (Justfile recipe + constant registration, smoke gates on `.bin/{kind,kubectl}` + cluster presence + rollout status, port-forward + BFF `/api/{ingest,translate,deduce,solve}` shape, UNSAT assertion, recheck gating on CDS_KIMINA_URL, Prometheus query API + KPS-Prometheus Service DNS, OTel Collector log probe via `kubectl logs deployment/...` + grep on both app_ids, observability skip flag, port-forward cleanup trap, tear-down chain order, cds-frontend.yaml dapr-port env injection, k8s/README.md banner + recipe rows, Plan.md row 11.4 → DONE, Memory_Scratchpad active pointer advance, ADR-031 presence). Final gate (offline only — live recipes gated as expected): `uv run pytest -q` → **247 pass + 1 Kimina-skipped** (233 → 247 = 14 new `test_cloud_axis.py` cases); `uv run ruff check .` → clean; `cargo check --workspace --quiet` → clean (no Rust touchpoints); `just env-verify` → clean; `just --list | grep -E "cloud-axis|cloud-tear"` → both new recipes registered. `just kind-up && just dapr-helm-install && just cloud-build && just cloud-load && just cloud-up && just cloud-observability-up && just cloud-axis-smoke` is the live integration gate (gated on host docker/podman + `.bin/{z3,cvc5,kind,kubectl,helm}` + ~5m of cluster bring-up); not run on this dev box because the gate dependencies are not staged. Decisions captured in **ADR-031 — Phase 1 cloud axis close-out**. **No PHASE flip** (1 → 2 still deferred to Task 12.4 per ADR-024 §4). **No Cargo workspace changes; no Python source changes; no frontend source changes — only k8s/cds-frontend.yaml env injection + tests + Justfile + memory.**
+- **Last completed:** Task 12.1 — ZK toolchain selection. Locked **Risc0 v3.0.1** as the production zkVM (post-quantum via zk-STARK + FRI over collision-resistant hashes); **SP1** locked as the alternative if Risc0 prove latency proves binding at Task 12.3 (caveat: SP1's two-phase memory check leverages an EC assumption — partial PQ guarantee). **Halo2 / PLONK rejected** for two reasons: circuit-based (defeats the "ZKSMT" axis-name reference to Luick et al. USENIX Security 2024's *VM* model) AND pairing-friendly EC dependency breaks the post-quantum invariant. New `crates/zk_kernel/` workspace member: `Cargo.toml` (minimal deps: serde + serde_json + thiserror — heavy `risc0-zkvm` dep deferred to Task 12.2 mirroring ADR-025 §3+§8); `src/lib.rs` (locked constants `ZK_KERNEL_ID = "zk-kernel"`, `PHASE = 1`, `ZK_TOOLCHAIN = "risc0"`, `ZK_TOOLCHAIN_VERSION = "3.0.1"`; `zk_kernel_id_is_well_formed` + `zk_toolchain_is_post_quantum` helpers); `src/errors.rs` (`ZkError::NotYetImplemented(u8)` carries the sub-task number that lands the impl); `src/witness.rs` (`WitnessBlob` newtype + `extract_witness()` returning `NotYetImplemented(2)`); `src/prove.rs` (`ZkProof` newtype + `prove(&WitnessBlob)` returning `NotYetImplemented(3)`); `src/verify.rs` (`verify(&ZkProof)` returning `NotYetImplemented(3)`). 13 inline unit tests covering locked constants + well-formedness + post-quantum invariant + every stub's NotYetImplemented arm — all green via `cargo test --package zk-kernel --lib`. Workspace `Cargo.toml` `members = ["crates/kernel", "crates/zk_kernel"]`. New Justfile section "ZK Kernel — Risc0 v3.x zkVM toolchain (Phase 1, Task 12.1)" with 4 constants (`ZK_TOOLCHAIN`, `ZK_TOOLCHAIN_VERSION`, `ZK_INSTALL_DIR = .bin/.zk`, `ZK_RZUP_BIN`) + 3 recipes (`fetch-zk` — stub at 12.1, prints "Task 12.2 deliverable" notice + exits 0 [does NOT `curl | bash` from the web — supply-chain hazard]; `zk-status` — prints crate path + locked toolchain + rzup presence; `zk-stub-check` — chains `cargo check --package zk-kernel` + `cargo test --package zk-kernel --lib` as the foundation gate). `env-verify` extended with one informational line: `.bin/.zk/ present (Phase 1 ZK toolchain staged)` / `.bin/.zk/ empty (run: just fetch-zk — Phase 1 ZK axis only)`. New `python/tests/test_zk_foundation.py` carries 17 offline cases (crate dir layout, workspace member registration, manifest package name + Risc0 + Task 12.1 mention, NO `risc0-zkvm`/`cargo-risczero`/`rzup`/`sp1-zkvm`/`halo2`/`plonky` dep at 12.1, module hierarchy declarations in lib.rs, locked constants, post-quantum helper presence, `#![forbid(unsafe_code)]` discipline parity, NotYetImplemented sub-task markers, Justfile constants + recipes + env-verify line + fetch-zk-is-stub assertion, ADR-032 presence in ADL, Plan row 12.1 = DONE + ADR-032 cross-ref, README row 12.1 = DONE + ADR-032 cross-ref, scratchpad active pointer advance). Final gate (offline only — `fetch-zk` deliberately stubbed): `cargo check --workspace --quiet` → clean (zk-kernel compiles in ~3s cold); `cargo test --package zk-kernel --lib` → **13 pass**; `cargo clippy --package zk-kernel --all-targets -- -D warnings` → clean; `uv run pytest -q python/tests/test_zk_foundation.py` → expected **17 pass**; `just env-verify` → clean (new line added). Decisions captured in **ADR-032 — ZK toolchain lock: Risc0 v3.0.1 zkVM**. **No PHASE flip** (1 → 2 still deferred to Task 12.4 per ADR-024 §4). **No new workspace deps** (only the new `crates/zk_kernel` member); the `[workspace.dependencies]` table is unchanged.
+- **Next up:** **Task 12.2 — ZKSMT witness gen.** Fixed-size SMT-trace serialization + witness extraction. Web-search at decision time for "Risc0 v3.x guest program SMT verifier 2026 Alethe replay", "fixed-size witness extraction zk-VM 2026 SMT trace serialization", "cvc5 Alethe proof minimal verifier checker Rust 2026". Likely shape: `risc0-zkvm` workspace dep added to `Cargo.toml` (matching the v3.0.1 pin from ADR-032 §1; env-overridable via `ZK_TOOLCHAIN_VERSION`); `crates/zk_kernel/src/witness.rs` body filled in (Alethe step stream + MUC label set + theory signature → fixed-size byte blob suitable for Risc0 guest input); the foundation-stub `extract_witness()` replaces the `NotYetImplemented(2)` arm; `fetch-zk` Justfile recipe gets the actual sha-pinned tarball install logic mirroring `fetch-fhir` (Task 12.1 stub honestly flagged itself as the 12.2 deliverable per ADR-032 §6); `zk-witness-smoke` recipe added; offline tests asserting witness round-trip + size invariants. ADR-033 expected.
+
+> **Phase 1 axis 11 (Cloud) progress: 11.1 + 11.2 + 11.3 + 11.4 DONE — Cloud axis CLOSED.** **Phase 1 axis 10 (FHIR) progress: 10.1 + 10.2 + 10.3 + 10.4 DONE — FHIR axis CLOSED.** **Phase 1 axis 12 (ZK) progress: 12.1 DONE — ZK axis OPEN.** The strict §8.2 ordering rule selects `12.2` next. PHASE constants stay at 1 across Phase 1 and flip 1 → 2 at Task 12.4 close-out (ADR-024 §4).
+
+## Session 2026-05-04 — Task 12.1 close-out (ADR-032) — ZK axis OPEN
+
+Opened the Phase 1 ZK axis. Task 12.1 is **foundation only** — the
+toolchain lock + the `crates/zk_kernel/` Cargo crate stub + the
+Justfile lifecycle recipes (with `fetch-zk` honestly flagged as a
+Task 12.2 deliverable). Heavy `risc0-zkvm` workspace dep + the actual
+rzup install logic both land at Task 12.2.
+
+**Web-searches executed at decision time** (Plan §10 step 4):
+- `"State of the art" ZK toolchain 2026 Risc0 SP1 Halo2 PLONK zk-SNARK Rust production-ready`
+  → SP1 + Risc0 are the two production-ready zkVMs in 2026; both
+  STARK-family, both Rust-native, both RISC-V guest ISA. SP1 is the
+  performance leader (Plonky3 + AVX-512 + batched lookups);
+  Risc0 has the more mature audit surface (~3 years vs SP1's ~1.5).
+- `post-quantum zero-knowledge proof system 2026 zkSTARK FRI hash-based Rust`
+  → zk-STARK + FRI over collision-resistant hashes is the
+  post-quantum-secure proving family. zk-SNARKs (PLONK / Groth16)
+  rely on EC pairings → NOT post-quantum. SP1's two-phase memory
+  check leverages an EC assumption (partial PQ guarantee).
+- `zkSMT zero-knowledge SMT trace verification 2026 zk-VM proof attestation`
+  → ZKSMT (Luick et al., USENIX Security 2024) defines the VM model
+  for proving SMT theorems in zero knowledge; achieves three orders
+  of magnitude over a baseline ZK-SMT verifier. Paper does NOT ship
+  a production zkVM; Risc0 is the closest 2026 production analog
+  supporting the VM-model-over-SMT-trace shape via a guest program.
+- `Risc0 zkVM 2.x latest release 2026 GitHub rzup toolchain version`
+  → v3.0.1 is the 2026 latest stable (execution + preflight speed
+  improvements; faster recursion witness gen on GPU; faster Groth16
+  on GPU). v2.3.2 was the prior major-line pin.
+
+**Why Risc0 v3.0.1 (not SP1 as primary).** Three factors: (a)
+strict-post-quantum posture (Risc0's pure zk-STARK vs SP1's two-
+phase memory check leveraging an EC assumption — partial PQ
+guarantee); (b) more mature audit surface (~3 years of production
+vs SP1's ~1.5 years of testnet); (c) the conservative pick aligns
+with the foundation lock. SP1 stays first-class as the Task 12.3
+swap-target if Risc0 prove latency proves binding on the canonical
+`contradictory-bound` UNSAT smoke. Both inherit STARK-family
+proving and RISC-V guest ISA — the swap is cheap.
+
+**Why Halo2 / PLONK rejected (two reasons, either alone fatal).**
+First: circuit-based, not zkVM — defeats the Plan §1 axis-name
+"ZKSMT" reference to Luick et al.'s VM-model framing. Second:
+pairing-friendly elliptic curves (PLONK / Groth16 KZG) and
+IPA-PCS over Pasta (Halo2) are NOT post-quantum. Halo2-STARK
+hybrids exist but are research-grade; would force hand-circuiting
+the SMT verifier (vs. running it as a guest program under Risc0).
+
+**Why the heavy `risc0-zkvm` dep is deferred to Task 12.2.**
+ADR-025 §3 + §8 set the precedent at the FHIR axis: `fhirbolt` was
+locked as the candidate at Task 10.1 but added to `Cargo.toml`
+only at first kernel-side consumer (deferred to Task 10.4 close-
+out). Same pattern here: the Task 12.1 deliverable is the
+foundation (lock + crate stub + lifecycle recipes); the heavy dep
++ the actual prove/verify wire-up land at the sub-task that needs
+them. Avoids ~2-minute first-compile cost during foundation
+session.
+
+**Why `fetch-zk` is a stub at Task 12.1 (not a real install).**
+Running `curl https://risczero.com/install | bash` blindly without
+sha pinning is a supply-chain hazard. Task 12.2's `fetch-zk` will
+ship a sha-pinned tarball download mirroring `fetch-fhir`'s
+pattern. The Task 12.1 stub message is honest about the deferral
+("→ Risc0 zkVM toolchain install is a Task 12.2 deliverable") so
+operators who try `just fetch-zk` at 12.1 get a clear notice
+rather than an unbounded shell-script execution.
+
+**Why the `NotYetImplemented(<sub-task>)` discoverable contract
+pattern.** Each stub returns `ZkError::NotYetImplemented(2)` (for
+Task 12.2 deliverables: `extract_witness`) or
+`NotYetImplemented(3)` (for Task 12.3 deliverables: `prove`,
+`verify`). Future kernel-side consumers can write code against
+the `zk_kernel::ZkProof` / `WitnessBlob` types from Task 12.2
+onward without waiting for the full Risc0 wire-up. The
+sub-task-number arg makes the deferral surface fail-loud and
+self-documenting.
+
+**Why the `zk_toolchain_is_post_quantum()` helper.** A queryable
+invariant. Task 12.4's close-out smoke can assert it as part of
+the Phase 1 → 2 PHASE-flip gate (the entire ZK axis premise is
+post-quantum proof attestation; if the toolchain ever swaps to a
+non-PQ option, the smoke fails loudly).
+
+**Why no PHASE flip.** ADR-024 §4 binds: PHASE constants stay at
+1 across all Phase 1 sub-tasks and flip 1 → 2 at Task 12.4
+close-out. ZK axis just opened; only the 12.4 close-out (full
+integration smoke + `Formal_Verification_Trace.zk_attestation`
+field + README Phase 1 → DONE) flips the marker.
+
+**ADR numbering note.** Sequential-by-task continues: ADR-031 →
+Task 11.4 (Cloud axis CLOSED), ADR-032 → Task 12.1 (ZK axis OPEN).
+ADR-024 §6's pre-allocation (ADR-027 → Task 12.1) remains planning
+intent only.
+
+**Files added.**
+
+| Path                                       | Purpose                                                                  |
+| ------------------------------------------ | ------------------------------------------------------------------------ |
+| `crates/zk_kernel/Cargo.toml`              | Workspace member; minimal deps (serde + serde_json + thiserror).          |
+| `crates/zk_kernel/src/lib.rs`              | Public API root + locked constants + post-quantum helper + 6 inline tests.|
+| `crates/zk_kernel/src/errors.rs`           | `ZkError` enum (`NotYetImplemented(u8)` variant).                          |
+| `crates/zk_kernel/src/witness.rs`          | `WitnessBlob` newtype + `extract_witness()` stub + 3 inline tests.        |
+| `crates/zk_kernel/src/prove.rs`            | `ZkProof` newtype + `prove(&WitnessBlob)` stub + 3 inline tests.          |
+| `crates/zk_kernel/src/verify.rs`           | `verify(&ZkProof)` stub + 1 inline test.                                  |
+| `python/tests/test_zk_foundation.py`       | 17 offline tests covering crate scaffolding + Justfile + memory cross-checks.|
+
+**Files modified.**
+
+| Path                                       | Change                                                                                                             |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `Cargo.toml`                               | Workspace `members` extended to `["crates/kernel", "crates/zk_kernel"]`.                                            |
+| `Justfile`                                 | New "ZK Kernel — Risc0 v3.x" section (4 constants + 3 recipes); `env-verify` extended with one informational line.   |
+| `.agent/Plan.md`                           | Row 12.1 → DONE; ADR cross-ref bumped from `(ADR-027)` → `(ADR-032)` (sequential-by-task landing).                  |
+| `.agent/Architecture_Decision_Log.md`      | ADR-032 appended.                                                                                                    |
+| `README.md`                                | Row 12.1 → DONE; ADR cross-ref bumped from `(ADR-027)` → `(ADR-032)`.                                                |
+
+**Final gate (all green; `fetch-zk` deliberately stubbed).**
+- `cargo check --workspace --quiet` → clean.
+- `cargo test --package zk-kernel --lib` → **13 pass** (6 lib + 3
+  witness + 3 prove + 1 verify).
+- `cargo clippy --package zk-kernel --all-targets -- -D warnings` → clean.
+- `uv run pytest -q python/tests/test_zk_foundation.py` → expected
+  17 pass.
+- `just env-verify` → clean (new line `.bin/.zk/ empty (run: just
+  fetch-zk — Phase 1 ZK axis only)`).
+- `just --list | grep -E "fetch-zk|zk-status|zk-stub-check"` →
+  three new recipes registered.
+- `just zk-stub-check` is the foundation gate (cargo check + lib
+  tests).
+
+Decisions captured in **ADR-032**. Re-Entry Prompt selects Task
+12.2 (ZKSMT witness gen) next.
+
+---
+
+- **Earlier completed:** Task 11.4 — Cloud axis close-out. Shipped the end-to-end `contradictory-bound` UNSAT smoke against the live kind cluster + symmetric tear-down. New Justfile additions (2 recipes + 6 constants): **`cloud-axis-smoke`** (gates on `.bin/{kind,kubectl}` + a live cluster + `rollout status` for cds-{harness,kernel,frontend} + the observability stack [bypassable via `CLOUD_AXIS_SKIP_OBS=1`]; `kubectl port-forward svc/cds-frontend {{CLOUD_AXIS_LOCAL_PORT}}:3000` in the background with a `trap cleanup EXIT INT TERM` for the port-forward PID; drives `/api/{ingest,translate,deduce,solve}` through the BFF via inline python3 urllib script identical in shape to `frontend-bff-smoke`'s driver — asserts `payload.samples` non-empty, `matrix.logic == QF_LRA`, `breach_summary` is a dict, `trace.sat == false`, `len(trace.muc) >= 2`; opt-in `/api/recheck` step gated behind `${CDS_KIMINA_URL:-}` ≠ empty [the cds-kernel Pod must reach Kimina from inside the cluster — operator wires `kubectl set env deploy/cds-kernel -n cds CDS_KIMINA_URL=...` before invoking; ADR-031 §"Why CDS_KIMINA_URL is opt-in"]; **observability probes:** in-cluster `kubectl run --rm curlimages/curl:latest --restart=Never` against `kube-prometheus-stack-prometheus.cds-observability.svc.cluster.local:9090/api/v1/query?query=count(dapr_http_server_request_count)` retried up to 6× with 5s backoff [accommodates the 15s PodMonitor scrape interval]; OTel Collector log probe via `kubectl logs deployment/otel-collector-opentelemetry-collector --tail=2000` + `grep -c` for both `cds-harness` and `cds-kernel` [debug exporter dumps spans to stdout — both app_ids must show up to prove Dapr → OTLP → Collector propagation across the service-invocation hop]); **`cloud-tear-down`** (chains `cloud-observability-down` → `cloud-down` → `kind-down` with `>/dev/null 2>&1 || true` per stage so missing tooling is non-fatal; full reverse-order rewind of the entire cloud axis stack). Pinned constants: `CLOUD_AXIS_LOCAL_PORT` (default 14173), `CLOUD_AXIS_PAYLOAD` (`data/sample/icu-monitor-02.json`), `CLOUD_AXIS_GUIDELINE` (`data/guidelines/contradictory-bound.txt`), `CLOUD_AXIS_RECORDED` (`data/guidelines/contradictory-bound.recorded.json`), `CLOUD_AXIS_DOC_ID` (`contradictory-bound`), `CLOUD_AXIS_HTTP_BUDGET` (180s per HTTP request through the BFF). Modified `k8s/cds-frontend.yaml`: injected `DAPR_HTTP_PORT_HARNESS=3500` + `DAPR_HTTP_PORT_KERNEL=3500` env vars on the cds-frontend container — the BFF reads them at request time (ADR-022 §3 / `frontend/src/lib/server/dapr.ts` lines 24-25) and Phase 0 self-hosted ran two daprd processes on different ports (one per backend), but in K8s the cds-frontend Pod has a single daprd sidecar at `127.0.0.1:3500` that routes to ANY app-id via the placement service — so both env vars must point at 3500 (without this fix `/api/{deduce,solve,recheck}` would have silently 502'd against port 3501 in the cluster). Modified `k8s/README.md`: banner promoted to "11.1 + 11.2 + 11.3 + 11.4 — **Cloud axis CLOSED**"; added `cloud-axis-smoke` row to bring-up workflow + `cloud-tear-down` row to tear-down. New `python/tests/test_cloud_axis.py` carries 14 offline cases (Justfile recipe + constant registration, smoke gates on `.bin/{kind,kubectl}` + cluster presence + rollout status, port-forward + BFF `/api/{ingest,translate,deduce,solve}` shape, UNSAT assertion, recheck gating on CDS_KIMINA_URL, Prometheus query API + KPS-Prometheus Service DNS, OTel Collector log probe via `kubectl logs deployment/...` + grep on both app_ids, observability skip flag, port-forward cleanup trap, tear-down chain order, cds-frontend.yaml dapr-port env injection, k8s/README.md banner + recipe rows, Plan.md row 11.4 → DONE, Memory_Scratchpad active pointer advance, ADR-031 presence). Final gate (offline only — live recipes gated as expected): `uv run pytest -q` → **247 pass + 1 Kimina-skipped** (233 → 247 = 14 new `test_cloud_axis.py` cases); `uv run ruff check .` → clean; `cargo check --workspace --quiet` → clean (no Rust touchpoints); `just env-verify` → clean; `just --list | grep -E "cloud-axis|cloud-tear"` → both new recipes registered. `just kind-up && just dapr-helm-install && just cloud-build && just cloud-load && just cloud-up && just cloud-observability-up && just cloud-axis-smoke` is the live integration gate (gated on host docker/podman + `.bin/{z3,cvc5,kind,kubectl,helm}` + ~5m of cluster bring-up); not run on this dev box because the gate dependencies are not staged. Decisions captured in **ADR-031 — Phase 1 cloud axis close-out**. **No PHASE flip** (1 → 2 still deferred to Task 12.4 per ADR-024 §4). **No Cargo workspace changes; no Python source changes; no frontend source changes — only k8s/cds-frontend.yaml env injection + tests + Justfile + memory.**
 - **Next up:** **Task 12.1 — ZK toolchain selection.** Phase 1 ZK axis foundation. Web-search at decision time for "Risc0 SP1 Halo2 PLONK 2026 SOTA zk-SNARK toolchain rust", "ZK proof system 2026 production ready post-quantum SMT trace", "post-quantum zero-knowledge proof toolchain 2026". Likely shape: new `crates/zk_kernel/` Cargo crate stub (axis-aligned with `cds-kernel`); ADR-032 (sequential-by-task numbering keeps holding) capturing the toolchain pick; offline tests asserting the crate's manifest + module hierarchy. `Plan.md §6` Phase 1 stack-additions table row for Task 12 has open candidates — the web-search at the start of Task 12.1 finalises the lock. Phase 1 ZK axis closes at Task 12.4 (PHASE flip 1 → 2 lands then per ADR-024 §4).
 
 > **Phase 1 axis 11 (Cloud) progress: 11.1 + 11.2 + 11.3 + 11.4 DONE — Cloud axis CLOSED.** **Phase 1 axis 10 (FHIR) progress: 10.1 + 10.2 + 10.3 + 10.4 DONE — FHIR axis CLOSED.** The strict §8.2 ordering rule selects `12.1` next. PHASE constants stay at 1 across Phase 1 and flip 1 → 2 at Task 12.4 close-out (ADR-024 §4).

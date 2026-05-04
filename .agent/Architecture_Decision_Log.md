@@ -4872,3 +4872,301 @@ Task 11.4 (this entry — Cloud axis CLOSED). ZK toolchain (Task
 planning intent only.
 
 ---
+
+## ADR-032 — ZK toolchain lock: Risc0 v3.0.1 zkVM (post-quantum via zk-STARK + FRI), SP1 candidate, Halo2 / PLONK rejected, `crates/zk_kernel/` foundation stub (Task 12.1)
+
+**Status:** Accepted (Phase 1 — Task 12.1 architectural lock; ZK axis OPEN)
+**Date:** 2026-05-04
+
+**Context.** ADR-024 §1 opened Phase 1 with three axes; the ZK axis
+(Task 12) was deferred for the architectural lock to land at Task
+12.1 per Plan §10 step 4 (mandatory `"State of the art [tool type]
+2026"` web-search at decision time). Plan §6 listed open candidates:
+Risc0 / SP1 / Halo2 / PLONK 2026 SOTA. Task 12.1 must lock (a) the
+zkVM family (zkVM vs circuit-based), (b) the specific tool +
+version, (c) the post-quantum security posture, (d) the
+`crates/zk_kernel/` Cargo crate stub shape (module hierarchy, public
+API surface, dep boundary), and (e) the lifecycle Justfile recipes
+(fetcher + status + foundation gate).
+
+The Plan §1 framing names the axis "ZKSMT post-quantum proof
+attestation" — the literal reference to Luick et al., USENIX
+Security 2024 (*ZKSMT: A VM for Proving SMT Theorems in Zero
+Knowledge*) which models SMT-proof verification as a guest program
+running inside a zk-VM. That framing rules circuit-based toolkits
+(Halo2 / PLONK) out architecturally, irrespective of post-quantum
+security: the entire axis premise is "VM model, not circuit model."
+
+Web-searches executed at decision time:
+- `"State of the art" ZK toolchain 2026 Risc0 SP1 Halo2 PLONK zk-SNARK Rust production-ready`
+- `post-quantum zero-knowledge proof system 2026 zkSTARK FRI hash-based Rust`
+- `zkSMT zero-knowledge SMT trace verification 2026 zk-VM proof attestation`
+- `Risc0 zkVM 2.x latest release 2026 GitHub rzup toolchain version`
+
+Findings:
+- **zkVMs** — Risc0 (RISC-V ISA, zk-STARK + FRI, Apache-2.0 / MIT,
+  v3.0.1 is the 2026 latest stable; v2.3.2 is the prior major-line
+  pin) and SP1 (Plonky3-based, RISC-V ISA, MIT, performance leader
+  per Succinct's 2026 benchmarks but newer audit surface) are the
+  two production-ready options. Both leverage STARK-family proving
+  → post-quantum secure under the standard Random-Oracle assumption
+  on the FRI hash function.
+- **Circuit toolkits** — Halo2 (PSE / Polyhedra / Axiom forks) and
+  PLONK / Plonky2 / Gnark are circuit-based. They require hand-
+  circuiting the verifier rather than running it as a guest program.
+  PLONK's KZG commitment scheme depends on pairing-friendly
+  elliptic curves → NOT post-quantum; Halo2's IPA-PCS variant is
+  EC-based (Pasta curves) and also not post-quantum; recent Halo2-
+  STARK and Plonky2-FRI hybrids exist but are research-grade.
+- **Post-quantum framing** — zk-STARKs achieve post-quantum security
+  through collision-resistant hashes (no number-theoretic
+  assumptions) and require no trusted setup. zk-SNARKs (PLONK / Groth16)
+  rely on EC pairings and are NOT post-quantum unless explicitly
+  paired with a STARK wrapper.
+- **Risc0 v3.0.1 specifically** — execution + preflight speed
+  improvements, faster recursion witness gen on GPU, faster Groth16
+  on GPU. Stable release. The `rzup` toolchain installer (analogue
+  of `rustup`) stages the RISC-V cross-compiler.
+- **ZKSMT paper** — Luick et al. (USENIX Security 2024) achieved a
+  three-orders-of-magnitude improvement over a baseline ZK-SMT
+  verifier by encoding the SMT verification trace in a custom VM
+  arithmetization. The paper does NOT release a production zkVM;
+  Risc0 is the closest 2026 production analog supporting the paper's
+  VM-model-over-SMT-trace shape via a guest program.
+
+**Decision.**
+
+1. **zkVM lock — Risc0 v3.0.1.** The locked toolchain is Risc0
+   (`risc0/risc0`) on the v3.x major line; the precise pinned
+   version is v3.0.1 (override via `ZK_TOOLCHAIN_VERSION` env var
+   at the Justfile boundary). Rationale: (a) zk-STARK proving via
+   FRI over collision-resistant hashes → post-quantum secure (Plan
+   §1's "post-quantum" requirement is non-negotiable); (b) RISC-V
+   guest ISA cleanly hosts the SMT-verifier replay logic that Task
+   12.2 will witness-encode + Task 12.3 will prove (matches the
+   ZKSMT paper's VM model); (c) pure Rust ecosystem (parity with
+   the Phase 0 Rust kernel + Phase 1 cloud axis); (d) Apache-2.0
+   licensed (compatible with the project's Apache-2.0 WITH
+   LLVM-exception); (e) more mature audit surface than SP1 (~3
+   years of production use vs. SP1's ~1.5 years of testnet) — a
+   conservative pick for the foundation lock; (f) the `rzup`
+   installer stages the RISC-V cross-compiler under `.bin/.zk/`
+   following the established `.bin/` cache discipline (ADR-008).
+
+2. **SP1 locked as alternative.** SP1 (`succinctlabs/sp1`,
+   Plonky3-based) is the locked alternative if Risc0 prove latency
+   proves binding at Task 12.3's prove + verify round-trip. Same
+   STARK-family security properties, RISC-V guest ISA, MIT licensed.
+   The swap window opens at Task 12.3; if Risc0's prove time
+   exceeds the canonical `contradictory-bound` UNSAT smoke budget
+   (TBD at 12.3 measurement), SP1 becomes the primary and Risc0
+   the alternative — without re-opening this ADR. **Caveat
+   recorded:** SP1's two-phase memory check leverages an elliptic-
+   curve assumption per Succinct's published architecture notes →
+   partial post-quantum guarantee compared to pure Risc0 zk-STARK.
+   The lock prefers strict-post-quantum (Risc0) for the foundation;
+   SP1's PQ posture is a Task 12.3 re-evaluation point.
+
+3. **Halo2 / PLONK rejected — circuit-based, EC-dependent.** Both
+   are circuit toolkits, not zkVMs; the Plan §1 axis framing
+   ("ZKSMT") references the VM model. Pairing-friendly elliptic
+   curves (PLONK / Groth16 KZG) and IPA-PCS over Pasta (Halo2) are
+   NOT post-quantum. Even the Halo2-STARK / Plonky2-FRI hybrid
+   variants are research-grade and would force hand-circuiting the
+   SMT verifier (vs. running it as a guest program under Risc0).
+   Rejected for both axis-framing and post-quantum reasons.
+
+4. **`crates/zk_kernel/` foundation crate stub.** New Cargo
+   workspace member at `crates/zk_kernel/`; package name
+   `zk-kernel` (kebab-case crate / `zk_kernel` snake_case lib for
+   Rust convention). Module hierarchy:
+
+   | Path                              | Role                                                                 |
+   | --------------------------------- | -------------------------------------------------------------------- |
+   | `crates/zk_kernel/Cargo.toml`     | Workspace member; minimal deps (serde + serde_json + thiserror).     |
+   | `crates/zk_kernel/src/lib.rs`     | Public API root; locked constants (`ZK_KERNEL_ID`, `PHASE`, `ZK_TOOLCHAIN`, `ZK_TOOLCHAIN_VERSION`); well-formedness + post-quantum invariant helpers. |
+   | `crates/zk_kernel/src/errors.rs`  | `ZkError` enum (`NotYetImplemented(u8)` variant carrying the sub-task number). |
+   | `crates/zk_kernel/src/witness.rs` | `WitnessBlob` newtype + `extract_witness()` stub (Task 12.2 lands actual logic). |
+   | `crates/zk_kernel/src/prove.rs`   | `ZkProof` newtype + `prove(&WitnessBlob)` stub (Task 12.3 lands actual logic). |
+   | `crates/zk_kernel/src/verify.rs`  | `verify(&ZkProof) -> Result<(), ZkError>` stub (Task 12.3 lands actual logic). |
+
+   The `#![forbid(unsafe_code)]` discipline mirrors `crates/kernel`.
+   Inline unit tests cover the locked constants + the well-
+   formedness + post-quantum invariants + the
+   `NotYetImplemented(<sub-task>)` arm of every stub. Total: 13
+   inline unit tests, all green at Task 12.1 close-out (`cargo test
+   --package zk-kernel --lib` → 13 pass).
+
+5. **`risc0-zkvm` dep deferred to Task 12.2.** The heavy
+   `risc0-zkvm` workspace dep (host + guest API surface,
+   compile-time multi-MB build cost) is intentionally NOT added to
+   `Cargo.toml` at Task 12.1. Mirrors ADR-025 §3 + §8 (FHIR axis:
+   `fhirbolt` locked as candidate but added to `Cargo.toml` only
+   at first kernel-side consumer). Avoids unused-dep build cost
+   during the foundation session; the public API surface declared
+   at Task 12.1 + the inline tests are sufficient to prove the
+   crate compiles + the lock is committed. `risc0-zkvm` (with the
+   matching v3.x version) lands at Task 12.2 when `extract_witness`
+   gets its real body.
+
+6. **Justfile `fetch-zk` stub at Task 12.1; full install at Task
+   12.2.** New Justfile section "ZK Kernel — Risc0 v3.x zkVM
+   toolchain (Phase 1, Task 12.1)". Three new recipes (`fetch-zk`,
+   `zk-status`, `zk-stub-check`) + four new constants
+   (`ZK_TOOLCHAIN`, `ZK_TOOLCHAIN_VERSION`, `ZK_INSTALL_DIR`,
+   `ZK_RZUP_BIN`). `fetch-zk` at Task 12.1 prints an informational
+   notice + exits 0 — it does NOT run `curl
+   https://risczero.com/install | bash` blindly. Operators who try
+   `just fetch-zk` at Task 12.1 get a clear "not yet wired (Task
+   12.2 deliverable)" message rather than an unbounded shell-script
+   execution from the web. Task 12.2 fills in the actual install
+   logic (sha-pinned tarball verification mirroring `fetch-fhir`'s
+   pattern). `fetch-zk` is NOT in `bootstrap` (mirrors `fetch-fhir`
+   / `fetch-lean` opt-in precedent — heavy single-purpose
+   toolchain). `env-verify` adds one informational line:
+   `.bin/.zk/ present` / `.bin/.zk/ empty (run: just fetch-zk —
+   Phase 1 ZK axis only)`.
+
+7. **`zk-stub-check` is the Task 12.1 gate.** New Justfile recipe
+   chains `cargo check --package zk-kernel` + `cargo test
+   --package zk-kernel --lib`. Heavy zkVM proving / verifying
+   lands at Task 12.2 (witness gen) + Task 12.3 (prove + verify
+   round-trip).
+
+8. **`Plan.md` row 12.1 status flip + cross-ref bump.** Row 12.1
+   is flipped TODO → DONE; the cross-ref is bumped from
+   `(ADR-027)` (per ADR-024 §6's pre-allocation note) to
+   `(ADR-032)` matching the actual sequential-by-task landing.
+   Mirrors the ADR-026 → ADR-028 bump precedent at Task 11.1
+   (Memory_Scratchpad ADR numbering drift note). `README.md` row
+   12.1 receives the same flip + bump.
+
+9. **No PHASE flip.** Stays at 1; flip 1 → 2 locked at Task 12.4
+   close-out per ADR-024 §4. Both `cds_kernel::PHASE` and
+   `zk_kernel::PHASE` declare `1` at this entry; both flip
+   together at Task 12.4.
+
+10. **No Cargo workspace dep additions beyond the new
+    `crates/zk_kernel` member.** Foundation-only. The workspace
+    `[workspace.dependencies]` table is unchanged; the `zk-kernel`
+    package's own `[dependencies]` table consumes existing
+    workspace pins (serde, serde_json, thiserror). No new
+    transitive build cost beyond ~3 seconds for the crate's first
+    compile.
+
+**Consequences.**
+
+- The Phase 1 ZK axis has a discoverable foundation: the toolchain
+  lock is committed; the crate stub is callable + testable; the
+  Justfile lifecycle recipes are wired (with `fetch-zk` honestly
+  flagging itself as a 12.2 deliverable). Tasks 12.2 / 12.3 / 12.4
+  inherit a working crate skeleton + a documented pin + a
+  fail-loud `NotYetImplemented(<sub-task>)` API contract.
+- The `zk-kernel` crate compiles in <3s on a cold build; future
+  `cargo check --workspace` runs incur near-zero marginal cost
+  from the new member.
+- The `crates/zk_kernel/src/{prove,verify,witness}.rs` files
+  declare the public types (`WitnessBlob`, `ZkProof`) that the
+  future `Formal_Verification_Trace.zk_attestation` field
+  (ADR-024 §1, Task 12.4) will consume. Downstream consumers
+  (cds-kernel `solver` module, future cloud-side prover Service)
+  can begin referencing `zk_kernel::ZkProof` in trait bounds /
+  signatures from Task 12.2 onward without waiting for the full
+  Risc0 wire-up.
+- The `zk_toolchain_is_post_quantum()` helper is a queryable
+  invariant — Task 12.4's close-out smoke can assert it as part of
+  the Phase 1 → 2 PHASE-flip gate.
+- The Risc0 v3.0.1 pin is reasonable for 2026 but the Risc0 release
+  cadence is rapid; Task 12.2's sha-pinned `fetch-zk` install will
+  bump within the v3.x line as needed (env-overridable). A v4.x
+  major-line bump is an ADR-grade event.
+- SP1 stays callable as a swap-target without re-opening this ADR
+  — the `ZK_TOOLCHAIN` constant + the env-overridable
+  `ZK_TOOLCHAIN` Justfile var let Task 12.3's measurement-driven
+  swap proceed without a structural amendment.
+- Re-Entry Prompt selects Task 12.2 (ZKSMT witness gen) next; the
+  strict §8.2 ordering rule is preserved.
+
+**Alternatives rejected.**
+
+- **SP1 as the production lock (not the alternative).** SP1's
+  performance lead is real (per Succinct's 2026 benchmarks) but
+  (a) the audit surface is younger (~1.5 years of testnet vs.
+  Risc0's ~3 years of production); (b) the two-phase memory check
+  leverages an EC assumption — partial post-quantum guarantee.
+  Risc0's strict zk-STARK posture is the safer foundation lock.
+  SP1 stays first-class as the swap-target candidate at Task 12.3
+  measurement.
+- **Halo2 / PLONK / Groth16 as the toolchain.** Circuit-based, not
+  zkVM — defeats the ZKSMT paper's VM-model framing that the axis
+  name encodes. Pairing-friendly EC dependencies break the
+  post-quantum invariant. Reopen if a future research result lifts
+  one of these to a hash-based + VM-model variant.
+- **Plonky2 / Plonky3 standalone (no zkVM wrapper).** Plonky3
+  underlies SP1; consuming it directly would force re-implementing
+  the SP1 RISC-V wrapper. The zkVM-level abstraction is the right
+  contract for hosting an SMT verifier as a guest program.
+- **STARK-only via `winterfell` or `stwo`.** Both are STARK
+  primitive libraries; neither ships a complete zkVM. Same logic
+  as Plonky3-standalone — would force re-implementing the
+  RISC-V-over-STARK plumbing that Risc0 / SP1 already provide.
+- **Skip the zkVM entirely; hand-roll an SMT-trace circuit.**
+  Would force hand-circuiting the cvc5 Alethe replay (or a minimal
+  resolution / DPLL replay) — months of work, no academic
+  precedent for clinical-decision-support framing. The Risc0
+  guest-program path inherits the Rust ecosystem (cvc5 Rust
+  bindings, owlapy via PyO3 if needed). The ZKSMT paper validates
+  the VM-model approach.
+- **Pre-add `risc0-zkvm` to `Cargo.toml` at Task 12.1.** Premature
+  per ADR-025 §3 + §8 precedent. The crate stub compiles + tests
+  green without the heavy dep; adding it now incurs ~2-minute
+  first-compile cost for no Task 12.1 deliverable benefit.
+- **Run `curl https://risczero.com/install | bash` from `fetch-zk`
+  at Task 12.1.** Unbounded shell-script execution from the web
+  without sha pinning is a supply-chain hazard. Task 12.2 fills
+  this in with a sha-pinned tarball download mirroring
+  `fetch-fhir`'s pattern. The Task 12.1 stub message is honest
+  about the deferral.
+- **Add `fetch-zk` to the default `bootstrap` chain.** 1.2GB+
+  Risc0 toolchain is too heavy for unconditional bootstrap;
+  matches `fetch-fhir` / `fetch-lean`'s opt-in precedent.
+- **Make `.bin/.zk/` absence a hard `env-verify` failure.** Would
+  break dev workflows that don't need the ZK axis (Phase 0 + most
+  Phase 1.x sub-tasks). Treat as informational only — same
+  precedent as `.bin/.hfs/` (FHIR) and `.bin/.dapr/` (Dapr CLI).
+- **Add a `python/cds_harness/zk/` Python harness module
+  alongside the Rust crate.** Premature — Python harness
+  involvement is a Task 12.4 close-out concern (the
+  `Formal_Verification_Trace.zk_attestation` field on the
+  Pydantic mirror). Task 12.1 keeps the surface Rust-only, mirror
+  added later only when needed.
+- **Place ZK kernel as a submodule of `crates/kernel` (not a
+  sibling crate).** Would couple the Rust kernel's compile time
+  to Risc0's transitive dep graph (deferred at 12.1, but
+  unavoidable from 12.2). Sibling crate keeps the kernel's build
+  fast; cross-crate references are a thin import boundary.
+- **Pin `zk_kernel` to `edition = "2021"` rather than the workspace
+  `edition = "2024"`.** Workspace consistency wins. No reason for
+  the new crate to diverge.
+- **Skip ADR-032; pin the Risc0 version in the Justfile only.**
+  The architectural lock (zkVM family choice + post-quantum
+  framing + circuit-vs-VM rejection rationale + crate stub shape +
+  Cargo.toml dep deferral policy + Justfile lifecycle pattern) is
+  multi-faceted and lives outside any one config file. Mirrors
+  ADR-016 (Dapr 1.17 lock at Task 8.1) and ADR-025 (FHIR R5 lock
+  at Task 10.1).
+- **PHASE flip 1 → 2 at Task 12.1 (ZK foundation).** Premature —
+  the ZK axis just opened. ADR-024 §4 binds the flip to Task 12.4
+  close-out (full integration smoke + `zk_attestation` field +
+  README Phase 1 → DONE).
+
+**ADR numbering note.** Sequential-by-task continues: ADR-031 →
+Task 11.4 (Cloud axis CLOSED), ADR-032 → Task 12.1 (this entry —
+ZK axis OPEN). Cloud axis status note: 11.1 + 11.2 + 11.3 + 11.4
+DONE, **Cloud axis CLOSED**. FHIR axis status note: 10.1 + 10.2
++ 10.3 + 10.4 DONE, **FHIR axis CLOSED**. ZK axis status note:
+12.1 DONE, 12.2 / 12.3 / 12.4 OPEN. ADR-024's pre-allocation
+(ADR-027 → Task 12.1) remains planning intent only; the
+sequential-by-task landing carries.
+
+---

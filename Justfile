@@ -75,6 +75,11 @@ env-verify:
     else
         printf "  .bin/ missing cloud tools: %s (run: just fetch-cloud — Phase 1 cloud axis only)\n" "${cloud_missing[*]}"
     fi
+    if [ -x "{{ justfile_directory() }}/.bin/.zk/rzup" ]; then
+        echo "  .bin/.zk/ present (Phase 1 ZK toolchain staged)"
+    else
+        echo "  .bin/.zk/ empty (run: just fetch-zk — Phase 1 ZK axis only)"
+    fi
     if command -v docker >/dev/null 2>&1; then
         echo "  docker present ($(docker --version 2>&1 | head -1))"
     elif command -v podman >/dev/null 2>&1; then
@@ -498,6 +503,70 @@ fhircast-smoke:
     smoke_runner="$repo/python/scripts/fhircast_smoke.py"
     [ -f "$smoke_runner" ] || { echo "missing $smoke_runner"; exit 1; }
     uv run python "$smoke_runner" "$base"
+
+# =============================================================================
+# ZK Kernel — Risc0 v3.x zkVM toolchain (Phase 1, Task 12.1)
+# =============================================================================
+# Per ADR-032: Risc0 v3.0.1 locked as the zkVM (post-quantum via zk-STARK
+# + FRI over collision-resistant hashes). The rzup-installed toolchain
+# stages under .bin/.zk/ via `just fetch-zk`. SP1 is locked as the
+# alternative if Risc0 prove latency proves binding at Task 12.3 (same
+# STARK-family security properties). Halo2 / PLONK rejected — circuit-
+# based, pairing-friendly EC dependency breaks the post-quantum invariant.
+#
+# Foundation-only at Task 12.1: the `crates/zk_kernel/` crate stub is
+# the deliverable; the heavy `risc0-zkvm` workspace dep + the actual
+# rzup install logic land at Task 12.2 (witness gen) when the first
+# kernel-side consumer materialises. Mirrors `fetch-fhir` /
+# `fetch-lean` opt-in precedent — ZK toolchain install is NOT in
+# `bootstrap`.
+
+ZK_TOOLCHAIN          := env_var_or_default('ZK_TOOLCHAIN',         'risc0')
+ZK_TOOLCHAIN_VERSION  := env_var_or_default('ZK_TOOLCHAIN_VERSION', '3.0.1')
+ZK_INSTALL_DIR        := justfile_directory() + "/.bin/.zk"
+ZK_RZUP_BIN           := ZK_INSTALL_DIR + "/rzup"
+
+# Stage the Risc0 zkVM toolchain (rzup) under .bin/.zk/.
+#
+# Foundation stub at Task 12.1: prints an informational notice and
+# exits 0. Task 12.2 fills in the actual `curl https://risczero.com/install
+# | bash` install logic + sha-pinned tarball verification (mirrors
+# `fetch-fhir`'s sha256-verified tarball pattern). Operators who try
+# `just fetch-zk` at Task 12.1 get a clear "not yet wired" message
+# rather than an unbounded shell-script execution from the web.
+fetch-zk:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ZK_INSTALL_DIR}}"
+    if [ -x "{{ZK_RZUP_BIN}}" ]; then
+        echo "rzup already present in .bin/.zk/"
+        "{{ZK_RZUP_BIN}}" --version 2>&1 | head -1 || true
+        exit 0
+    fi
+    echo "→ Risc0 zkVM toolchain install is a Task 12.2 deliverable"
+    echo "  ADR-032 §3 + §8: foundation-only at Task 12.1; the rzup"
+    echo "  install logic + risc0-zkvm workspace dep land at 12.2 when"
+    echo "  the first kernel-side consumer materialises."
+    echo "  Pinned target: {{ZK_TOOLCHAIN}} v{{ZK_TOOLCHAIN_VERSION}} → {{ZK_INSTALL_DIR}}"
+
+# Print ZK kernel + toolchain status.
+zk-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "zk-kernel crate: {{ justfile_directory() }}/crates/zk_kernel"
+    echo "toolchain:       {{ZK_TOOLCHAIN}} v{{ZK_TOOLCHAIN_VERSION}} (locked at ADR-032 §1)"
+    if [ -x "{{ZK_RZUP_BIN}}" ]; then
+        echo "rzup:            $({{ZK_RZUP_BIN}} --version 2>&1 | head -1)"
+    else
+        echo "rzup:            missing — run \`just fetch-zk\` (Phase 1 ZK axis only; Task 12.2+)"
+    fi
+    echo "install dir:     {{ZK_INSTALL_DIR}}"
+
+# Foundation gate (Task 12.1): cargo check + run inline tests for
+# `zk-kernel`. Heavy zkVM proving / verifying lands at Task 12.2 + 12.3.
+zk-stub-check:
+    cargo check --package zk-kernel
+    cargo test --package zk-kernel --lib
 
 # =============================================================================
 # Dapr 1.17 — slim self-hosted polyglot orchestration (Phase 0, Task 8)
