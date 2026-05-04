@@ -84,27 +84,43 @@ def test_zk_kernel_cargo_toml_locks_package_name_and_description() -> None:
         "package name must be 'zk-kernel' (kebab-case crate / snake_case lib)"
     )
     assert "Risc0" in text, "manifest description must reference Risc0 (ADR-032 §1 lock)"
-    assert "Task 12.1" in text, "manifest description must reference Task 12.1 (foundation)"
+    # Description tracks the most recent body-fill milestone — was
+    # "Task 12.1" at foundation; advanced to "Task 12.3b1" once the
+    # prove + verify body fills landed (ADR-035 §3).
+    assert "Task 12.3b1" in text, (
+        "manifest description must reference Task 12.3b1 (current body-fill milestone)"
+    )
 
 
-def test_zk_kernel_has_no_risc0_zkvm_dep_at_task_12_1() -> None:
-    """ADR-032 §3 + §8: `risc0-zkvm` workspace dep deferred to Task 12.2.
+def test_zk_kernel_pulls_only_locked_zkvm_crates_at_task_12_3b1() -> None:
+    """ADR-035 §3: `risc0-zkvm` lands at Task 12.3b1; alternatives stay rejected.
 
-    Only inspects the actual [dependencies] / [dev-dependencies] tables —
-    explanatory comments are allowed to mention the deferred crates by name.
+    The original 12.1 deferral assertion (`risc0-zkvm` absent) inverted
+    at Task 12.3b1 once the prove + verify body fills consumed it.
+    The replacement assertion locks ADR-032 §1's exclusivity: `risc0-
+    zkvm` is the ONLY zkVM dep allowed; `sp1-zkvm` / `halo2` /
+    `plonky2` / `plonky3` are alternatives explicitly rejected for
+    Phase 1 (would require a fresh ADR amending ADR-032 §1).
+    `cargo-risczero` / `rzup` are operator-facing binaries staged
+    under `.bin/.zk/`, not Cargo deps.
     """
     with ZK_KERNEL_CARGO_TOML.open("rb") as fh:
         manifest = tomllib.load(fh)
-    forbidden = {"risc0-zkvm", "cargo-risczero", "rzup", "sp1-zkvm", "halo2", "plonky2", "plonky3"}
+    rejected = {"sp1-zkvm", "halo2", "plonky2", "plonky3"}
+    binary_only = {"cargo-risczero", "rzup"}
+    forbidden = rejected | binary_only
     declared: set[str] = set()
     for table_name in ("dependencies", "dev-dependencies", "build-dependencies"):
         declared.update(manifest.get(table_name, {}).keys())
     offenders = sorted(declared & forbidden)
-    detail = (
-        "Task 12.1 foundation must NOT pull in zkVM crates yet (deferred per ADR-032 §3 + §8); "
-        f"found: {offenders}"
+    assert not offenders, (
+        f"Task 12.3b1 must keep `risc0-zkvm` as the ONLY zkVM dep "
+        f"(ADR-032 §1 lock; alternatives + cargo-risczero / rzup binaries "
+        f"forbidden in Cargo deps); found: {offenders}"
     )
-    assert not offenders, detail
+    assert "risc0-zkvm" in declared, (
+        "Task 12.3b1 must pull `risc0-zkvm` (ADR-035 §3 deliverable 2)"
+    )
 
 
 def test_zk_kernel_module_hierarchy_declared_in_lib_rs() -> None:
@@ -142,18 +158,28 @@ def test_zk_kernel_unsafe_code_forbidden() -> None:
     assert "#![forbid(unsafe_code)]" in text, "kernel discipline mirrors crates/kernel"
 
 
-def test_zk_kernel_stubs_return_not_yet_implemented_with_subtask_marker() -> None:
-    """Each pending stub's NotYetImplemented arg points at the sub-task that lands the impl.
+def test_zk_kernel_stubs_have_landed_through_task_12_3b1() -> None:
+    """Foundation invariant: NotYetImplemented stubs are flipped as their sub-tasks land.
 
-    Task 12.2 (witness) has now landed (see `test_zk_witness.py` — the
-    body returns real bytes, NOT `NotYetImplemented(2)`). Tasks 12.3
-    (prove + verify) remain pending; their stubs still carry the
-    sub-task-3 marker so downstream callers stay fail-loud.
+    Task 12.2 (witness) landed at ADR-033 — the witness body returns
+    real bytes, NOT `NotYetImplemented(2)`. Task 12.3b1 (prove +
+    verify body fills) landed at ADR-035 — both bodies now call into
+    Risc0 directly, NOT `NotYetImplemented(3)`. The
+    `NotYetImplemented(u8)` enum variant is RETAINED for future
+    deferred sub-task slots (e.g. Task 12.4 broader Alethe coverage).
     """
     prove_text = _read(ZK_KERNEL_PROVE_RS)
     verify_text = _read(ZK_KERNEL_VERIFY_RS)
-    assert "ZkError::NotYetImplemented(3)" in prove_text, "prove lands at Task 12.3"
-    assert "ZkError::NotYetImplemented(3)" in verify_text, "verify lands at Task 12.3"
+    assert "ZkError::NotYetImplemented(3)" not in prove_text, (
+        "prove body must no longer return NotYetImplemented(3) at Task 12.3b1 (ADR-035 §3)"
+    )
+    assert "ZkError::NotYetImplemented(3)" not in verify_text, (
+        "verify body must no longer return NotYetImplemented(3) at Task 12.3b1 (ADR-035 §3)"
+    )
+    errors_text = _read(ZK_KERNEL_ERRORS_RS)
+    assert "NotYetImplemented(u8)" in errors_text, (
+        "ZkError must retain the NotYetImplemented(u8) variant for future deferred sub-task slots"
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -164,9 +190,13 @@ def test_zk_kernel_stubs_return_not_yet_implemented_with_subtask_marker() -> Non
 def test_justfile_registers_zk_constants() -> None:
     text = _read(JUSTFILE)
     assert "ZK_TOOLCHAIN          := env_var_or_default('ZK_TOOLCHAIN',         'risc0')" in text
+    # ADR-035 §2 bumped ZK_TOOLCHAIN_VERSION '3.0.1' → '3.0.5' (forced
+    # by the rustc 1.95.0 dyn-compat regression in `risc0-circuit-rv32im
+    # 4.0.4` transitively pulled by v3.0.1; v3.0.5 fixes it at source
+    # within the same v3.x major line per Plan §6 pre-authorization).
     assert (
-        "ZK_TOOLCHAIN_VERSION  := env_var_or_default('ZK_TOOLCHAIN_VERSION', '3.0.1')" in text
-    )
+        "ZK_TOOLCHAIN_VERSION  := env_var_or_default('ZK_TOOLCHAIN_VERSION', '3.0.5')" in text
+    ), "ZK_TOOLCHAIN_VERSION must pin the v3.0.5 cargo-risczero release (ADR-035 §2)"
     assert 'ZK_INSTALL_DIR        := justfile_directory() + "/.bin/.zk"' in text
     # ADR-034 §2: at Task 12.3a the toolchain entrypoint becomes the
     # sha-pinned `cargo-risczero` binary (the modern Risc0 install

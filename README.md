@@ -203,7 +203,8 @@ pre-locked here; each axis lands its own architectural-lock ADR
 | 12.1 | ZK toolchain selection — Risc0 / SP1 / Halo2 / PLONK 2026 SOTA web-search + `zk_kernel/` crate stub (ADR-032)                            | **DONE**    |
 | 12.2 | ZKSMT witness gen — fixed-size SMT-trace serialization + witness extraction (ADR-033)                                                    | **DONE**    |
 | 12.3a | ZKSMT prove + verify install plumbing + guest crate scaffold — sha-pinned cargo-risczero v3.0.1 + `crates/zk_kernel/guest/` skeleton + workspace exclusion (ADR-034) | **DONE**    |
-| 12.3b | ZKSMT prove + verify body fills + canonical round-trip — `risc0-zkvm` workspace dep + guest body + `prove`/`verify` body + `zk-prove-smoke` recipe + `contradictory-bound` round-trip | **PLANNED** |
+| 12.3b1 | ZKSMT prove + verify body fills — `risc0-zkvm` workspace + host + guest deps + guest body + `prove`/`verify` body + cargo-risczero pin bumped 3.0.1 → 3.0.5 (ADR-035) | **DONE**    |
+| 12.3b2 | ZKSMT prove + verify canonical round-trip — `zk-prove-smoke` recipe + `tests/canonical_roundtrip.rs` driving `extract → prove → verify` on the canonical `contradictory-bound` fixture (ADR-035) | **PLANNED** |
 | 12.4 | ZKSMT pipeline integration + Phase 1 close-out — `zk_attestation` field + PHASE 1 → 2                                                     | **PLANNED** |
 
 Each task is executed in its **own atomic session** under the *Context-Governed Re-Entry Protocol* documented in `.agent/Plan.md`.

@@ -517,35 +517,44 @@ fhircast-smoke:
 # `SmtTrace` JSON over a 12-byte ZKSM-magic header) lives in
 # `crates/zk_kernel/src/witness.rs` — pure-serde, no Risc0 dep.
 #
-# Per ADR-034 (Task 12.3a, this section): the `fetch-zk` recipe below
-# is wired with the actual sha-pinned download of the cargo-risczero
-# v3.0.1 Linux x86_64 release tarball (mirrors `fetch-fhir`'s sha256-
-# verified pattern). The host-side `risc0-zkvm` workspace dep + the
-# `crates/zk_kernel/guest/` body + the `prove` / `verify` body fills +
-# the canonical-fixture round-trip smoke land at Task 12.3b. Mirrors
+# Per ADR-034 (Task 12.3a) the `fetch-zk` recipe was wired with the
+# sha-pinned cargo-risczero v3.0.1 tarball. ADR-035 (Task 12.3b1, this
+# section) BUMPS the toolchain pin to v3.0.5 within the same v3.x major
+# line — Plan §6 explicitly authorizes patch-line bumps when adding the
+# `risc0-zkvm` dep. Reason for the bump: v3.0.1's transitive dep tree
+# pulls `risc0-circuit-rv32im 4.0.4`, which fails to compile on rustc
+# 1.95.0 due to dyn-incompatible `impl Trait` in trait return types
+# (E0038); v3.0.5 spans the same major line and fixes the dyn-compat
+# issue at source. The host-side `risc0-zkvm` workspace dep + the
+# `crates/zk_kernel/guest/` body + the `prove` / `verify` body fills
+# land at Task 12.3b1 (ADR-035 §3). The canonical-fixture round-trip
+# smoke + the `zk-prove-smoke` recipe land at Task 12.3b2. Mirrors
 # `fetch-fhir` / `fetch-lean` opt-in precedent — ZK toolchain install
 # is NOT in `bootstrap`.
 
 ZK_TOOLCHAIN          := env_var_or_default('ZK_TOOLCHAIN',         'risc0')
-ZK_TOOLCHAIN_VERSION  := env_var_or_default('ZK_TOOLCHAIN_VERSION', '3.0.1')
+ZK_TOOLCHAIN_VERSION  := env_var_or_default('ZK_TOOLCHAIN_VERSION', '3.0.5')
 ZK_OS                 := env_var_or_default('ZK_OS',                'unknown-linux-gnu')
 ZK_ARCH               := env_var_or_default('ZK_ARCH',              'x86_64')
 ZK_INSTALL_DIR        := justfile_directory() + "/.bin/.zk"
 ZK_CARGO_RISCZERO_BIN := ZK_INSTALL_DIR + "/cargo-risczero"
-# sha256 of cargo-risczero-3.0.1-x86_64-unknown-linux-gnu.tgz (pinned at
-# decision time — ADR-034 §2; cross-reference asset digest published in
-# Risc0 v3.0.1 GitHub release manifest, 72,739,357 bytes).
-ZK_SHA256             := env_var_or_default('ZK_SHA256',  '4e42c49d5e9d8ef85e10b5b8ee6fd9cac8abaccf1685aeb800550febdd77f069')
+# sha256 of cargo-risczero-3.0.5-x86_64-unknown-linux-gnu.tgz (pinned at
+# decision time — ADR-035 §2; cross-reference asset digest published in
+# Risc0 v3.0.5 GitHub release manifest, 73,001,634 bytes). Supersedes
+# the ADR-034 §2 v3.0.1 pin (4e42c49d5e9d8ef85e10b5b8ee6fd9cac8abaccf1685aeb800550febdd77f069).
+ZK_SHA256             := env_var_or_default('ZK_SHA256',  '936ef988b78f20e3bd9f80e375f3adc934b13addc6ae2680f2e5fc0bcc966158')
 
 # Idempotently stage the cargo-risczero Risc0 toolchain entrypoint
 # under .bin/.zk/. Verifies sha256 against the pinned digest. Skips if
 # already present. Mirrors `fetch-fhir` to the byte.
 #
-# After staging, operators run `cargo-risczero install` (Task 12.3b
+# After staging, operators run `cargo-risczero install` (Task 12.3b2
 # deliverable) to provision the RISC-V cross-compiler that compiles
 # `crates/zk_kernel/guest/` for the `riscv32im-risc0-zkvm-elf` target.
-# At Task 12.3a the cargo-risczero binary is the artefact we stage —
-# the cross-compiler install + guest-build invocation are 12.3b moves.
+# At Task 12.3b1 (ADR-035) the cargo-risczero binary is the artefact
+# we stage + the host-side `risc0-zkvm` dep + the prove/verify bodies
+# land — the cross-compiler install + guest-build invocation + the
+# canonical-fixture round-trip integration test are 12.3b2 moves.
 fetch-zk:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -572,8 +581,8 @@ fetch-zk:
     [ -n "$bin_path" ] || { echo "no executable 'cargo-risczero' in tarball"; exit 1; }
     install -m 0755 "$bin_path" "{{ZK_CARGO_RISCZERO_BIN}}"
     "{{ZK_CARGO_RISCZERO_BIN}}" --version 2>&1 | head -1 || true
-    echo "  → Task 12.3b lands the \`cargo-risczero install\` invocation"
-    echo "    + guest-program build + prove/verify body fills (ADR-034 §3)"
+    echo "  → Task 12.3b2 lands the \`cargo-risczero install\` invocation"
+    echo "    + guest-program build + canonical-fixture round-trip (ADR-035 §3)"
 
 # Print ZK kernel + toolchain status.
 zk-status:
@@ -581,7 +590,7 @@ zk-status:
     set -euo pipefail
     echo "zk-kernel crate: {{ justfile_directory() }}/crates/zk_kernel"
     echo "guest crate:     {{ justfile_directory() }}/crates/zk_kernel/guest (excluded from workspace; ADR-034 §3)"
-    echo "toolchain:       {{ZK_TOOLCHAIN}} v{{ZK_TOOLCHAIN_VERSION}} (locked at ADR-032 §1)"
+    echo "toolchain:       {{ZK_TOOLCHAIN}} v{{ZK_TOOLCHAIN_VERSION}} (locked at ADR-032 §1; bumped 3.0.1 → 3.0.5 by ADR-035)"
     if [ -x "{{ZK_CARGO_RISCZERO_BIN}}" ]; then
         echo "cargo-risczero:  $({{ZK_CARGO_RISCZERO_BIN}} --version 2>&1 | head -1)"
     else

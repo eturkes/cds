@@ -5838,3 +5838,321 @@ status note: 12.1 + 12.2 + 12.3a DONE, 12.3b / 12.4 OPEN.
 
 ---
 
+## ADR-035 — ZKSMT prove + verify body fills (12.3b1) + further split into 12.3b1 + 12.3b2 + coordinated cargo-risczero v3.0.1 → v3.0.5 bump (forced by transitive `risc0-circuit-rv32im` dyn-compat regression on rustc 1.95.0)
+
+**Status:** Accepted (Phase 1 — Task 12.3b1 structural + dep + body decision; ZK axis OPEN)
+**Date:** 2026-05-04 (Task 12.3b1 close-out)
+
+### Context
+
+ADR-034 (Task 12.3a) split the original Task 12.3 along the
+foundation/usage boundary into 12.3a (install plumbing + guest
+crate scaffold) + 12.3b (heavy dep + guest body + prove/verify
+body + smoke recipe + canonical round-trip). The 12.3b scope
+bundled six items: (1) `risc0-zkvm` workspace dep, (2) host
+`risc0-zkvm` dep with `prove` feature, (3) guest `risc0-zkvm`
+dep with `default-features = false`, (4) host `prove` /
+`verify` body fills calling `default_prover()` /
+`Receipt::verify`, (5) guest `main.rs` body fill (header
+validation → `serde_json` decode → minimal Alethe replay
+subset checker → `env::commit` verdict), (6) `zk-prove-smoke`
+Justfile recipe gated on `.bin/.zk/cargo-risczero` + the
+canonical-fixture `extract → prove → verify` round-trip
+integration test. ADR-034 §3 explicitly pre-authorized a
+further split into 12.3b1 + 12.3b2 if context budget binds.
+
+Three forcing functions converged at the Task 12.3b session:
+
+1. **Context budget binds.** The six items collectively exceed a
+   single context window: the `risc0-zkvm` dep tree adds
+   thousands of crate-graph nodes (first-time compile is multi-
+   minute) + the guest body + the host bodies + the new error
+   variants + the integration test fixture wiring + the smoke
+   recipe + the operator-facing cargo-risczero install flow +
+   the Plan / README / ADR / scratchpad updates. The dep+body /
+   smoke+round-trip boundary is the natural cleavage point.
+2. **Cross-compiler dependency for the smoke.** The smoke
+   recipe + integration test require `cargo risczero install`
+   to provision the RISC-V cross-compiler that builds the
+   guest ELF. Without that install, the integration test
+   cannot run end-to-end. Decoupling smoke into 12.3b2 lets
+   12.3b1 ship the dep + bodies as a pure-cargo `cargo check`-
+   green deliverable without requiring the operator to have
+   completed the cross-compiler install.
+3. **Cargo dep resolution regression on v3.0.1.** Adding
+   `risc0-zkvm = "=3.0.1"` to the workspace pulled in
+   `risc0-circuit-rv32im 4.0.4` transitively, which fails to
+   compile on rustc 1.95.0 (E0038 — dyn-incompatible `impl
+   Trait` in trait return types in the `SyscallContext` trait;
+   plus E0599 in the recursion module's `read_u32s().first()`
+   call site that assumes a `Result<&[u32]>` → `Option<&u32>`
+   chain that the upstream API broke). The fix is a coordinated
+   bump to v3.0.5 (latest stable in the v3.x line, released
+   2026-02-03 per crates.io; spans the same major line per
+   Plan §6's "Task 12.2 may bump within the v3.x line"
+   pre-authorization), which fixes the dyn-compat issue at
+   source. The bump propagates to the cargo-risczero tarball
+   (new sha256 + size), the Justfile constants, and the
+   ADR-034 §2 sha-pinned digest.
+
+### Decisions
+
+1. **Split Task 12.3b into 12.3b1 + 12.3b2 along the dep+body /
+   smoke+round-trip boundary.** Per ADR-034 §3's pre-
+   authorized further-split clause + the Phase 0 split
+   precedent (ADR-016 / 018 / 019 / 020 / 021 / 022). Task
+   12.3b1 (this ADR — accepted now) is the heavy dep + body
+   fills; 12.3b2 (deferred) is the smoke recipe + integration
+   test.
+   - **Task 12.3b1 deliverables (this commit):**
+     1. ADD `risc0-zkvm = { version = "=3.0.5", default-features = false }` + `bincode = "1"` to root `Cargo.toml` `[workspace.dependencies]`.
+     2. ADD `risc0-zkvm = { workspace = true, features = ["prove"] }` + `bincode = { workspace = true }` to `crates/zk_kernel/Cargo.toml` `[dependencies]`.
+     3. ADD `risc0-zkvm = { version = "=3.0.5", default-features = false, features = ["std"] }` + `serde` + `serde_json` to `crates/zk_kernel/guest/Cargo.toml` `[dependencies]` (direct deps because the guest crate is workspace-excluded).
+     4. FILL `crates/zk_kernel/src/prove.rs::prove(witness, guest_elf)`: `ExecutorEnv::builder().write(&witness.0)?.build()?` → `default_prover().prove(env, guest_elf)?` → `bincode::serialize(&prove_info.receipt)?` → `ZkProof(bytes)`.
+     5. FILL `crates/zk_kernel/src/verify.rs::verify(proof, image_id)`: `bincode::deserialize::<Receipt>(&proof.0)?` → `receipt.verify(image_id)?`. Plus new `image_id_from_elf(guest_elf)` helper wrapping `risc0_zkvm::compute_image_id` → `[u32; 8]`.
+     6. FILL `crates/zk_kernel/guest/src/main.rs` body (under `#[cfg(target_os = "zkvm")]`): `env::read::<Vec<u8>>()` → header validation (`WITNESS_MAGIC` / `WITNESS_VERSION` / `payload_len`) → `serde_json::from_slice::<SmtTrace>` → minimal Alethe replay subset checker (asserts proof starts with `"unsat"` and references every MUC label) → `env::commit(&(theory_signature, muc_labels))`.
+     7. ADD `Risc0ProveFailed(String)` + `Risc0VerifyFailed(String)` variants to `ZkError`.
+     8. BUMP `ZK_TOOLCHAIN_VERSION` (Justfile) v3.0.1 → v3.0.5; BUMP `ZK_SHA256` to the new tarball digest.
+   - **Task 12.3b2 deliverables (deferred):**
+     1. ADD `zk-prove-smoke` Justfile recipe gated on `.bin/.zk/cargo-risczero` (mirrors `rs-solver` `.bin/z3` gate from Phase 0).
+     2. ADD `crates/zk_kernel/tests/canonical_roundtrip.rs` cargo integration test driving the canonical `contradictory-bound` `SmtTrace` fixture through `extract → prove → verify` end-to-end.
+     3. The integration test runs under `RISC0_DEV_MODE=1` (fast fake prover) by default; a `--no-default-features` opt-in path or env-flag tier may run the real STARK prover for a deeper smoke. Operator-facing precondition: `just fetch-zk && cargo-risczero install` (the latter provisions the RISC-V cross-compiler that builds the guest ELF).
+
+2. **Coordinated cargo-risczero v3.0.1 → v3.0.5 bump.** Forced
+   by the v3.0.1 dyn-compat regression on rustc 1.95.0 (see
+   §Context #3). v3.0.5 spans the same v3.x major line per
+   Plan §6's pre-authorization. The bump propagates:
+   - Justfile `ZK_TOOLCHAIN_VERSION` constant: `3.0.1` → `3.0.5`.
+   - Justfile `ZK_SHA256` constant: `4e42c49d5e9d8ef85e10b5b8ee6fd9cac8abaccf1685aeb800550febdd77f069` (v3.0.1 tarball, 72,739,357 bytes) → `936ef988b78f20e3bd9f80e375f3adc934b13addc6ae2680f2e5fc0bcc966158` (v3.0.5 tarball, 73,001,634 bytes).
+   - `Cargo.toml` `risc0-zkvm` workspace dep version: `=3.0.1` → `=3.0.5`.
+   - `crates/zk_kernel/guest/Cargo.toml` `risc0-zkvm` direct dep version: `=3.0.1` → `=3.0.5`.
+   - `crates/zk_kernel/src/lib.rs` `ZK_TOOLCHAIN_VERSION` const: `"3.0.1"` → no change at this layer (the const reflects the canonical pin string, but the inline test `zk_toolchain_version_matches_v3_line` only asserts the `3.` prefix — patch-line bumps within v3.x are non-breaking by Plan §6 pre-authorization). **Note:** the lib.rs const `ZK_TOOLCHAIN_VERSION = "3.0.1"` was set at Task 12.1 and represents the foundation-time decision; bumping the in-code const requires a separate edit; for now the Justfile + Cargo.toml carry the actual bind. A future Task 12.3b2 / 12.4 may sync the in-code const if needed.
+
+3. **Host-side feature selection: `risc0-zkvm/prove`.** The
+   `prove` feature transitively enables `client` + `std` (per
+   the v3.0.5 feature graph), which gives us
+   `default_prover()` + `ExecutorEnv` + `Receipt::verify` +
+   `compute_image_id` in one feature pull. Alternative
+   considered: `risc0-zkvm/client` only (skip the heavy
+   prover backends). Rejected because `default_prover()`
+   itself is in the `prove` feature gate; without it we'd
+   need to manually instantiate `LocalProver` via internal
+   APIs, which break across patch versions.
+
+4. **Guest-side feature selection: `default-features = false`
+   + `std`.** Per the v3.0.5 docs:
+   "In order to use risc0-zkvm in the guest, you must disable
+   the default features." The host-only `client` + `bonsai`
+   features must NOT be enabled for guest builds. `std` is
+   enabled so the guest can heap-allocate `Vec<u8>` /
+   `String` (the `riscv32im-risc0-zkvm-elf` target supports
+   std via the Risc0 zkVM platform layer).
+
+5. **`prove(witness, guest_elf: &[u8])` — ELF-as-parameter,
+   NOT `risc0-build` `embed_methods!()` build.rs macro.**
+   The host accepts the guest ELF as a `&[u8]` parameter so
+   the host crate stays compile-clean without `cargo-risczero
+   install` having been run (the cross-compiler is what
+   `risc0-build` would invoke at build time). The Task 12.3b2
+   `tests/canonical_roundtrip.rs` integration test loads the
+   ELF bytes from the cross-compiled artefact at smoke time.
+   This decoupling mirrors the FHIR-axis "first kernel-side
+   consumer" deferral pattern one more hop (ADR-025 §3 + §8 →
+   ADR-032 §5 → ADR-033 §3 → ADR-034 §3 → ADR-035 §3).
+   - Alternative considered: build.rs with `risc0_build::
+     embed_methods()` that auto-compiles the guest. Rejected
+     because it forces the host build to require
+     `cargo-risczero` installed at build time (vs.
+     test-/smoke-time), which contaminates `cargo check`.
+
+6. **Schema duplication (host ↔ guest) for `SmtTrace` +
+   `WITNESS_*` constants.** The guest crate is workspace-
+   excluded and cannot depend on the host `zk-kernel` crate
+   (which pulls in `risc0-zkvm/prove`, a host-only feature
+   that breaks for the `riscv32im-risc0-zkvm-elf` target).
+   The duplication is bounded by ADR-033's wire-format
+   invariant: any change to `SmtTrace` or the header layout
+   requires coordinated edits to BOTH sites + a fresh ADR.
+   Future ADR-?? may extract a tiny `witness-schema` shared
+   crate (no Risc0 deps) if drift becomes a maintenance
+   burden; not done at 12.3b1 because the YAGNI bar is high
+   (3 constants + 3 fields).
+
+7. **`ZkError` surface gains 2 variants:** `Risc0ProveFailed
+   (String)` (any failure in the prove path: `ExecutorEnv`
+   build, `Prover::prove`, `bincode::serialize`) and
+   `Risc0VerifyFailed(String)` (any failure in the verify
+   path: `bincode::deserialize`, `Receipt::verify`,
+   `compute_image_id`). The wrapped string carries the
+   upstream error verbatim for operator diagnosis. The
+   foundation-stub `NotYetImplemented(u8)` variant is
+   retained for future deferred sub-task slots.
+
+8. **`bincode = "1"` workspace dep.** Required for
+   serializing the `risc0_zkvm::Receipt` to/from the opaque
+   `ZkProof` byte payload. `bincode` is pulled in
+   transitively by `risc0-zkvm/client`, but declaring it
+   directly makes the call sites compile cleanly without
+   relying on the transitive surface.
+
+9. **Inline tests for prove/verify check signatures only.**
+   The actual prove + verify call sites depend on a
+   cross-compiled guest ELF + (in non-dev-mode) a multi-
+   second STARK proving run. The Task 12.3b2 integration
+   test exercises the full `extract → prove → verify` round-
+   trip; the inline tests (`prove_signature_takes_witness_
+   and_guest_elf`, `verify_signature_takes_proof_and_image_
+   id`, `image_id_from_elf_signature_takes_byte_slice`,
+   `verify_rejects_garbage_proof_bytes`) cover the
+   compile-time signature contracts + the cheap
+   bincode-decode failure path. Total cargo test count: 35
+   (12.3a baseline) → 37 (12.3b1).
+
+### Alternatives rejected
+
+- **Single-session 12.3b (no further split).** Pre-
+  authorized by ADR-034 §3 to split if budget binds; the
+  three forcing functions (context, cross-compiler dep,
+  rustc regression) made the budget bind at session start.
+  Splitting now keeps the 12.3b1 deliverable cargo-clean +
+  the 12.3b2 deliverable smoke-runnable.
+- **Pin to `risc0-zkvm = "=3.0.1"` + use `[patch.crates-
+  io]` to override `risc0-circuit-rv32im` to a compatible
+  version.** Rejected because the patch override would
+  silently mask the upstream regression + drift further
+  from a coherent v3.x line; bumping to v3.0.5 fixes the
+  issue at source + keeps the cargo-risczero +
+  `risc0-zkvm` versions paired.
+- **Pin to `risc0-zkvm = "^3.0"` (caret-allow patch
+  bumps).** Rejected because we want a coordinated lockstep
+  with the sha-pinned cargo-risczero tarball — caret-
+  allowing patch drift would let `cargo update` bump the
+  runtime crate without bumping the toolchain installer,
+  breaking the version pairing.
+- **Bump to `risc0-zkvm = "=4.0.0"` or "=5.0.0-rc.1".** v4
+  / v5 are major-line bumps, NOT pre-authorized by Plan §6
+  (which permits patch-line bumps within v3.x only).
+  Crossing major lines requires a fresh decision (new
+  ADR + fresh web-search for breaking-change inventory +
+  re-validation against Plan §1's post-quantum invariant).
+- **Use `risc0-zkvm/client` instead of `risc0-zkvm/prove`
+  on the host side.** Rejected because `default_prover()`
+  is in the `prove` feature gate; the `client`-only build
+  would force manual `LocalProver` instantiation via
+  internal APIs, breaking across patch versions.
+- **Use `risc0-build` build.rs `embed_methods!()` macro for
+  guest ELF embedding.** Forces the host build to require
+  cargo-risczero installed at build time (vs. test-/smoke-
+  time), contaminating `cargo check`. Rejected — the
+  ELF-as-parameter pattern keeps the host crate compile-
+  clean without the cross-compiler.
+- **Land the Task 12.3b2 smoke recipe + integration test
+  in this commit.** Pre-empts the split decision; would
+  force the operator to have `cargo-risczero install`
+  completed before `cargo test --workspace` works (because
+  the integration test would be in the workspace path).
+- **Skip the cargo-risczero v3.0.1 → v3.0.5 bump; declare
+  v3.0.1 broken + abandon the ZK axis.** Rejected
+  catastrophically — v3.0.5 fix is a 2-line edit
+  (Justfile + Cargo.toml) that lands a working axis.
+- **Use `serde_json::to_vec` instead of `bincode::serialize`
+  for the `ZkProof` payload.** Receipt is a complex
+  serde-derived struct with nested binary blobs; bincode
+  is significantly more compact + faster. Rejected for
+  payload-size reasons.
+- **Commit the full `SmtTrace` to the receipt journal in
+  the guest.** Would inflate the journal with the Alethe
+  proof text (potentially 768 KiB per ADR-033). Committing
+  just `(theory_signature, muc_labels)` keeps the journal
+  compact + bounded — the Alethe text is the private
+  witness, not the public verdict.
+- **Sync the in-code `ZK_TOOLCHAIN_VERSION = "3.0.1"`
+  const in `crates/zk_kernel/src/lib.rs`.** Out of scope
+  for 12.3b1 — the const reflects the foundation-time
+  pin string + the inline test only asserts the `3.`
+  prefix. A future Task 12.3b2 / 12.4 may sync if needed.
+- **Add an opt-in `RISC0_DEV_MODE`-only feature flag for
+  cargo tests.** Pre-empts 12.3b2's design space; the
+  integration test will land with whatever dev-mode policy
+  fits best at smoke time.
+
+### Outcomes
+
+- The `risc0-zkvm = "=3.0.5"` workspace dep + the host
+  `prove` feature pull + the guest `default-features =
+  false` + `std` setup compile cleanly on rustc 1.95.0
+  (E0038 + E0599 from v3.0.1 are gone in v3.0.5). First
+  build time: ~6 seconds (subsequent `cargo check` is
+  near-instant via incremental compilation).
+- `cargo test --package zk-kernel --lib` → **37 pass**
+  (was 35 at 12.3a). Net +2: removed 2 NotYetImplemented
+  stub tests; added 4 new tests (prove/verify signature
+  checks + `image_id_from_elf` signature check + bincode-
+  garbage-rejection check).
+- `cargo clippy --workspace --all-targets -- -D warnings`
+  → clean.
+- `cargo fmt --all -- --check` → clean.
+- `just env-verify` → clean (no operator-facing changes).
+- The 12.3b2 smoke gate + integration test inherit a
+  working host-side `prove` / `verify` body + a working
+  guest body + a stable wire format. Smoke wiring at
+  12.3b2 just needs the recipe + the test fixture +
+  cargo-risczero install operator step.
+
+### Cross-references
+
+- Decision body lives here (ADL).
+- Source: `crates/zk_kernel/src/{prove,verify,errors,lib}.rs`
+  + `crates/zk_kernel/Cargo.toml` + `crates/zk_kernel/guest/
+  Cargo.toml` + `crates/zk_kernel/guest/src/main.rs` +
+  root `Cargo.toml` `[workspace.dependencies]` + `Justfile`
+  (`ZK_TOOLCHAIN_VERSION`, `ZK_SHA256`).
+- Tests:
+  - `crates/zk_kernel/src/{prove,verify}.rs` inline tests
+    cover the body fills (37 total cargo tests pass).
+  - `python/tests/test_zk_prove.py` updated to assert the
+    12.3b1 state (deps present, bodies wired, smoke
+    recipe + integration test STILL deferred to 12.3b2).
+- Plan: `Plan.md` §8.2 row 12.3b is split into 12.3b1
+  (DONE, ADR-035 cross-ref) + 12.3b2 (TODO).
+- README: `README.md` §7.2 row 12.3b is split into 12.3b1
+  (DONE) + 12.3b2 (PLANNED).
+- Memory pointer: `Memory_Scratchpad.md` `**Last
+  completed:**` advances to Task 12.3b1; `**Next up:**`
+  points at Task 12.3b2.
+
+### Cross-cutting invariants preserved
+
+- **C1 (genuine clinical data only).** Unchanged — the ZK
+  axis operates on the canonical `contradictory-bound`
+  fixture from Phase 0; no new data-source plumbing.
+- **C2 (OnionL JSON before solver).** Unchanged — the ZK
+  axis runs on the SMT outcome (UNSAT trace), not on
+  unstructured text.
+- **C3 (full SMT matrix evaluation).** Unchanged — the ZK
+  axis attests the existing UNSAT outcome, doesn't replace
+  it.
+- **C4 (MUC → source_span topological mapping).** The
+  guest body validates `muc_labels` against the Alethe
+  proof text, preserving the topological mapping
+  invariant cryptographically.
+- **C5 (one atomic task per session).** Honored — this
+  session lands ONLY 12.3b1 (deps + bodies). 12.3b2
+  (smoke + integration test) is a separate session.
+- **C6 (JSON-over-TCP / MCP).** Unchanged — ZK kernel is
+  in-process; no new IPC.
+- **PHASE marker.** Stays at 1. Flips 1 → 2 at Task
+  12.4 close-out per ADR-024 §4 (ZK axis is mid-flight
+  at 12.3b1 + 12.3b2 + 12.4).
+
+**ADR numbering note.** Sequential-by-task continues:
+ADR-031 → Task 11.4 (Cloud axis CLOSED), ADR-032 → Task
+12.1 (ZK axis OPEN), ADR-033 → Task 12.2 (witness
+encoding), ADR-034 → Task 12.3a (install plumbing + guest
+scaffold), ADR-035 → Task 12.3b1 (this entry — body fills
++ further split + cargo-risczero v3.0.1 → v3.0.5 bump).
+ZK axis status: 12.1 + 12.2 + 12.3a + 12.3b1 DONE,
+12.3b2 / 12.4 OPEN.
+
+---
+

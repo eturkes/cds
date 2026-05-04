@@ -191,7 +191,28 @@ time, not pre-locked here):
 > `4e42c49d5e9d8ef85e10b5b8ee6fd9cac8abaccf1685aeb800550febdd77f069`,
 > 72,739,357 bytes), the guest crate scaffolding decisions
 > (excluded from workspace until the dep lands), the per-sub-task
-> gates, and the alternatives rejected.
+> gates, and the alternatives rejected. **Task 12.3b was further
+> split into 12.3b1 + 12.3b2 on 2026-05-04** along the dep+body /
+> smoke+round-trip boundary that ADR-034 §3 pre-authorized. The
+> 12.3b1 scope (this commit, ADR-035) lands the `risc0-zkvm` v3.0.5
+> workspace + host + guest deps + the host `prove` / `verify` body
+> fills + the guest body fill (header validation → `serde_json`
+> decode → minimal Alethe replay → `env::commit` verdict) + the
+> coordinated cargo-risczero pin bump v3.0.1 → v3.0.5 (forced by
+> v3.0.1's transitive `risc0-circuit-rv32im 4.0.4` failing to
+> compile on rustc 1.95.0 — dyn-incompatible `impl Trait` in
+> trait return types). The 12.3b2 scope (deferred, same ADR-035)
+> lands the `zk-prove-smoke` Justfile recipe gated on
+> `.bin/.zk/cargo-risczero` + the
+> `crates/zk_kernel/tests/canonical_roundtrip.rs` cargo integration
+> test driving the canonical `contradictory-bound` `SmtTrace`
+> through `extract → prove → verify`. ADR-035 captures the
+> rationale, the new sha-pinned tarball digest (cargo-risczero
+> v3.0.5 Linux x86_64,
+> `936ef988b78f20e3bd9f80e375f3adc934b13addc6ae2680f2e5fc0bcc966158`,
+> 73,001,634 bytes), the host/guest feature splits, the new
+> `Risc0ProveFailed` / `Risc0VerifyFailed` `ZkError` variants, and
+> the per-sub-task gates.
 
 | #     | Task                                                                                                                                                            | Status       | Session output gate                                                                                       |
 | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------- |
@@ -206,12 +227,13 @@ time, not pre-locked here):
 | 12.1  | ZK toolchain selection — Risc0 / SP1 / Halo2 / PLONK 2026 SOTA web-search + `zk_kernel/` crate stub (ADR-032)                                                    | **DONE**     | git commit `feat: complete Task 12.1 ZK toolchain selection`                                              |
 | 12.2  | ZKSMT witness gen — fixed-size SMT-trace serialization + witness extraction (ADR-033)                                                                            | **DONE**     | git commit `feat: complete Task 12.2 ZKSMT witness gen`                                                   |
 | 12.3a | ZKSMT prove + verify install plumbing + guest crate scaffold — sha-pinned cargo-risczero v3.0.1 fetch + `crates/zk_kernel/guest/` skeleton + workspace exclusion (ADR-034) | **DONE**     | git commit `feat: complete Task 12.3a Risc0 install plumbing + guest crate scaffold`                       |
-| 12.3b | ZKSMT prove + verify body fills + canonical round-trip — `risc0-zkvm` workspace dep + guest body + `prove`/`verify` body + `zk-prove-smoke` recipe + `contradictory-bound` round-trip | **TODO**     | git commit `feat: complete Task 12.3b ZKSMT prove + verify body + canonical round-trip`                  |
+| 12.3b1 | ZKSMT prove + verify body fills — `risc0-zkvm` workspace + host + guest deps + guest body + `prove`/`verify` body + cargo-risczero pin bumped 3.0.1 → 3.0.5 (ADR-035) | **DONE**     | git commit `feat: complete Task 12.3b1 ZKSMT prove + verify body fills`                                  |
+| 12.3b2 | ZKSMT prove + verify canonical round-trip — `zk-prove-smoke` Justfile recipe gated on `.bin/.zk/cargo-risczero` + `crates/zk_kernel/tests/canonical_roundtrip.rs` driving `extract → prove → verify` on the canonical `contradictory-bound` fixture (ADR-035) | **TODO**     | git commit `feat: complete Task 12.3b2 ZKSMT canonical round-trip`                                       |
 | 12.4  | ZKSMT pipeline integration + Phase 1 close-out — `Formal_Verification_Trace.zk_attestation` field + PHASE 1 → 2 + full integration smoke + README Phase 1 → DONE | **TODO**     | git commit `feat: complete Task 12.4 ZKSMT close-out + Phase 1 closed` — **Phase 1 closed**               |
 
 **At any session:** select STRICTLY the lowest-numbered uncompleted
 task. No leapfrogging. Sub-tasks follow the same discipline —
-`8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9.1 < 9.2 < 9.3 < 10.1 < 10.2 < 10.3 < 10.4 < 11.1 < 11.2 < 11.3 < 11.4 < 12.1 < 12.2 < 12.3a < 12.3b < 12.4`.
+`8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9.1 < 9.2 < 9.3 < 10.1 < 10.2 < 10.3 < 10.4 < 11.1 < 11.2 < 11.3 < 11.4 < 12.1 < 12.2 < 12.3a < 12.3b1 < 12.3b2 < 12.4`.
 
 ## 9. Context-Governed Re-Entry Prompt (verbatim)
 

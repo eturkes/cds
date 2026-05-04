@@ -1,19 +1,32 @@
 # =============================================================================
-# zk-kernel-guest — Risc0 zkVM guest program (Phase 1, Task 12.3a scaffold)
+# zk-kernel-guest — Risc0 zkVM guest program (Phase 1, Task 12.3b1 body fill)
 # =============================================================================
-# Per ADR-034: this crate is the Risc0 guest program — compiled for the
-# `riscv32im-risc0-zkvm-elf` target via the rzup-installed cross-compiler
-# (`just fetch-zk` stages cargo-risczero v3.0.1 under `.bin/.zk/`). It is
-# intentionally EXCLUDED from the workspace `cargo check --workspace`
-# graph (root `Cargo.toml` `[workspace] exclude`) so the host build stays
-# toolchain-agnostic.
+# Per ADR-035: this crate is the Risc0 guest program — compiled for the
+# `riscv32im-risc0-zkvm-elf` target via the cargo-risczero cross-compiler
+# (`just fetch-zk` stages cargo-risczero v3.0.1 under `.bin/.zk/`;
+# `cargo risczero install` provisions the cross-compiler — Task 12.3b2
+# operator step). The crate is EXCLUDED from the workspace `cargo check
+# --workspace` graph (root `Cargo.toml` `[workspace] exclude`) so the
+# host build stays toolchain-agnostic.
 #
-# Task 12.3a (this scaffold): file structure + package metadata only;
-# `[dependencies]` deliberately empty. The `risc0-zkvm` (host) workspace
-# dep + this crate's `risc0-zkvm` guest dep + the actual guest body
-# (parse witness header → JSON-decode → minimal Alethe replay subset
-# checker → `env::commit` verdict + MUC label hash) land at Task 12.3b
-# alongside the kernel-side `prove` / `verify` body fills.
+# Task 12.3b1 (this commit) — body fills:
+# - `risc0-zkvm` guest dep added (default-features = false; std on so
+#   the guest can use `Vec` / `String` / `serde_json::from_slice`).
+# - `serde` + `serde_json` declared so the guest can JSON-decode the
+#   `SmtTrace` payload (`witness::extract_witness` mirror).
+# - `src/main.rs` body now runs: `env::read::<Vec<u8>>()` → witness
+#   header validation → `serde_json::from_slice::<SmtTrace>` → minimal
+#   Alethe replay subset checker → `env::commit(&(theory_signature,
+#   muc_labels))` to bind the verdict to the receipt's journal.
+#
+# Task 12.3b2 (deferred): `zk-prove-smoke` Justfile recipe + cargo
+# integration test `tests/canonical_roundtrip.rs` that drives the
+# canonical `contradictory-bound` `SmtTrace` through `extract → prove
+# → verify` — gated on `.bin/.zk/cargo-risczero` (the binary the
+# operator must run `cargo risczero install` from).
+#
+# Deps are declared directly here (NOT via `workspace = true`) because
+# the guest crate is workspace-excluded.
 
 [package]
 name        = "zk-kernel-guest"
@@ -21,19 +34,28 @@ version     = "0.0.0"
 edition     = "2024"
 license     = "Apache-2.0 WITH LLVM-exception"
 authors     = ["Emir Turkes"]
-description = "CDS ZKSMT post-quantum proof attestation — Risc0 guest program (Phase 1, Task 12.3a scaffold)."
+description = "CDS ZKSMT post-quantum proof attestation — Risc0 guest program (Phase 1, Task 12.3b1 body fill)."
 
 [[bin]]
 name = "zk-kernel-guest"
 path = "src/main.rs"
 
 [dependencies]
-# Intentionally empty at Task 12.3a (ADR-034 §3): the heavy `risc0-zkvm`
-# guest API surface (`risc0_zkvm::guest::env::{read_slice, commit}`)
-# lands at Task 12.3b when the actual guest body is wired up. Mirrors
-# the host-side `risc0-zkvm` deferral pattern (ADR-032 §5 → ADR-033 §3
-# → ADR-034 §3 — first kernel-side consumer is `prove`, not the guest
-# scaffold).
+# Risc0 guest API surface (`risc0_zkvm::guest::env::{read, commit}` +
+# the `entry!(main)` macro). `default-features = false` per the v3.0.5
+# guest guidance (https://docs.rs/risc0-zkvm/3.0.5) — the host-only
+# `client` + `bonsai` features must NOT be enabled for guest builds.
+# `std` is enabled so the guest can heap-allocate `Vec<u8>` / `String`
+# (the `riscv32im-risc0-zkvm-elf` target supports std via the Risc0
+# zkVM platform layer).
+#
+# The version is repeated verbatim from the workspace dep (ADR-035 §3
+# locks `=3.0.5` in lockstep with cargo-risczero's sha-pinned tarball);
+# `workspace = true` is unavailable here because this crate is in the
+# workspace `exclude` list.
+risc0-zkvm = { version = "=3.0.5", default-features = false, features = ["std"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [lints.rust]
 unsafe_code = "forbid"

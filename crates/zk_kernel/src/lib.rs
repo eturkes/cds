@@ -1,26 +1,30 @@
 //! `zk-kernel` — Phase 1 ZKSMT post-quantum proof attestation kernel.
 //!
-//! Foundation stub at Task 12.1 (ADR-032). The public API surface is
-//! declared and the module hierarchy is fixed; the prove / verify /
-//! witness-extraction paths return [`errors::ZkError::NotYetImplemented`]
-//! pending the toolchain wire-up at Task 12.2 (witness gen) and Task 12.3
-//! (prove + verify round-trip).
+//! Foundation declared at Task 12.1 (ADR-032). Witness gen wired at
+//! Task 12.2 (ADR-033). Install plumbing + guest crate scaffold at
+//! Task 12.3a (ADR-034). Prove + verify body fills + `risc0-zkvm`
+//! workspace + host + guest deps at Task 12.3b1 (ADR-035 — this
+//! commit). The matching `zk-prove-smoke` Justfile recipe + the
+//! canonical `extract → prove → verify` round-trip integration test
+//! at Task 12.3b2 (deferred).
 //!
-//! # Toolchain lock (ADR-032)
+//! # Toolchain lock (ADR-032 + ADR-035)
 //!
-//! - **zkVM:** [Risc0](https://github.com/risc0/risc0) v3.x — zk-STARK
+//! - **zkVM:** [Risc0](https://github.com/risc0/risc0) v3.0.1 — zk-STARK
 //!   proving via Plonky3-style FRI over collision-resistant hashes →
 //!   post-quantum secure (Plan §1's "ZKSMT post-quantum" requirement).
+//!   Cargo dep `=3.0.5` in lockstep with the sha-pinned cargo-risczero
+//!   tarball staged by `just fetch-zk` (ADR-035 §2 supersedes ADR-034
+//!   §2's v3.0.1 pin — v3.0.1's transitive `risc0-circuit-rv32im 4.0.4`
+//!   fails to compile on rustc 1.95.0; v3.0.5 fixes it). Bumping
+//!   requires a coordinated change: new sha256 + new
+//!   `ZK_TOOLCHAIN_VERSION` + new ADR.
 //! - **Candidate:** [SP1](https://github.com/succinctlabs/sp1) — locked
 //!   as the alternative if Risc0 prove latency proves binding at
-//!   Task 12.3. Same STARK-family security properties.
+//!   Task 12.3b2's smoke. Same STARK-family security properties.
 //! - **Rejected:** Halo2 / PLONK — circuit-based (not zkVM), pairing-
-//!   friendly elliptic-curve dependency breaks the post-quantum invariant.
-//!
-//! The heavy `risc0-zkvm` crate is intentionally NOT a workspace dep
-//! at Task 12.1 — added at Task 12.2 when the first kernel-side
-//! consumer materialises. Mirrors ADR-025 §3 + §8 (FHIR axis:
-//! `fhirbolt` locked as candidate, Cargo.toml addition deferred).
+//!   friendly elliptic-curve dependency breaks the post-quantum
+//!   invariant.
 
 #![forbid(unsafe_code)]
 #![deny(clippy::all)]

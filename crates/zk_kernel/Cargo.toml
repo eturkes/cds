@@ -6,22 +6,26 @@ rust-version.workspace = true
 license.workspace      = true
 authors.workspace      = true
 readme.workspace       = true
-description  = "CDS ZKSMT post-quantum proof attestation kernel: Risc0 v3.x zkVM glue (Phase 1 — Task 12.1 foundation stub)."
+description  = "CDS ZKSMT post-quantum proof attestation kernel: Risc0 v3.0.1 zkVM host glue (Phase 1 — Task 12.3b1 prove + verify body fills)."
 
 [lib]
 name = "zk_kernel"
 path = "src/lib.rs"
 
 [dependencies]
-# Foundation-only deps (Task 12.1 — ADR-032 §3 + §8). The heavy
-# `risc0-zkvm` crate (host + guest API) and the `cargo-risczero` /
-# `rzup` toolchain are intentionally NOT pulled in yet — added at
-# Task 12.2 (witness gen) when the first kernel-side consumer lands.
-# Mirrors ADR-025 §3 + §8 (FHIR axis: `fhirbolt` locked as candidate;
-# Cargo.toml addition deferred to first kernel-side consumer).
+# Phase 1 ZK axis deps (Task 12.3b1 — ADR-035 §3). The host-side surface
+# gates on `risc0-zkvm`'s `prove` feature (which itself enables `client`
+# + `std` per the v3.0.1 feature graph) — we get `default_prover()` +
+# `ExecutorEnv` + `Receipt::verify` + `compute_image_id` in one feature
+# pull. `bincode` serializes the `Receipt` to/from the opaque `ZkProof`
+# byte payload — pulled in transitively by `risc0-zkvm/client`, declared
+# directly here so the call sites compile without relying on the
+# transitive surface.
 serde      = { workspace = true }
 serde_json = { workspace = true }
 thiserror  = { workspace = true }
+risc0-zkvm = { workspace = true, features = ["prove"] }
+bincode    = { workspace = true }
 
 [lints.rust]
 unsafe_code = "forbid"

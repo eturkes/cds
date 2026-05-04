@@ -2,10 +2,13 @@
 //!
 //! `NotYetImplemented(<sub-task>)` is the dominant variant for sub-tasks
 //! whose impl has not yet landed; it carries the sub-task number that
-//! will replace the stub (12.3 = prove/verify). The witness-specific
-//! variants (`WitnessTooLarge`, `TraceFieldOverflow`, `WitnessHeader…`,
+//! will replace the stub. The witness-specific variants
+//! (`WitnessTooLarge`, `TraceFieldOverflow`, `WitnessHeader…`,
 //! `WitnessPayload…`) cover the failure modes of the Task 12.2
-//! length-prefixed binary encoding declared in [`crate::witness`].
+//! length-prefixed binary encoding declared in [`crate::witness`]. The
+//! Risc0-specific variants (`Risc0ProveFailed`, `Risc0VerifyFailed`)
+//! cover the prove + verify call-site failures wired up at Task 12.3b1
+//! per ADR-035 §3.
 
 use thiserror::Error;
 
@@ -16,6 +19,21 @@ pub enum ZkError {
     /// this branch with the real implementation.
     #[error("not yet implemented (lands at Task 12.{0})")]
     NotYetImplemented(u8),
+
+    /// Anything that goes wrong in the [`crate::prove::prove`] path:
+    /// `ExecutorEnv` build failure, prover backend failure, receipt
+    /// `bincode::serialize` failure. Carries the upstream error string
+    /// verbatim so operators can diagnose without re-running.
+    #[error("Risc0 prove failed: {0}")]
+    Risc0ProveFailed(String),
+
+    /// Anything that goes wrong in the [`crate::verify::verify`] path:
+    /// `bincode::deserialize` failure on the proof bytes, image-id
+    /// `Digest` conversion failure, or the underlying
+    /// `Receipt::verify` rejection. Carries the upstream error string
+    /// verbatim so operators can diagnose without re-running.
+    #[error("Risc0 verify failed: {0}")]
+    Risc0VerifyFailed(String),
 
     /// One of the [`crate::witness::SmtTrace`] variable-length fields
     /// exceeds its per-field cap (e.g. too many MUC labels, oversized

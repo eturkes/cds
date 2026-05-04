@@ -6,11 +6,14 @@
 resolver = "3"
 members = ["crates/kernel", "crates/zk_kernel"]
 # `crates/zk_kernel/guest/` is the Risc0 guest program — built for
-# `riscv32im-risc0-zkvm-elf` via the rzup-installed cross-compiler, NOT
+# `riscv32im-risc0-zkvm-elf` via the cargo-risczero cross-compiler, NOT
 # for the host `cargo check --workspace` graph. Excluded so the workspace
 # build stays toolchain-agnostic. The guest crate is wired up at Task
-# 12.3a as a scaffold; its body + the matching `risc0-zkvm` workspace
-# host dep + the prove/verify call sites land at Task 12.3b (ADR-034).
+# 12.3a as a scaffold; the matching `risc0-zkvm` workspace host dep +
+# the host prove/verify call sites + the guest body land at Task 12.3b1
+# (ADR-035 — split of original 12.3b along the dep+body / smoke+round-
+# trip boundary). The `zk-prove-smoke` recipe + `tests/canonical_roundtrip.rs`
+# integration test land at Task 12.3b2.
 exclude = ["crates/zk_kernel/guest"]
 
 [workspace.package]
@@ -35,6 +38,24 @@ reqwest            = { version = "0.13", default-features = false, features = ["
 axum               = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "macros"] }
 tower              = { version = "0.5", default-features = false, features = ["util"] }
 tower-http         = { version = "0.6", default-features = false, features = ["trace"] }
+# Phase 1 ZK axis (Task 12.3b1 — ADR-035). Pinned `=3.0.5` in lockstep
+# with the sha-pinned cargo-risczero v3.0.5 toolchain installer staged
+# by `just fetch-zk` (ADR-035 §2 supersedes ADR-034 §2's v3.0.1 pin —
+# v3.0.1's transitive dep tree pulls `risc0-circuit-rv32im 4.0.4`
+# which fails to compile on rustc 1.95.0 due to dyn-incompatible
+# `impl Trait` in trait return types; v3.0.5 spans the same v3.x
+# major line and fixes the dyn-compat issue at source). Bumping
+# requires a coordinated change: new sha256 + new ZK_TOOLCHAIN_VERSION
+# + new ADR. Each consumer crate selects its own feature subset
+# (host: `prove` for local proving + verification; guest: `default-
+# features = false` per https://docs.rs/risc0-zkvm/3.0.5 guest
+# guidance).
+risc0-zkvm         = { version = "=3.0.5", default-features = false }
+# Receipt serialization (host-side). Pulled in transitively by
+# `risc0-zkvm/client`; declared here so the host crate can call
+# `bincode::{serialize, deserialize}` on `Receipt` without depending
+# on the transitive surface.
+bincode            = "1"
 
 [profile.release]
 lto           = "thin"

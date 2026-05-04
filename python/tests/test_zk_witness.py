@@ -128,27 +128,39 @@ def test_errors_module_declares_witness_variants() -> None:
 # -----------------------------------------------------------------------------
 
 
-def test_zk_kernel_still_has_no_risc0_zkvm_dep_at_task_12_2() -> None:
-    """ADR-033 §3 re-defers the heavy `risc0-zkvm` dep to Task 12.3.
+def test_zk_kernel_pulls_risc0_zkvm_at_task_12_3b1() -> None:
+    """ADR-035 §3 deliverable 2: `risc0-zkvm` host dep landed at Task 12.3b1.
 
-    Reasoning: `extract_witness` produces host-side bytes (`Vec<u8>`)
-    via plain `serde_json`; the first kernel-side consumer of
-    `risc0-zkvm` is `prove` (Task 12.3), not `extract_witness` (Task
-    12.2). Mirrors the FHIR-axis `fhirbolt` deferral pattern (ADR-025
-    §3 + §8) and the Task 12.1 deferral (ADR-032 §5).
+    Inverts the original 12.2 re-deferral assertion. ADR-033 §3 re-
+    deferred `risc0-zkvm` to "the first kernel-side consumer is
+    `prove`, not `extract_witness`"; ADR-035 §3 honored that and added
+    the dep at the prove + verify body-fill commit. The test now
+    asserts the dep is present + uses the workspace pin, and that the
+    explicitly-rejected alternatives (sp1-zkvm / halo2 / plonky2 /
+    plonky3) stay out per ADR-032 §1's lock.
     """
     with ZK_KERNEL_CARGO_TOML.open("rb") as fh:
         manifest = tomllib.load(fh)
-    forbidden = {"risc0-zkvm", "cargo-risczero", "rzup", "sp1-zkvm", "halo2", "plonky2", "plonky3"}
+    deps = manifest.get("dependencies", {})
+    assert "risc0-zkvm" in deps, (
+        "Task 12.3b1 host crate must declare `risc0-zkvm` (ADR-035 §3 deliverable 2)"
+    )
+    risc0 = deps["risc0-zkvm"]
+    assert isinstance(risc0, dict), (
+        "host `risc0-zkvm` dep must be a table (not a bare version string)"
+    )
+    assert risc0.get("workspace") is True, (
+        "host `risc0-zkvm` must inherit the version pin via `workspace = true`"
+    )
+    rejected = {"sp1-zkvm", "halo2", "plonky2", "plonky3"}
     declared: set[str] = set()
     for table_name in ("dependencies", "dev-dependencies", "build-dependencies"):
         declared.update(manifest.get(table_name, {}).keys())
-    offenders = sorted(declared & forbidden)
-    detail = (
-        "Task 12.2 must NOT pull in zkVM crates yet (re-deferred per ADR-033 §3); "
+    offenders = sorted(declared & rejected)
+    assert not offenders, (
+        f"Task 12.3b1 must keep the ADR-032 §1-rejected zkVM alternatives OUT; "
         f"found: {offenders}"
     )
-    assert not offenders, detail
 
 
 # -----------------------------------------------------------------------------
@@ -217,8 +229,18 @@ def test_readme_marks_task_12_2_done_with_adr_033() -> None:
     assert "ADR-033" in row, "README Task 12.2 row must cross-ref ADR-033"
 
 
-def test_scratchpad_advances_active_pointer_to_task_12_3b() -> None:
-    """Task 12.3 was split 12.3a + 12.3b at ADR-034; scratchpad must point at 12.3b."""
+def test_scratchpad_records_task_12_2_and_12_3a_milestones() -> None:
+    """Sticky check: 12.2 (ADR-033) + 12.3a (ADR-034) historical milestones survive in the log.
+
+    The active-task pointer advances each session; this test asserts
+    the durable session-log record for the 12.2 + 12.3a close-outs
+    instead of the moving pointer (which is asserted by the per-sub-
+    task pointer test in `test_zk_prove.py` —
+    `test_scratchpad_advances_active_pointer_to_task_12_3b2` after
+    the 12.3b1 close-out).
+    """
     text = _read(SCRATCHPAD_PATH)
-    assert "Last completed:** Task 12.3a" in text, "scratchpad must record 12.3a as last completed"
-    assert "Next up:** **Task 12.3b" in text, "scratchpad must point at Task 12.3b as next up"
+    assert "Task 12.2" in text, "scratchpad must preserve the Task 12.2 milestone reference"
+    assert "Task 12.3a" in text, "scratchpad must preserve the Task 12.3a milestone reference"
+    assert "ADR-033" in text, "scratchpad must reference ADR-033 (Task 12.2 close-out)"
+    assert "ADR-034" in text, "scratchpad must reference ADR-034 (Task 12.3a close-out)"
