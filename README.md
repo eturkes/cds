@@ -202,7 +202,8 @@ pre-locked here; each axis lands its own architectural-lock ADR
 | 11.4 | Cloud axis close-out — cloud-deployed `contradictory-bound` smoke against `kind`                                                         | **PLANNED** |
 | 12.1 | ZK toolchain selection — Risc0 / SP1 / Halo2 / PLONK 2026 SOTA web-search + `zk_kernel/` crate stub (ADR-032)                            | **DONE**    |
 | 12.2 | ZKSMT witness gen — fixed-size SMT-trace serialization + witness extraction (ADR-033)                                                    | **DONE**    |
-| 12.3 | ZKSMT prove + verify — round-trip on canonical `contradictory-bound` fixture                                                              | **PLANNED** |
+| 12.3a | ZKSMT prove + verify install plumbing + guest crate scaffold — sha-pinned cargo-risczero v3.0.1 + `crates/zk_kernel/guest/` skeleton + workspace exclusion (ADR-034) | **DONE**    |
+| 12.3b | ZKSMT prove + verify body fills + canonical round-trip — `risc0-zkvm` workspace dep + guest body + `prove`/`verify` body + `zk-prove-smoke` recipe + `contradictory-bound` round-trip | **PLANNED** |
 | 12.4 | ZKSMT pipeline integration + Phase 1 close-out — `zk_attestation` field + PHASE 1 → 2                                                     | **PLANNED** |
 
 Each task is executed in its **own atomic session** under the *Context-Governed Re-Entry Protocol* documented in `.agent/Plan.md`.

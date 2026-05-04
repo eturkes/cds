@@ -5438,3 +5438,403 @@ witness encoding). ZK axis status note: 12.1 + 12.2 DONE, 12.3 /
 12.4 OPEN.
 
 ---
+
+## ADR-034 — ZKSMT prove + verify split (12.3a + 12.3b): sha-pinned cargo-risczero v3.0.1 install plumbing + `crates/zk_kernel/guest/` scaffold (workspace-excluded), `risc0-zkvm` host + guest deps + body fills + canonical round-trip RE-DEFERRED to Task 12.3b (Task 12.3a)
+
+**Status:** Accepted (Phase 1 — Task 12.3a structural decision; ZK axis OPEN)
+**Date:** 2026-05-04
+
+**Context.** Task 12.2 (ADR-033) shipped the host-side
+`extract_witness` / `parse_witness` round-trip with the heavy
+`risc0-zkvm` workspace dep RE-DEFERRED to Task 12.3 (the witness
+encoding is pure-Rust + pure-serde with no Risc0 API surface).
+Task 12.3 per Plan §8.2 row 12.3 is "ZKSMT prove + verify —
+round-trip on canonical `contradictory-bound` fixture." Decomposed,
+the original 12.3 scope bundles SIX axis-aligned deliverables:
+
+1. **Sha-pinned `cargo-risczero` install plumbing.** `Justfile`
+   `fetch-zk` recipe replaces the Task 12.1 / 12.2 stub with the
+   actual sha256-verified GitHub release tarball download (mirrors
+   `fetch-fhir`'s pattern).
+2. **`crates/zk_kernel/guest/` sub-crate scaffold.** New standalone
+   Cargo package carrying the Risc0 guest program; explicitly
+   EXCLUDED from `[workspace] members` so `cargo check --workspace`
+   stays toolchain-agnostic.
+3. **`risc0-zkvm` workspace + guest dep additions.** Multi-MB
+   compile cost; guest dep requires the rzup-installed RISC-V
+   cross-compiler (`riscv32im-risc0-zkvm-elf`).
+4. **Host `prove` / `verify` body fills.** `prove(&WitnessBlob)`
+   becomes `default_prover().prove(env, ZK_KERNEL_GUEST_ELF)` →
+   `Receipt::seal_bytes`; `verify(&ZkProof)` becomes
+   `Receipt::from_bytes(...)?.verify(ZK_KERNEL_GUEST_IMAGE_ID)?;`.
+5. **`zk-prove-smoke` Justfile recipe.** Gated on
+   `.bin/.zk/cargo-risczero` presence (mirrors the `rs-solver`
+   `.bin/z3` gate from Phase 0); drives the canonical
+   `contradictory-bound` `SmtTrace` through `extract → prove →
+   verify`.
+6. **End-to-end canonical-fixture round-trip.** Cargo integration
+   test asserting that the `contradictory-bound` UNSAT trace
+   produces a `ZkProof` that `verify` re-binds successfully.
+
+This bundle is structurally too large for one atomic session — the
+`risc0-zkvm` dep alone forces a multi-minute first compile + the
+guest program requires the rzup-installed cross-compiler + the
+prove call site requires a built guest ELF, and the canonical
+round-trip wires all of that together in a single integration
+test. Mirrors the Phase 0 mid-flight split precedent (ADR-016 / 018
+/ 019 / 020 / 021 / 022) and the Phase 1 axis-12 deferral pattern
+(ADR-032 §5 → ADR-033 §3, "first kernel-side consumer").
+
+Web-searches executed at decision time:
+
+- `Risc0 v3.0.1 cargo-risczero release tarball sha256 GitHub Linux x86_64 2026`
+  → Risc0 v3.0.1 (released 2025-08-21) ships a Linux x86_64
+  release asset `cargo-risczero-x86_64-unknown-linux-gnu.tgz`
+  (72,739,357 bytes; sha256
+  `4e42c49d5e9d8ef85e10b5b8ee6fd9cac8abaccf1685aeb800550febdd77f069`)
+  via the `risc0/risc0` GitHub release manifest. Newer minor
+  releases (v3.0.3 / v3.0.4 / v3.0.5) and a v5.0.0-rc.1 are
+  available; the v3.0.1 pin is intentionally retained per ADR-032
+  §1's locked toolchain version (env-overridable via
+  `ZK_TOOLCHAIN_VERSION`) — bumps within the v3.x line are
+  Justfile-level concerns, not ADR-grade until v4.x lands.
+- `Risc0 v3.x guest program target riscv32im-risc0-zkvm-elf 2026 cargo-risczero install`
+  → Modern Risc0 (v3.x) installs cross-compiler + recursion
+  receipts via `cargo-risczero install` after staging the
+  `cargo-risczero` binary. The `rzup` installer is the upstream
+  bootstrap script (downloads cargo-risczero); sha-pinning the
+  cargo-risczero tarball directly skips the `curl|bash`
+  unbounded-execution hazard while landing the same artefact.
+- `Risc0 ExecutorEnv builder write_slice host writes guest program 2026 default_prover prove`
+  → Host wires bytes via `ExecutorEnv::builder().write_slice(&bytes).build()`;
+  `default_prover().prove(env, ELF) → ProveInfo { receipt }`; receipt
+  carries `seal_bytes()` (witness + proof) suitable for `Receipt::verify(IMAGE_ID)`.
+  Guest reads via `risc0_zkvm::guest::env::read_slice::<u8>()` and
+  commits via `env::commit(&t)` — both are 12.3b moves.
+
+**Decision.**
+
+1. **Split Task 12.3 into 12.3a + 12.3b along the foundation/usage
+   boundary.** Task 12.3a (this ADR — accepted now) is the install
+   plumbing + guest crate scaffold + workspace-exclusion structural
+   half: pure-offline, no `risc0-zkvm` dep added, no body fills,
+   no smoke run. Task 12.3b (deferred) is the heavy dep + guest
+   body + host `prove` / `verify` body fills + `zk-prove-smoke`
+   recipe + canonical-fixture round-trip — the actual usage half.
+   Mirrors ADR-018 / 019 / 020 / 021 (Phase 0) and ADR-032 §5 →
+   ADR-033 §3 (Phase 1 ZK axis dep deferral).
+
+2. **`Justfile fetch-zk` recipe — sha-pinned cargo-risczero v3.0.1.**
+   Replaces the Task 12.1 / 12.2 stub with the actual download
+   logic, mirroring `fetch-fhir` to the byte:
+
+   - New constants: `ZK_OS = unknown-linux-gnu`,
+     `ZK_ARCH = x86_64`, `ZK_CARGO_RISCZERO_BIN = .bin/.zk/cargo-risczero`,
+     `ZK_SHA256 = 4e42c49d5e9d8ef85e10b5b8ee6fd9cac8abaccf1685aeb800550febdd77f069`
+     (env-overridable for arch ports + future version bumps).
+   - Removed constant: `ZK_RZUP_BIN` — superseded by
+     `ZK_CARGO_RISCZERO_BIN` (modern Risc0 install surface).
+   - Recipe body: `mkdir -p .bin/.zk/` → idempotent skip if
+     `.bin/.zk/cargo-risczero` already present → resolve asset URL
+     via `https://github.com/risc0/risc0/releases/download/v{{ZK_TOOLCHAIN_VERSION}}/cargo-risczero-{{ZK_ARCH}}-{{ZK_OS}}.tgz`
+     → `curl -fsSL ... | sha256sum` verify against `ZK_SHA256` →
+     `tar -xzf` → `install -m 0755` the binary → run
+     `--version` smoke probe → tail-message flagging the
+     `cargo-risczero install` invocation + guest body fills as
+     Task 12.3b deliverables.
+   - Tail message replaces the old "Task 12.2 deliverable" stub
+     callout: operators get an honest "Task 12.3b lands the
+     `cargo-risczero install` invocation + guest-program build +
+     prove/verify body fills" message instead.
+   - `env-verify` predicate flipped from `[ -x .bin/.zk/rzup ]` to
+     `[ -x .bin/.zk/cargo-risczero ]`; the operator-facing strings
+     ("`.bin/.zk/ present (Phase 1 ZK toolchain staged)`" /
+     "`.bin/.zk/ empty (run: just fetch-zk — Phase 1 ZK axis only)`")
+     are unchanged so `test_zk_foundation::test_justfile_env_verify_mentions_dot_bin_zk`
+     still passes.
+   - `zk-status` recipe updated: reports the excluded guest crate
+     path + the `cargo-risczero` install state (instead of the
+     defunct `rzup` path).
+   - `fetch-zk` is NOT added to `bootstrap` (mirrors `fetch-fhir`
+     / `fetch-lean` opt-in precedent).
+
+3. **`crates/zk_kernel/guest/` scaffold — workspace-excluded
+   standalone package.** New directory with three artefacts:
+
+   - `Cargo.toml`: package `zk-kernel-guest`, `edition = "2024"`,
+     `[[bin]]` declared, `[dependencies]` deliberately EMPTY.
+     The `risc0-zkvm` guest dep + the `risc0-zkvm` workspace host
+     dep land together at Task 12.3b — the guest crate is itself
+     a kernel-side consumer of the workspace dep, so the
+     "first-kernel-side-consumer" deferral pattern (ADR-025 §3 +
+     §8 → ADR-032 §5 → ADR-033 §3) extends one more hop.
+   - `src/main.rs`: skeleton with `#![cfg_attr(target_os = "zkvm",
+     no_main)]` + `#![cfg_attr(target_os = "zkvm", no_std)]` +
+     `#![forbid(unsafe_code)]`. Body is `unreachable!(..)` under
+     `target_os = "zkvm"` and a host-side `eprintln!(..)` stub
+     under all other targets — fails loud if anyone runs the
+     guest before Task 12.3b lands the real implementation.
+   - `README.md`: documents the 12.3a vs. 12.3b boundary, the
+     workspace-exclusion rationale (toolchain isolation + the
+     foundation/usage split), and the per-step Task 12.3b
+     deliverable list.
+   - Root `Cargo.toml` `[workspace]` table gains
+     `exclude = ["crates/zk_kernel/guest"]` so `cargo check
+     --workspace` keeps the host build toolchain-agnostic. The
+     guest is NOT in `members` (would force the host build to
+     try cross-compilation it can't satisfy without rzup).
+
+4. **No `risc0-zkvm` workspace dep at Task 12.3a.** Re-affirms
+   ADR-032 §5 + ADR-033 §3: heavy dep lands at the first concrete
+   consumer session (12.3b — `prove` body fills + guest body
+   fills together). At 12.3a the workspace `[workspace.dependencies]`
+   table is unchanged; `crates/zk_kernel/Cargo.toml`
+   `[dependencies]` is unchanged (still serde + serde_json +
+   thiserror); `crates/zk_kernel/guest/Cargo.toml` `[dependencies]`
+   is empty. `cargo check --workspace` adds zero new transitive
+   compile cost; `crates/zk_kernel/guest/` is touched only when
+   operators explicitly invoke `cargo build --manifest-path
+   crates/zk_kernel/guest/Cargo.toml --target riscv32im-risc0-zkvm-elf`
+   (Task 12.3b deliverable, requires `cargo-risczero install`).
+
+5. **Host `prove` / `verify` stubs unchanged.**
+   `crates/zk_kernel/src/{prove,verify}.rs` still return
+   `ZkError::NotYetImplemented(3)` at Task 12.3a. The body fills
+   land together with the `risc0-zkvm` workspace dep at Task
+   12.3b; splitting them across 12.3a / 12.3b would force a
+   half-wired prove call that compiles against a missing dep —
+   no value. The existing `test_prove_returns_not_yet_implemented_at_12_3`
+   / `test_verify_returns_not_yet_implemented_at_12_3` cargo
+   inline tests + the new
+   `test_prove_and_verify_still_return_not_yet_implemented_at_task_12_3a`
+   pytest assertion lock the invariant.
+
+6. **`zk-prove-smoke` Justfile recipe NOT added at Task 12.3a.**
+   Recipe lands at Task 12.3b alongside the `prove` / `verify`
+   body fills + the canonical fixture cargo integration test.
+   At 12.3a the existing `zk-stub-check` (cargo check + cargo
+   test --lib) + `zk-witness-smoke` (cargo test --lib witness)
+   recipes are sufficient — no new live gate is meaningful
+   without the body fills.
+
+7. **`ZkError` surface unchanged.** No new variants at Task 12.3a;
+   the `NotYetImplemented(3)` arm continues to cover the still-
+   pending prove + verify paths. Task 12.3b may add a
+   `Risc0ProveFailed(String)` / `Risc0VerifyFailed(String)`
+   variant pair for the wrap-cleanup pattern (TBD at the body
+   fill site).
+
+8. **`Plan.md` row 12.3 split + cross-ref bump.** Row 12.3 is
+   replaced by two rows: 12.3a (DONE, ADR-034 cross-ref) +
+   12.3b (TODO, no ADR cross-ref yet — ADR-035 expected at the
+   12.3b commit). `README.md` row 12.3 receives the same split
+   (12.3a DONE, 12.3b PLANNED). The §8.2 ordering rule extends
+   from `... 12.2 < 12.3 < 12.4` to `... 12.2 < 12.3a < 12.3b
+   < 12.4`. The §8.2 "Note." paragraph appends a fresh "Task
+   12.3 was further split into 12.3a + 12.3b on 2026-05-04 for
+   the same reason" sentence carrying the canonical sha-pinned
+   tarball digest + the alternatives-rejected pointer.
+
+9. **No PHASE flip.** Stays at 1 across both `cds_kernel::PHASE`
+   and `zk_kernel::PHASE`; flip 1 → 2 still locked at Task 12.4
+   close-out per ADR-024 §4.
+
+10. **No new workspace deps.** `[workspace.dependencies]` table is
+    unchanged. Total compile cost of Task 12.3a's deliverables on
+    the host workspace: zero — the guest crate is workspace-
+    excluded; the host `crates/zk_kernel/` is unchanged.
+
+11. **Existing pytest assertions migrated, not duplicated.**
+    `test_zk_foundation::test_fetch_zk_is_stub_at_task_12_1` is
+    renamed → `test_fetch_zk_install_logic_is_wired_at_task_12_3a`;
+    its body inverts (forbids the old "Task 12.2 deliverable"
+    stub message + asserts the new sha-pinned constants + URL +
+    sha256sum + Task 12.3b tail-message wiring). The
+    `test_justfile_declares_zk_constants` assertion's
+    `ZK_RZUP_BIN` literal is replaced by `ZK_CARGO_RISCZERO_BIN`
+    (modern install surface). Two-line touch in
+    `test_zk_foundation.py` keeps the foundation invariants
+    coherent with the 12.3a re-wire. The witness test
+    (`test_zk_witness.py`) is unchanged: its
+    `test_justfile_fetch_zk_install_logic_still_deferred` only
+    forbids the unverified `curl|bash` execution path, which
+    12.3a continues to honor.
+
+12. **New offline pytest module: `python/tests/test_zk_prove.py`.**
+    Carries 14 offline cases covering the Task 12.3a deliverables:
+    guest crate directory + Cargo.toml + main.rs + README exist,
+    guest package metadata (name / edition / `[[bin]]`), guest
+    `[dependencies]` is risc0-free, guest main.rs is `#![no_main]`
+    + `#![no_std]` under `target_os = "zkvm"` + `unreachable!()`
+    body, README documents the 12.3a / 12.3b boundary + ADR-034
+    cross-ref, root `Cargo.toml` `[workspace]` excludes the guest
+    crate AND does NOT list it in members, host `prove` /
+    `verify` still return `NotYetImplemented(3)`,
+    `[workspace.dependencies]` is risc0-free, `crates/zk_kernel/Cargo.toml`
+    `[dependencies]` is risc0-free, fetch-zk is sha-pinned (no
+    Task 12.2 stub message), fetch-zk does NOT execute unverified
+    `curl|bash`, zk-status mentions cargo-risczero + guest crate,
+    ADR-034 in ADL with both Task 12.3a and Task 12.3b refs +
+    sha256 digest, Plan + README rows split into 12.3a / 12.3b,
+    scratchpad pointer advanced to 12.3b.
+
+**Consequences.**
+
+- Task 12.3b inherits a working `cargo-risczero` install path
+  (operators run `just fetch-zk` once → cargo-risczero binary
+  staged at `.bin/.zk/cargo-risczero`; then `cargo-risczero
+  install` provisions the cross-compiler — Task 12.3b deliverable).
+  The guest crate scaffold is in place; 12.3b adds the
+  `risc0-zkvm` deps + fills the guest body + the host `prove` /
+  `verify` bodies + the `zk-prove-smoke` recipe + the canonical
+  fixture round-trip cargo integration test.
+- The workspace-exclusion of `crates/zk_kernel/guest/` keeps
+  `cargo check --workspace` toolchain-agnostic — dev boxes
+  without rzup continue to pass the foundation gates. The
+  exclusion is reversible at 12.3b (or kept; the guest crate is
+  built explicitly via `cargo build --manifest-path
+  crates/zk_kernel/guest/Cargo.toml --target
+  riscv32im-risc0-zkvm-elf` regardless of workspace membership,
+  so keeping it excluded is the lower-friction default).
+- The `fetch-zk` recipe is now safe to invoke (sha-pinned + size-
+  checked); operators no longer get the "Task 12.2 deliverable"
+  stub. Newcomers running `just fetch-zk` at 12.3a get a working
+  cargo-risczero binary staged + an honest "Task 12.3b lands the
+  `cargo-risczero install` invocation" message instead of an
+  unbounded `curl https://risczero.com/install | bash` from the
+  web.
+- The sha-pinned digest (`4e42c49d5e9d8ef85e10b5b8ee6fd9cac8abaccf1685aeb800550febdd77f069`)
+  is anchored in three places: `Justfile` (`ZK_SHA256`), this ADR
+  (§2 + §context), and `python/tests/test_zk_prove.py`
+  (`test_justfile_fetch_zk_is_sha_pinned_at_task_12_3a`). The
+  triple anchor protects against silent drift; bumping requires
+  coordinated edits across all three.
+- The `zk_toolchain_is_post_quantum()` invariant remains
+  queryable + true; nothing in this ADR changes the post-quantum
+  posture. The locked Risc0 v3.0.1 pin (ADR-032 §1) carries
+  through; the cargo-risczero binary is the modern install
+  surface for that pin.
+- ADR-032 §6 ("Justfile `fetch-zk` stub at Task 12.1; full
+  install at Task 12.2") and ADR-033 §4 ("`fetch-zk` Justfile
+  install logic RE-DEFERRED to Task 12.3") are both fully
+  resolved at 12.3a — `fetch-zk` is wired with sha-pinned
+  install logic. The deferral chain (12.1 → 12.2 → 12.3 → 12.3a)
+  ends here; the `cargo-risczero install` invocation +
+  cross-compiler provisioning are a separate Task 12.3b move.
+- The "first kernel-side consumer" pattern (ADR-025 §3 + §8 →
+  ADR-032 §5 → ADR-033 §3 → ADR-034 §3) is now a documented
+  project-wide convention applied across two axes (FHIR via
+  `fhirbolt`; ZKSMT via `risc0-zkvm`). Future ADRs can compose
+  the pattern: ADR-N declares the lock + stub, ADR-N+k flips on
+  at first concrete consumer.
+- Re-Entry Prompt selects Task 12.3b (ZKSMT prove + verify body
+  + canonical round-trip) next; the strict §8.2 ordering rule is
+  preserved.
+
+**Alternatives rejected.**
+
+- **Single-session Task 12.3 (no split).** The bundle (sha-pinned
+  install + guest crate + risc0-zkvm dep + guest body + host
+  prove/verify body + smoke recipe + canonical round-trip)
+  reliably exhausts a single context window — and the
+  `risc0-zkvm` first compile alone is multi-minute, leaving
+  insufficient budget for the body fills + integration test.
+  Mirrors the Phase 0 mid-flight-split precedent (ADR-016 / 018
+  / 019 / 020 / 021 / 022); the foundation/usage boundary is the
+  cleanest cut.
+- **Split into 12.3a + 12.3b + 12.3c (three-way).** Granularity
+  beyond the foundation/usage boundary adds friction without
+  meaningful budget relief. The 12.3a deliverables (sha-pinned
+  install + guest scaffold + workspace exclusion) are pure-
+  offline + zero-compile; the 12.3b deliverables (dep + body
+  fills + smoke + round-trip) are co-dependent (the `prove` body
+  needs the dep AND the guest ELF AND the `zk-prove-smoke`
+  invocation drives the round-trip — splitting them midway
+  yields half-wired commits with no usable gate).
+- **Add `risc0-zkvm` workspace dep at Task 12.3a.** Premature
+  per ADR-025 §3 + §8 + ADR-032 §5 + ADR-033 §3 precedent. The
+  scaffold (Cargo.toml + main.rs + README + workspace exclusion
+  + sha-pinned install logic) compiles + tests green without the
+  heavy dep; adding it now incurs ~2-minute first-compile cost
+  for zero Task 12.3a deliverable benefit. The body fills + the
+  dep land together at 12.3b.
+- **Include `crates/zk_kernel/guest/` in `[workspace] members`
+  (not exclude).** Would force `cargo check --workspace` to
+  cross-compile to `riscv32im-risc0-zkvm-elf`, which fails
+  without the rzup-installed cross-compiler. Excluding keeps the
+  host workspace toolchain-agnostic; the guest is built
+  explicitly via the cargo-risczero invocation at 12.3b.
+- **Run `curl https://risczero.com/install | bash` from
+  `fetch-zk` at Task 12.3a.** Unbounded shell-script execution
+  from the web is the supply-chain hazard ADR-032 §6 +
+  ADR-033 §4 already rejected. Sha-pinned tarball download
+  (mirrors `fetch-fhir`) is the canonical CDS install pattern.
+- **Pin `cargo-risczero` v3.0.5 (latest stable on the v3.x line
+  at decision time).** Per ADR-032 §1's locked toolchain version
+  the v3.0.1 pin is intentional; bumping within the v3.x line
+  is a Justfile-level concern (env-overridable via
+  `ZK_TOOLCHAIN_VERSION` + `ZK_SHA256`), not ADR-grade until
+  v4.x lands. Defer to a future ADR when measurement (e.g.,
+  prove latency at 12.3b round-trip) justifies.
+- **Pin v5.0.0-rc.1 (latest available on the upstream releases
+  list).** Release-candidates are explicitly out of scope for the
+  locked toolchain — the foundation lock chose v3.x for stability
+  + audit surface (ADR-032 §1). v5.x is an ADR-grade migration
+  event after at least one stable release, not a sneaky bump.
+- **Stage `rzup` (not `cargo-risczero`) under `.bin/.zk/`.**
+  `rzup` is the upstream bootstrap script that downloads
+  cargo-risczero; sha-pinning the cargo-risczero tarball
+  directly skips the bootstrap layer + reduces the supply-chain
+  surface to one verified binary. The `cargo-risczero install`
+  invocation (still required to provision the cross-compiler) is
+  driven by the staged binary at 12.3b.
+- **Stage `cargo-risczero` under `.bin/cargo-risczero` (alongside
+  `z3` / `cvc5`), not `.bin/.zk/cargo-risczero`.** The `.bin/.zk/`
+  sub-directory mirrors `.bin/.hfs/` (FHIR) + `.bin/.dapr/`
+  (Dapr) + `.bin/.elan/` (Lean) — toolchain-specific
+  sub-directory keeps the install layout discoverable + lets
+  `env-verify` report axis-level state.
+- **Skip the guest crate scaffold; ship only the install logic
+  at 12.3a.** The guest crate scaffold IS the foundation half —
+  Task 12.3b body-fills depend on the file structure being in
+  place. Splitting them (12.3a-i = install only, 12.3a-ii =
+  scaffold only) yields no budget relief + adds friction.
+- **Include `risc0-zkvm-platform` (small, no host build cost) in
+  the guest `[dependencies]` at 12.3a.** Premature; the platform
+  crate is consumed transitively through `risc0-zkvm`, and
+  forcing a partial dep at 12.3a fragments the
+  "first-kernel-side-consumer" pattern. Defer to 12.3b for one
+  coherent dep edit.
+- **Make the guest `main()` body a `loop {}` instead of
+  `unreachable!()`.** Loop body would silently hang inside the
+  zkVM if anyone runs the guest before 12.3b — fail-loud
+  `unreachable!()` is the safer scaffold default.
+- **Skip `crates/zk_kernel/guest/README.md`.** The 12.3a / 12.3b
+  boundary + the workspace-exclusion rationale + the per-step
+  12.3b deliverable list is multi-faceted and benefits from a
+  dedicated doc — saves ADR-035's "Why is the guest crate
+  scaffold so empty?" recap.
+- **Skip ADR-034; treat the split as a Plan-level edit only.**
+  The split decision is multi-faceted (split rationale +
+  sha-pinned tarball lock + guest crate scaffolding decisions +
+  workspace-exclusion + per-sub-task gates + alternatives
+  rejected) and lives outside any one config / source file.
+  Mirrors the per-split ADR pattern from ADR-018 / 019 / 020 /
+  021 (Phase 0) and ADR-032 / 033 (Phase 1 ZK axis).
+- **PHASE flip 1 → 2 at Task 12.3a (ZK install plumbing).**
+  Premature — the ZK axis is mid-flight. ADR-024 §4 binds the
+  flip to Task 12.4 close-out (full integration smoke +
+  `zk_attestation` field + README Phase 1 → DONE).
+- **Update `README.md` row 12.3 → DONE without splitting.** Would
+  misrepresent the actual deliverable state — 12.3a is a
+  scaffold half, 12.3 round-trip is NOT yet runnable. The
+  split-row pattern keeps reader-facing status honest.
+
+**ADR numbering note.** Sequential-by-task continues: ADR-031 →
+Task 11.4 (Cloud axis CLOSED), ADR-032 → Task 12.1 (ZK axis
+OPEN), ADR-033 → Task 12.2 (witness encoding), ADR-034 → Task
+12.3a (this entry — install plumbing + guest scaffold). ZK axis
+status note: 12.1 + 12.2 + 12.3a DONE, 12.3b / 12.4 OPEN.
+
+---
+

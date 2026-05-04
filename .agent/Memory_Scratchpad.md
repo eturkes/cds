@@ -6,10 +6,175 @@
 
 ## Active task pointer
 
-- **Last completed:** Task 12.2 — ZKSMT witness gen. Implemented the host-side fixed-size SMT-trace witness encoding declared as a `NotYetImplemented(2)` stub at Task 12.1. New types: `SmtTrace { theory_signature: Vec<String>, muc_labels: Vec<String>, alethe_proof: String }` mirrors the UNSAT outcome of `cds_kernel::FormalVerificationTrace` (no schema invention — strict reuse). New encoding constants: `MAX_WITNESS_BYTES = 1 << 20` (1 MiB total cap), `WITNESS_HEADER_BYTES = 12`, `WITNESS_MAGIC = *b"ZKSM"`, `WITNESS_VERSION = 1`, `MAX_THEORIES = 32`, `MAX_MUC_LABELS = 1024`, `MAX_ALETHE_BYTES = 768 * 1024` (768 KiB), `MAX_LABEL_BYTES = 256`. Wire format: `[magic 4B "ZKSM"][version 1B 0x01][reserved 3B 0x000000][payload_len u32 LE][serde_json payload payload_len bytes]`. `extract_witness(&SmtTrace) -> Result<WitnessBlob, ZkError>` validates per-field caps before serializing → emits the deterministic length-prefixed binary frame; `parse_witness(&WitnessBlob) -> Result<SmtTrace, ZkError>` is the host-side inverse (Task 12.3 host glue + round-trip tests). New `ZkError` variants: `TraceFieldOverflow { field, actual, limit }`, `WitnessTooLarge { actual, limit }`, `WitnessHeaderTruncated(usize)`, `WitnessHeaderMagicMismatch`, `WitnessVersionUnsupported(u8)`, `WitnessPayloadLengthMismatch { advertised, actual }`, `WitnessPayloadEncode(String)`, `WitnessPayloadDecode(String)` — `NotYetImplemented(3)` retained for the still-pending `prove` / `verify` stubs. **Crucial deferral re-affirmation:** ADR-033 §3 + §4 amend ADR-032 §5 + §6 — the heavy `risc0-zkvm` workspace dep + the actual `fetch-zk` rzup install logic are RE-DEFERRED to Task 12.3 (first kernel-side consumer is `prove`, not `extract_witness`; the witness encoding is pure-Rust + pure-serde with no Risc0 API surface). Follows the ADR-025 §3 + §8 FHIR-axis "first-kernel-side-consumer" precedent. New Justfile recipe `zk-witness-smoke: cargo test --package zk-kernel --lib witness`. New `python/tests/test_zk_witness.py` carries 13 offline cases (SmtTrace declared, encoding constants present, extract/parse signatures match, NotYetImplemented(2) absent from witness.rs, serde_json used + risc0_zkvm absent, all 8 new ZkError variants declared, risc0-zkvm STILL not in Cargo.toml, Justfile registers zk-witness-smoke, fetch-zk install logic STILL deferred (no `curl | bash` execution), ADR-033 in ADL with ZKSM mention, Plan row 12.2 = DONE + ADR-033 cross-ref, README row 12.2 = DONE + ADR-033 cross-ref, scratchpad pointer advanced to 12.3). Updated `python/tests/test_zk_foundation.py` to drop the now-stale `NotYetImplemented(2) in witness.rs` assertion (sub-task 3 markers in `prove.rs` / `verify.rs` retained). Inline cargo tests grow from 13 → 35 (22 new in `witness.rs`: header layout, magic / version / payload round-trip, 5 cap-rejection paths, 5 parse-failure paths, deterministic encoding, canonical `contradictory-bound` SmtTrace fixture round-trip via `include_str!("../../../proofs/contradictory-bound.alethe.proof")`, advertised_payload_len helper). Final gate (offline only — Risc0 still un-installed by design): `cargo check --workspace --quiet` → clean; `cargo test --package zk-kernel --lib` → **35 pass**; `cargo clippy --package zk-kernel --all-targets -- -D warnings` → clean; `uv run pytest -q python/tests/test_zk_foundation.py python/tests/test_zk_witness.py` → expected (16 + 13) = 29 pass; `just zk-witness-smoke` → 25 witness tests pass; `just env-verify` → clean. Decisions captured in **ADR-033 — ZKSMT witness encoding: ZKSM-magic length-prefixed JSON, host-side caps, `risc0-zkvm` re-deferred to Task 12.3**. **No PHASE flip** (1 → 2 still deferred to Task 12.4 per ADR-024 §4). **No new workspace deps** (still serde + serde_json + thiserror).
-- **Next up:** **Task 12.3 — ZKSMT prove + verify.** Round-trip on canonical `contradictory-bound` fixture. Web-search at decision time for "Risc0 v3.0.1 ExecutorEnv guest program 2026 cargo-risczero rzup install", "Risc0 v3.x prove + verify Receipt seal_bytes Rust 2026", "Risc0 guest program Alethe replay minimal SMT verifier 2026", "rzup sha-pinned tarball release 2026". Likely shape: ADD `risc0-zkvm` workspace dep matching v3.0.1 pin (env-overridable via `ZK_TOOLCHAIN_VERSION`); ADD `crates/zk_kernel/guest/` sub-crate carrying the guest program (parses witness bytes via `parse_witness`-equivalent → runs minimal Alethe replay subset checker on `SmtTrace` → commits the verdict + MUC label hash via `env::commit`); FILL IN `prove(&WitnessBlob) -> Result<ZkProof, ZkError>` body invoking `default_prover().prove(env, GUEST_ELF)` → wrap `Receipt::seal_bytes()` in `ZkProof`; FILL IN `verify(&ZkProof) -> Result<(), ZkError>` body invoking `Receipt::verify(GUEST_IMAGE_ID)`; FILL IN `fetch-zk` Justfile recipe with sha-pinned rzup tarball download mirroring `fetch-fhir` pattern; ADD `zk-prove-smoke` recipe driving the canonical `contradictory-bound` SmtTrace through extract → prove → verify; gate `zk-prove-smoke` behind `.bin/.zk/rzup` presence (mirrors solve / recheck dependency-gate pattern from Phase 0). ADR-034 expected. Note: this is the LARGEST sub-task left in Phase 1; mid-flight split into 12.3a (toolchain install + dep wire-up + guest program + extract→prove→verify happy-path) and 12.3b (full canonical-fixture smoke + pipeline integration prep) is anticipated should context budget bind — precedent: ADR-016 / 018 / 019 / 020 / 021 / 022.
+- **Last completed:** Task 12.3a — ZKSMT prove + verify install plumbing + guest crate scaffold. Split the original Task 12.3 along the foundation/usage boundary into 12.3a (this session) + 12.3b (deferred) per ADR-034 — precedent: ADR-016 / 018 / 019 / 020 / 021 / 022 (Phase 0 mid-flight splits) + ADR-032 §5 → ADR-033 §3 (Phase 1 ZK axis "first-kernel-side-consumer" deferral). Wired `Justfile fetch-zk` recipe with the actual sha-pinned cargo-risczero v3.0.1 download (asset `cargo-risczero-x86_64-unknown-linux-gnu.tgz`, 72,739,357 bytes, sha256 `4e42c49d5e9d8ef85e10b5b8ee6fd9cac8abaccf1685aeb800550febdd77f069`) — mirrors `fetch-fhir`'s sha256-verified GitHub release tarball pattern to the byte. Added new constants: `ZK_OS = unknown-linux-gnu`, `ZK_ARCH = x86_64`, `ZK_CARGO_RISCZERO_BIN = .bin/.zk/cargo-risczero`, `ZK_SHA256` (env-overridable). Removed `ZK_RZUP_BIN` constant — superseded by `ZK_CARGO_RISCZERO_BIN` (modern Risc0 install surface). `env-verify` predicate flipped from `[ -x .bin/.zk/rzup ]` to `[ -x .bin/.zk/cargo-risczero ]` (operator-facing strings unchanged so `test_justfile_env_verify_mentions_dot_bin_zk` still passes). `zk-status` recipe updated to report excluded guest crate path + cargo-risczero install state. `fetch-zk` recipe tail message replaces the old "Task 12.2 deliverable" stub with an honest "Task 12.3b lands the `cargo-risczero install` invocation + guest-program build + prove/verify body fills" notice. Added new standalone Cargo package `crates/zk_kernel/guest/` (NOT in workspace `members`; explicitly in `[workspace] exclude`): `Cargo.toml` with `package.name = "zk-kernel-guest"`, `edition = "2024"`, `[[bin]]` declared, `[dependencies]` deliberately EMPTY (the `risc0-zkvm` guest dep + the `risc0-zkvm` workspace host dep land together at 12.3b — guest crate is itself a kernel-side consumer of the workspace dep, "first-kernel-side-consumer" pattern extends one more hop); `src/main.rs` skeleton with `#![cfg_attr(target_os = "zkvm", no_main)]` + `#![cfg_attr(target_os = "zkvm", no_std)]` + `#![forbid(unsafe_code)]` + `unreachable!(..)` body (fails loud if anyone runs the guest before 12.3b lands the real implementation); `README.md` documenting the 12.3a vs. 12.3b boundary + workspace-exclusion rationale + per-step 12.3b deliverable list. Root `Cargo.toml` `[workspace]` table gains `exclude = ["crates/zk_kernel/guest"]` so `cargo check --workspace` keeps the host build toolchain-agnostic. **Host `prove` / `verify` stubs unchanged** — both still return `ZkError::NotYetImplemented(3)`; the body fills land together with the `risc0-zkvm` workspace dep at 12.3b (splitting them across 12.3a / 12.3b would force a half-wired prove call that compiles against a missing dep — no value). **`zk-prove-smoke` Justfile recipe NOT added at 12.3a** — lands at 12.3b alongside the body fills + canonical fixture cargo integration test. **`ZkError` surface unchanged** — no new variants; 12.3b may add `Risc0ProveFailed(String)` / `Risc0VerifyFailed(String)` variants. **No `risc0-zkvm` workspace dep at 12.3a** — re-affirms ADR-032 §5 + ADR-033 §3; `[workspace.dependencies]` table unchanged; `crates/zk_kernel/Cargo.toml` `[dependencies]` unchanged (still serde + serde_json + thiserror); `crates/zk_kernel/guest/Cargo.toml` `[dependencies]` empty. New `python/tests/test_zk_prove.py` carries 14 offline cases covering 12.3a deliverables (guest crate dir + Cargo.toml + main.rs + README exist; guest package metadata; guest deps risc0-free; guest main.rs `#![no_main]` + `#![no_std]` under `target_os = "zkvm"` + `unreachable!()` body; README documents 12.3a/12.3b boundary; root Cargo.toml `[workspace]` excludes guest crate AND does NOT list it in members; host `prove`/`verify` still return `NotYetImplemented(3)`; `[workspace.dependencies]` risc0-free; `crates/zk_kernel/Cargo.toml` `[dependencies]` risc0-free; `fetch-zk` sha-pinned (no Task 12.2 stub); `fetch-zk` does NOT execute unverified `curl|bash`; `zk-status` mentions cargo-risczero + guest crate; ADR-034 in ADL with both 12.3a and 12.3b refs + sha256 digest; Plan + README rows split into 12.3a/12.3b; scratchpad pointer advanced to 12.3b). Updated `python/tests/test_zk_foundation.py` (two-line touch): `test_fetch_zk_is_stub_at_task_12_1` renamed → `test_fetch_zk_install_logic_is_wired_at_task_12_3a` (body inverts); `test_justfile_declares_zk_constants` ZK_RZUP_BIN literal replaced by ZK_CARGO_RISCZERO_BIN. **Sha-pinned digest anchored in three places** for drift protection: `Justfile` (`ZK_SHA256`), ADR-034 (§2 + §context), `python/tests/test_zk_prove.py`. Final gate (offline only — Risc0 still un-installed by design): `cargo check --workspace --quiet` → clean (guest crate excluded; zero new compile cost); `cargo test --package zk-kernel --lib` → **35 pass** (no test changes); `cargo clippy --workspace --all-targets -- -D warnings` → clean; `cargo fmt --all -- --check` → clean; `uv run pytest -q` → all pass including new test_zk_prove.py + updated test_zk_foundation.py + unchanged test_zk_witness.py; `uv run ruff check .` → clean; `just env-verify` → clean. Decisions captured in **ADR-034 — ZKSMT prove + verify split: sha-pinned cargo-risczero v3.0.1 install plumbing + `crates/zk_kernel/guest/` scaffold (workspace-excluded), `risc0-zkvm` host + guest deps + body fills + canonical round-trip RE-DEFERRED to Task 12.3b**. **No PHASE flip** (1 → 2 still locked at Task 12.4 per ADR-024 §4). **No new workspace deps** (still serde + serde_json + thiserror).
+- **Previously completed:** Task 12.2 — ZKSMT witness gen. Implemented the host-side fixed-size SMT-trace witness encoding declared as a `NotYetImplemented(2)` stub at Task 12.1. New types: `SmtTrace { theory_signature: Vec<String>, muc_labels: Vec<String>, alethe_proof: String }` mirrors the UNSAT outcome of `cds_kernel::FormalVerificationTrace` (no schema invention — strict reuse). New encoding constants: `MAX_WITNESS_BYTES = 1 << 20` (1 MiB total cap), `WITNESS_HEADER_BYTES = 12`, `WITNESS_MAGIC = *b"ZKSM"`, `WITNESS_VERSION = 1`, `MAX_THEORIES = 32`, `MAX_MUC_LABELS = 1024`, `MAX_ALETHE_BYTES = 768 * 1024` (768 KiB), `MAX_LABEL_BYTES = 256`. Wire format: `[magic 4B "ZKSM"][version 1B 0x01][reserved 3B 0x000000][payload_len u32 LE][serde_json payload payload_len bytes]`. `extract_witness(&SmtTrace) -> Result<WitnessBlob, ZkError>` validates per-field caps before serializing → emits the deterministic length-prefixed binary frame; `parse_witness(&WitnessBlob) -> Result<SmtTrace, ZkError>` is the host-side inverse (Task 12.3 host glue + round-trip tests). New `ZkError` variants: `TraceFieldOverflow { field, actual, limit }`, `WitnessTooLarge { actual, limit }`, `WitnessHeaderTruncated(usize)`, `WitnessHeaderMagicMismatch`, `WitnessVersionUnsupported(u8)`, `WitnessPayloadLengthMismatch { advertised, actual }`, `WitnessPayloadEncode(String)`, `WitnessPayloadDecode(String)` — `NotYetImplemented(3)` retained for the still-pending `prove` / `verify` stubs. **Crucial deferral re-affirmation:** ADR-033 §3 + §4 amend ADR-032 §5 + §6 — the heavy `risc0-zkvm` workspace dep + the actual `fetch-zk` rzup install logic are RE-DEFERRED to Task 12.3 (first kernel-side consumer is `prove`, not `extract_witness`; the witness encoding is pure-Rust + pure-serde with no Risc0 API surface). Follows the ADR-025 §3 + §8 FHIR-axis "first-kernel-side-consumer" precedent. New Justfile recipe `zk-witness-smoke: cargo test --package zk-kernel --lib witness`. New `python/tests/test_zk_witness.py` carries 13 offline cases (SmtTrace declared, encoding constants present, extract/parse signatures match, NotYetImplemented(2) absent from witness.rs, serde_json used + risc0_zkvm absent, all 8 new ZkError variants declared, risc0-zkvm STILL not in Cargo.toml, Justfile registers zk-witness-smoke, fetch-zk install logic STILL deferred (no `curl | bash` execution), ADR-033 in ADL with ZKSM mention, Plan row 12.2 = DONE + ADR-033 cross-ref, README row 12.2 = DONE + ADR-033 cross-ref, scratchpad pointer advanced to 12.3). Updated `python/tests/test_zk_foundation.py` to drop the now-stale `NotYetImplemented(2) in witness.rs` assertion (sub-task 3 markers in `prove.rs` / `verify.rs` retained). Inline cargo tests grow from 13 → 35 (22 new in `witness.rs`: header layout, magic / version / payload round-trip, 5 cap-rejection paths, 5 parse-failure paths, deterministic encoding, canonical `contradictory-bound` SmtTrace fixture round-trip via `include_str!("../../../proofs/contradictory-bound.alethe.proof")`, advertised_payload_len helper). Final gate (offline only — Risc0 still un-installed by design): `cargo check --workspace --quiet` → clean; `cargo test --package zk-kernel --lib` → **35 pass**; `cargo clippy --package zk-kernel --all-targets -- -D warnings` → clean; `uv run pytest -q python/tests/test_zk_foundation.py python/tests/test_zk_witness.py` → expected (16 + 13) = 29 pass; `just zk-witness-smoke` → 25 witness tests pass; `just env-verify` → clean. Decisions captured in **ADR-033 — ZKSMT witness encoding: ZKSM-magic length-prefixed JSON, host-side caps, `risc0-zkvm` re-deferred to Task 12.3**. **No PHASE flip** (1 → 2 still deferred to Task 12.4 per ADR-024 §4). **No new workspace deps** (still serde + serde_json + thiserror).
+- **Next up:** **Task 12.3b — ZKSMT prove + verify body fills + canonical round-trip.** Heavy second half of the original 12.3 split per ADR-034. Web-search at decision time for "Risc0 v3.x prove + verify Receipt seal_bytes Rust 2026", "Risc0 guest program Alethe replay minimal SMT verifier 2026", "Risc0 v3.0.1 risc0-zkvm crate features std no_std 2026", "cargo-risczero install RISC-V cross-compiler riscv32im-risc0-zkvm-elf 2026". Locked deliverables (per ADR-034 §1 + §3 + §6): (1) ADD `risc0-zkvm` to root `Cargo.toml` `[workspace.dependencies]` matching the v3.0.1 pin (env-overridable via `ZK_TOOLCHAIN_VERSION`); (2) ADD `risc0-zkvm = { workspace = true, default-features = false, features = ["std"] }` to `crates/zk_kernel/Cargo.toml` `[dependencies]`; (3) ADD `risc0-zkvm` to `crates/zk_kernel/guest/Cargo.toml` `[dependencies]` (guest-side features); (4) FILL IN `crates/zk_kernel/guest/src/main.rs` body: `let bytes: Vec<u8> = risc0_zkvm::guest::env::read_slice();` → validate `WITNESS_MAGIC` / `WITNESS_VERSION` / `payload_len` header (re-uses constants from `zk_kernel::witness`) → `serde_json::from_slice::<SmtTrace>` over post-header bytes → minimal Alethe replay subset checker over the canonical `contradictory-bound` shape → `risc0_zkvm::guest::env::commit(&verdict_hash);` (broader Alethe coverage is a Task 12.4 deliverable); (5) FILL IN `crates/zk_kernel/src/prove.rs::prove` body: `ExecutorEnv::builder().write_slice(&blob.0).build()` → `default_prover().prove(env, ZK_KERNEL_GUEST_ELF)` → return `ZkProof(receipt.seal_bytes())`; (6) FILL IN `crates/zk_kernel/src/verify.rs::verify` body: `Receipt::from_bytes(&proof.0)?.verify(ZK_KERNEL_GUEST_IMAGE_ID)?;`; (7) ADD `zk-prove-smoke` Justfile recipe gated on `.bin/.zk/cargo-risczero` (mirrors `rs-solver` `.bin/z3` gate from Phase 0); (8) ADD cargo integration test `crates/zk_kernel/tests/canonical_roundtrip.rs` driving the canonical `contradictory-bound` `SmtTrace` through `extract → prove → verify`. Likely new `ZkError` variants: `Risc0ProveFailed(String)`, `Risc0VerifyFailed(String)`. ADR-035 expected. Note: this is the heavier half of the 12.3 split; multi-MB compile + multi-second prove + cross-compile dependency. May further split into 12.3b1 (dep + body fills, no smoke) + 12.3b2 (smoke + integration test) if context budget binds.
 
-> **Phase 1 axis 11 (Cloud) progress: 11.1 + 11.2 + 11.3 + 11.4 DONE — Cloud axis CLOSED.** **Phase 1 axis 10 (FHIR) progress: 10.1 + 10.2 + 10.3 + 10.4 DONE — FHIR axis CLOSED.** **Phase 1 axis 12 (ZK) progress: 12.1 + 12.2 DONE — ZK axis OPEN.** The strict §8.2 ordering rule selects `12.3` next. PHASE constants stay at 1 across Phase 1 and flip 1 → 2 at Task 12.4 close-out (ADR-024 §4).
+> **Phase 1 axis 11 (Cloud) progress: 11.1 + 11.2 + 11.3 + 11.4 DONE — Cloud axis CLOSED.** **Phase 1 axis 10 (FHIR) progress: 10.1 + 10.2 + 10.3 + 10.4 DONE — FHIR axis CLOSED.** **Phase 1 axis 12 (ZK) progress: 12.1 + 12.2 + 12.3a DONE — ZK axis OPEN.** The strict §8.2 ordering rule selects `12.3b` next. PHASE constants stay at 1 across Phase 1 and flip 1 → 2 at Task 12.4 close-out (ADR-024 §4).
+
+## Session 2026-05-04 — Task 12.3a close-out (ADR-034) — ZK axis 12.1 + 12.2 + 12.3a DONE
+
+Split the original Task 12.3 along the foundation/usage boundary into
+12.3a + 12.3b per ADR-034. Precedent: ADR-016 / 018 / 019 / 020 / 021
+/ 022 (Phase 0 mid-flight splits) + ADR-032 §5 → ADR-033 §3 (Phase 1
+ZK axis "first-kernel-side-consumer" deferral chain). Task 12.3a is
+the install plumbing + guest crate scaffold + workspace-exclusion
+structural half — pure-offline, no `risc0-zkvm` dep added, no body
+fills, no smoke run. Task 12.3b inherits the heavy dep + guest body +
+host `prove` / `verify` body fills + `zk-prove-smoke` recipe +
+canonical-fixture round-trip cargo integration test.
+
+**Web-searches executed at decision time** (Plan §10 step 4):
+
+- `Risc0 v3.0.1 cargo-risczero release tarball sha256 GitHub Linux x86_64 2026`
+  → Risc0 v3.0.1 (released 2025-08-21) ships a Linux x86_64 release
+  asset `cargo-risczero-x86_64-unknown-linux-gnu.tgz`
+  (72,739,357 bytes; sha256
+  `4e42c49d5e9d8ef85e10b5b8ee6fd9cac8abaccf1685aeb800550febdd77f069`)
+  via the `risc0/risc0` GitHub release manifest. Newer minor releases
+  (v3.0.3 / v3.0.4 / v3.0.5) and a v5.0.0-rc.1 are available; the
+  v3.0.1 pin is intentionally retained per ADR-032 §1's locked
+  toolchain version.
+- `Risc0 v3.x guest program target riscv32im-risc0-zkvm-elf 2026 cargo-risczero install`
+  → Modern Risc0 (v3.x) installs cross-compiler + recursion receipts
+  via `cargo-risczero install` after staging the `cargo-risczero`
+  binary. The `rzup` installer is the upstream bootstrap script
+  (downloads cargo-risczero); sha-pinning the cargo-risczero tarball
+  directly skips the `curl|bash` unbounded-execution hazard while
+  landing the same artefact.
+- `Risc0 ExecutorEnv builder write_slice host writes guest program 2026 default_prover prove`
+  → Host wires bytes via
+  `ExecutorEnv::builder().write_slice(&bytes).build()`;
+  `default_prover().prove(env, ELF) → ProveInfo { receipt }`; receipt
+  carries `seal_bytes()` (witness + proof) suitable for
+  `Receipt::verify(IMAGE_ID)`. Guest reads via
+  `risc0_zkvm::guest::env::read_slice::<u8>()` and commits via
+  `env::commit(&t)` — both are 12.3b moves.
+
+**Why split 12.3 (not single-session).**
+
+The original 12.3 scope bundles SIX co-dependent deliverables:
+
+1. Sha-pinned `cargo-risczero` install plumbing (`fetch-zk` recipe).
+2. `crates/zk_kernel/guest/` sub-crate scaffold + workspace exclusion.
+3. `risc0-zkvm` workspace + guest dep additions (multi-MB compile).
+4. Host `prove` / `verify` body fills (`default_prover().prove(...)`,
+   `Receipt::from_bytes(...).verify(...)`).
+5. `zk-prove-smoke` Justfile recipe (gated on `.bin/.zk/cargo-risczero`).
+6. End-to-end canonical-fixture round-trip cargo integration test.
+
+The bundle reliably exhausts a single context window — the
+`risc0-zkvm` first compile alone is multi-minute, leaving
+insufficient budget for the body fills + integration test. The
+foundation/usage boundary is the cleanest cut: 12.3a delivers
+items 1 + 2 (zero-compile, pure-offline); 12.3b delivers items 3
++ 4 + 5 + 6 (the heavy co-dependent half — `prove` body needs the
+dep AND the guest ELF AND the smoke recipe drives the round-trip).
+
+**Justfile `fetch-zk` rewrite (§ADR-034 §2).**
+
+Replaced the Task 12.1 / 12.2 stub with the actual sha-pinned
+download logic, mirroring `fetch-fhir` to the byte:
+
+- New constants: `ZK_OS = unknown-linux-gnu`, `ZK_ARCH = x86_64`,
+  `ZK_CARGO_RISCZERO_BIN = ZK_INSTALL_DIR + "/cargo-risczero"`,
+  `ZK_SHA256 = 4e42c49d5e9d8ef85e10b5b8ee6fd9cac8abaccf1685aeb800550febdd77f069`
+  (env-overridable).
+- Removed: `ZK_RZUP_BIN` constant — superseded by
+  `ZK_CARGO_RISCZERO_BIN` (modern Risc0 install surface).
+- Recipe body: idempotent skip → resolve asset URL via
+  `https://github.com/risc0/risc0/releases/download/v{{ZK_TOOLCHAIN_VERSION}}/cargo-risczero-{{ZK_ARCH}}-{{ZK_OS}}.tgz`
+  → `curl -fsSL` → `sha256sum` verify → `tar -xzf` →
+  `install -m 0755` → `--version` smoke probe → tail message
+  flagging `cargo-risczero install` + guest body fills as 12.3b
+  deliverables.
+- `env-verify` predicate flipped from `[ -x .bin/.zk/rzup ]` to
+  `[ -x .bin/.zk/cargo-risczero ]`; operator-facing strings
+  unchanged so `test_justfile_env_verify_mentions_dot_bin_zk`
+  still passes.
+- `zk-status` recipe updated: reports excluded guest crate path
+  + cargo-risczero install state (instead of defunct rzup path).
+- `fetch-zk` is NOT added to `bootstrap` (mirrors
+  `fetch-fhir` / `fetch-lean` opt-in precedent).
+
+**Guest crate scaffold (§ADR-034 §3).**
+
+New standalone Cargo package at `crates/zk_kernel/guest/`:
+
+| Artefact         | Role                                                           |
+| ---------------- | -------------------------------------------------------------- |
+| `Cargo.toml`     | `package.name = "zk-kernel-guest"`, `edition = "2024"`, `[[bin]]` declared, `[dependencies]` deliberately EMPTY |
+| `src/main.rs`    | `#![cfg_attr(target_os = "zkvm", no_main)]` + `#![no_std]` + `#![forbid(unsafe_code)]`; body is `unreachable!(..)` under `target_os = "zkvm"` and `eprintln!(..)` stub elsewhere |
+| `README.md`      | Documents 12.3a / 12.3b boundary + workspace-exclusion rationale + per-step 12.3b deliverable list |
+
+Root `Cargo.toml` `[workspace]` table gains
+`exclude = ["crates/zk_kernel/guest"]` so `cargo check --workspace`
+keeps the host build toolchain-agnostic. Guest is NOT in `members`
+(would force the host build to try cross-compilation it can't
+satisfy without rzup).
+
+**Host stubs unchanged.** `prove` / `verify` still return
+`NotYetImplemented(3)` — the body fills land together with the
+`risc0-zkvm` workspace dep at 12.3b. Splitting them across 12.3a
+/ 12.3b would force a half-wired prove call that compiles against
+a missing dep.
+
+**Pytest test surface.**
+
+- New `python/tests/test_zk_prove.py` (14 cases): guest crate dir
+  + Cargo.toml + main.rs + README exist, package metadata, deps
+  risc0-free, main.rs `#![no_main]` + `#![no_std]` under
+  `target_os = "zkvm"` + `unreachable!()` body, README documents
+  12.3a/12.3b boundary, root Cargo.toml `[workspace]` excludes
+  guest crate AND does NOT list it in members, host `prove`/
+  `verify` still return `NotYetImplemented(3)`,
+  `[workspace.dependencies]` risc0-free,
+  `crates/zk_kernel/Cargo.toml` `[dependencies]` risc0-free,
+  fetch-zk sha-pinned + no Task 12.2 stub, fetch-zk no
+  unverified `curl|bash`, zk-status mentions cargo-risczero +
+  guest crate, ADR-034 in ADL with both 12.3a and 12.3b refs +
+  sha256 digest, Plan + README rows split into 12.3a/12.3b,
+  scratchpad pointer advanced to 12.3b.
+- Updated `python/tests/test_zk_foundation.py` (two-line touch):
+  `test_fetch_zk_is_stub_at_task_12_1` renamed →
+  `test_fetch_zk_install_logic_is_wired_at_task_12_3a` (body
+  inverts to assert the wired install logic);
+  `test_justfile_declares_zk_constants` `ZK_RZUP_BIN` literal
+  replaced by `ZK_CARGO_RISCZERO_BIN`.
+- Unchanged `python/tests/test_zk_witness.py`: its
+  `test_justfile_fetch_zk_install_logic_still_deferred`
+  assertion only forbids the unverified `curl|bash` execution
+  path, which 12.3a continues to honor (sha-pinned tarball
+  download is a different code path).
+
+**Sha-pinned digest anchored in three places** for drift protection:
+`Justfile` (`ZK_SHA256`), ADR-034 (§2 + §context), and
+`python/tests/test_zk_prove.py`
+(`test_justfile_fetch_zk_is_sha_pinned_at_task_12_3a`).
+
+**Final gate (offline only — Risc0 still un-installed by design):**
+
+- `cargo check --workspace --quiet` → clean (guest crate excluded;
+  zero new compile cost).
+- `cargo test --package zk-kernel --lib` → **35 pass** (no test
+  changes).
+- `cargo clippy --workspace --all-targets -- -D warnings` → clean.
+- `cargo fmt --all -- --check` → clean.
+- `uv run pytest -q` → all pass including new `test_zk_prove.py`
+  + updated `test_zk_foundation.py` + unchanged
+  `test_zk_witness.py`.
+- `uv run ruff check .` → clean.
+- `just env-verify` → clean (`.bin/.zk/ empty (run: just fetch-zk)`).
+- `just zk-stub-check` → clean (cargo check + 35 inline tests).
+- `just zk-witness-smoke` → 25 witness tests pass.
+
+Decisions captured in **ADR-034 — ZKSMT prove + verify split:
+sha-pinned cargo-risczero v3.0.1 install plumbing +
+`crates/zk_kernel/guest/` scaffold (workspace-excluded),
+`risc0-zkvm` host + guest deps + body fills + canonical round-trip
+RE-DEFERRED to Task 12.3b**. **No PHASE flip** (1 → 2 still locked
+at Task 12.4 per ADR-024 §4). **No new workspace deps** (still
+serde + serde_json + thiserror).
 
 ## Session 2026-05-04 — Task 12.2 close-out (ADR-033) — ZK axis 12.1 + 12.2 DONE
 

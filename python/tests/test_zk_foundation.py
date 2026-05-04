@@ -168,7 +168,11 @@ def test_justfile_registers_zk_constants() -> None:
         "ZK_TOOLCHAIN_VERSION  := env_var_or_default('ZK_TOOLCHAIN_VERSION', '3.0.1')" in text
     )
     assert 'ZK_INSTALL_DIR        := justfile_directory() + "/.bin/.zk"' in text
-    assert 'ZK_RZUP_BIN           := ZK_INSTALL_DIR + "/rzup"' in text
+    # ADR-034 §2: at Task 12.3a the toolchain entrypoint becomes the
+    # sha-pinned `cargo-risczero` binary (the modern Risc0 install
+    # surface — `rzup` is still the upstream installer wrapper, but the
+    # pinned-tarball pattern targets `cargo-risczero` directly).
+    assert 'ZK_CARGO_RISCZERO_BIN := ZK_INSTALL_DIR + "/cargo-risczero"' in text
 
 
 def test_justfile_registers_zk_recipes() -> None:
@@ -183,11 +187,35 @@ def test_justfile_env_verify_mentions_dot_bin_zk() -> None:
     assert ".bin/.zk/ empty (run: just fetch-zk — Phase 1 ZK axis only)" in text
 
 
-def test_fetch_zk_is_stub_at_task_12_1() -> None:
-    """ADR-032 §3 + §8: foundation-only at 12.1; install logic lands at 12.2."""
+def test_fetch_zk_install_logic_is_wired_at_task_12_3a() -> None:
+    """ADR-034 §2 lands the sha-pinned cargo-risczero v3.0.1 download.
+
+    Replaces the original Task 12.1 stub assertion. The fetch-zk
+    recipe now mirrors `fetch-fhir`'s sha256-verified tarball pattern —
+    the operator-facing "Task 12.2 deliverable" stub message is gone;
+    the recipe instead resolves the GitHub release asset URL, verifies
+    the pinned digest, extracts the tarball, and installs the
+    `cargo-risczero` binary under `.bin/.zk/`. The cross-compiler
+    install (`cargo-risczero install`) + guest-program build + prove /
+    verify body fills are explicitly flagged as Task 12.3b deliverables
+    inside the recipe's tail message.
+    """
     text = _read(JUSTFILE)
-    assert "Task 12.2 deliverable" in text, (
-        "fetch-zk must explicitly call out the 12.2 deferral (operator-facing message)"
+    assert "Task 12.2 deliverable" not in text, (
+        "fetch-zk must no longer carry the Task 12.1 stub message at Task 12.3a (ADR-034 §2)"
+    )
+    assert 'ZK_SHA256             := env_var_or_default(' in text, (
+        "fetch-zk must declare ZK_SHA256 (sha-pinned tarball digest; ADR-034 §2)"
+    )
+    assert "cargo-risczero-{{ZK_ARCH}}-{{ZK_OS}}.tgz" in text, (
+        "fetch-zk must resolve the cargo-risczero GitHub release asset by ARCH/OS"
+    )
+    assert "github.com/risc0/risc0/releases/download/v{{ZK_TOOLCHAIN_VERSION}}" in text, (
+        "fetch-zk must download from the pinned Risc0 GitHub release tag"
+    )
+    assert "sha256sum" in text, "fetch-zk must verify the tarball digest before installing"
+    assert "Task 12.3b" in text, (
+        "fetch-zk tail must flag the cargo-risczero install + guest body as Task 12.3b deliverables"
     )
 
 

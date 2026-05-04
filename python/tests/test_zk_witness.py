@@ -217,7 +217,8 @@ def test_readme_marks_task_12_2_done_with_adr_033() -> None:
     assert "ADR-033" in row, "README Task 12.2 row must cross-ref ADR-033"
 
 
-def test_scratchpad_advances_active_pointer_to_task_12_3() -> None:
+def test_scratchpad_advances_active_pointer_to_task_12_3b() -> None:
+    """Task 12.3 was split 12.3a + 12.3b at ADR-034; scratchpad must point at 12.3b."""
     text = _read(SCRATCHPAD_PATH)
-    assert "Last completed:** Task 12.2" in text, "scratchpad must record 12.2 as last completed"
-    assert "Next up:** **Task 12.3" in text, "scratchpad must point at Task 12.3 as next up"
+    assert "Last completed:** Task 12.3a" in text, "scratchpad must record 12.3a as last completed"
+    assert "Next up:** **Task 12.3b" in text, "scratchpad must point at Task 12.3b as next up"

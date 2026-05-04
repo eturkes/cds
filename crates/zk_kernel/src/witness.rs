@@ -306,8 +306,7 @@ mod tests {
 
     /// The actual cvc5-emitted Alethe proof text from the canonical
     /// `contradictory-bound` UNSAT smoke (Phase 0 close-out fixture).
-    const CANONICAL_ALETHE: &str =
-        include_str!("../../../proofs/contradictory-bound.alethe.proof");
+    const CANONICAL_ALETHE: &str = include_str!("../../../proofs/contradictory-bound.alethe.proof");
 
     fn canonical_trace() -> SmtTrace {
         SmtTrace::new(
@@ -424,7 +423,10 @@ mod tests {
         let trace = canonical_trace();
         let a = extract_witness(&trace).expect("extract a");
         let b = extract_witness(&trace).expect("extract b");
-        assert_eq!(a.0, b.0, "encoding must be deterministic for stable proving");
+        assert_eq!(
+            a.0, b.0,
+            "encoding must be deterministic for stable proving"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -436,7 +438,11 @@ mod tests {
         let theories: Vec<String> = (0..=MAX_THEORIES).map(|i| format!("T{i}")).collect();
         let trace = SmtTrace::new(theories, vec![], String::new());
         match extract_witness(&trace) {
-            Err(ZkError::TraceFieldOverflow { field, actual, limit }) => {
+            Err(ZkError::TraceFieldOverflow {
+                field,
+                actual,
+                limit,
+            }) => {
                 assert_eq!(field, "theory_signature");
                 assert_eq!(actual, MAX_THEORIES + 1);
                 assert_eq!(limit, MAX_THEORIES);
@@ -450,7 +456,11 @@ mod tests {
         let mucs: Vec<String> = (0..=MAX_MUC_LABELS).map(|i| format!("L{i}")).collect();
         let trace = SmtTrace::new(vec![], mucs, String::new());
         match extract_witness(&trace) {
-            Err(ZkError::TraceFieldOverflow { field, actual, limit }) => {
+            Err(ZkError::TraceFieldOverflow {
+                field,
+                actual,
+                limit,
+            }) => {
                 assert_eq!(field, "muc_labels");
                 assert_eq!(actual, MAX_MUC_LABELS + 1);
                 assert_eq!(limit, MAX_MUC_LABELS);
@@ -464,7 +474,11 @@ mod tests {
         let alethe = "x".repeat(MAX_ALETHE_BYTES + 1);
         let trace = SmtTrace::new(vec![], vec![], alethe);
         match extract_witness(&trace) {
-            Err(ZkError::TraceFieldOverflow { field, actual, limit }) => {
+            Err(ZkError::TraceFieldOverflow {
+                field,
+                actual,
+                limit,
+            }) => {
                 assert_eq!(field, "alethe_proof");
                 assert_eq!(actual, MAX_ALETHE_BYTES + 1);
                 assert_eq!(limit, MAX_ALETHE_BYTES);
@@ -475,13 +489,13 @@ mod tests {
 
     #[test]
     fn extract_witness_rejects_oversized_theory_label() {
-        let trace = SmtTrace::new(
-            vec!["x".repeat(MAX_LABEL_BYTES + 1)],
-            vec![],
-            String::new(),
-        );
+        let trace = SmtTrace::new(vec!["x".repeat(MAX_LABEL_BYTES + 1)], vec![], String::new());
         match extract_witness(&trace) {
-            Err(ZkError::TraceFieldOverflow { field, actual, limit }) => {
+            Err(ZkError::TraceFieldOverflow {
+                field,
+                actual,
+                limit,
+            }) => {
                 assert_eq!(field, "theory_signature[label]");
                 assert_eq!(actual, MAX_LABEL_BYTES + 1);
                 assert_eq!(limit, MAX_LABEL_BYTES);
@@ -492,13 +506,13 @@ mod tests {
 
     #[test]
     fn extract_witness_rejects_oversized_muc_label() {
-        let trace = SmtTrace::new(
-            vec![],
-            vec!["x".repeat(MAX_LABEL_BYTES + 1)],
-            String::new(),
-        );
+        let trace = SmtTrace::new(vec![], vec!["x".repeat(MAX_LABEL_BYTES + 1)], String::new());
         match extract_witness(&trace) {
-            Err(ZkError::TraceFieldOverflow { field, actual, limit }) => {
+            Err(ZkError::TraceFieldOverflow {
+                field,
+                actual,
+                limit,
+            }) => {
                 assert_eq!(field, "muc_labels[label]");
                 assert_eq!(actual, MAX_LABEL_BYTES + 1);
                 assert_eq!(limit, MAX_LABEL_BYTES);
@@ -522,9 +536,7 @@ mod tests {
 
     #[test]
     fn parse_witness_rejects_bad_magic() {
-        let mut bytes = extract_witness(&canonical_trace())
-            .expect("extract")
-            .0;
+        let mut bytes = extract_witness(&canonical_trace()).expect("extract").0;
         bytes[0] = b'X';
         match parse_witness(&WitnessBlob::new(bytes)) {
             Err(ZkError::WitnessHeaderMagicMismatch) => {}
@@ -534,9 +546,7 @@ mod tests {
 
     #[test]
     fn parse_witness_rejects_unsupported_version() {
-        let mut bytes = extract_witness(&canonical_trace())
-            .expect("extract")
-            .0;
+        let mut bytes = extract_witness(&canonical_trace()).expect("extract").0;
         bytes[4] = 0xFE;
         match parse_witness(&WitnessBlob::new(bytes)) {
             Err(ZkError::WitnessVersionUnsupported(0xFE)) => {}
@@ -546,9 +556,7 @@ mod tests {
 
     #[test]
     fn parse_witness_rejects_payload_length_mismatch() {
-        let mut bytes = extract_witness(&canonical_trace())
-            .expect("extract")
-            .0;
+        let mut bytes = extract_witness(&canonical_trace()).expect("extract").0;
         // truncate one byte without updating the header
         bytes.pop();
         let advertised_before_truncation = {
@@ -568,9 +576,7 @@ mod tests {
 
     #[test]
     fn parse_witness_rejects_corrupted_json_payload() {
-        let mut bytes = extract_witness(&canonical_trace())
-            .expect("extract")
-            .0;
+        let mut bytes = extract_witness(&canonical_trace()).expect("extract").0;
         let header_len = WITNESS_HEADER_BYTES;
         // Replace the JSON payload with garbage of identical length so the
         // length-prefix check passes and we hit the JSON decoder.

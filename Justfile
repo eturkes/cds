@@ -75,7 +75,7 @@ env-verify:
     else
         printf "  .bin/ missing cloud tools: %s (run: just fetch-cloud — Phase 1 cloud axis only)\n" "${cloud_missing[*]}"
     fi
-    if [ -x "{{ justfile_directory() }}/.bin/.zk/rzup" ]; then
+    if [ -x "{{ justfile_directory() }}/.bin/.zk/cargo-risczero" ]; then
         echo "  .bin/.zk/ present (Phase 1 ZK toolchain staged)"
     else
         echo "  .bin/.zk/ empty (run: just fetch-zk — Phase 1 ZK axis only)"
@@ -505,65 +505,92 @@ fhircast-smoke:
     uv run python "$smoke_runner" "$base"
 
 # =============================================================================
-# ZK Kernel — Risc0 v3.x zkVM toolchain (Phase 1, Task 12.1)
+# ZK Kernel — Risc0 v3.x zkVM toolchain (Phase 1, Tasks 12.1–12.3a)
 # =============================================================================
 # Per ADR-032: Risc0 v3.0.1 locked as the zkVM (post-quantum via zk-STARK
-# + FRI over collision-resistant hashes). The rzup-installed toolchain
-# stages under .bin/.zk/ via `just fetch-zk`. SP1 is locked as the
-# alternative if Risc0 prove latency proves binding at Task 12.3 (same
+# + FRI over collision-resistant hashes). SP1 is locked as the
+# alternative if Risc0 prove latency proves binding at Task 12.3b (same
 # STARK-family security properties). Halo2 / PLONK rejected — circuit-
 # based, pairing-friendly EC dependency breaks the post-quantum invariant.
 #
-# Foundation-only at Task 12.1: the `crates/zk_kernel/` crate stub is
-# the deliverable; the heavy `risc0-zkvm` workspace dep + the actual
-# rzup install logic land at Task 12.2 (witness gen) when the first
-# kernel-side consumer materialises. Mirrors `fetch-fhir` /
-# `fetch-lean` opt-in precedent — ZK toolchain install is NOT in
-# `bootstrap`.
+# Per ADR-033 (Task 12.2): host-side witness encoding (length-prefixed
+# `SmtTrace` JSON over a 12-byte ZKSM-magic header) lives in
+# `crates/zk_kernel/src/witness.rs` — pure-serde, no Risc0 dep.
+#
+# Per ADR-034 (Task 12.3a, this section): the `fetch-zk` recipe below
+# is wired with the actual sha-pinned download of the cargo-risczero
+# v3.0.1 Linux x86_64 release tarball (mirrors `fetch-fhir`'s sha256-
+# verified pattern). The host-side `risc0-zkvm` workspace dep + the
+# `crates/zk_kernel/guest/` body + the `prove` / `verify` body fills +
+# the canonical-fixture round-trip smoke land at Task 12.3b. Mirrors
+# `fetch-fhir` / `fetch-lean` opt-in precedent — ZK toolchain install
+# is NOT in `bootstrap`.
 
 ZK_TOOLCHAIN          := env_var_or_default('ZK_TOOLCHAIN',         'risc0')
 ZK_TOOLCHAIN_VERSION  := env_var_or_default('ZK_TOOLCHAIN_VERSION', '3.0.1')
+ZK_OS                 := env_var_or_default('ZK_OS',                'unknown-linux-gnu')
+ZK_ARCH               := env_var_or_default('ZK_ARCH',              'x86_64')
 ZK_INSTALL_DIR        := justfile_directory() + "/.bin/.zk"
-ZK_RZUP_BIN           := ZK_INSTALL_DIR + "/rzup"
+ZK_CARGO_RISCZERO_BIN := ZK_INSTALL_DIR + "/cargo-risczero"
+# sha256 of cargo-risczero-3.0.1-x86_64-unknown-linux-gnu.tgz (pinned at
+# decision time — ADR-034 §2; cross-reference asset digest published in
+# Risc0 v3.0.1 GitHub release manifest, 72,739,357 bytes).
+ZK_SHA256             := env_var_or_default('ZK_SHA256',  '4e42c49d5e9d8ef85e10b5b8ee6fd9cac8abaccf1685aeb800550febdd77f069')
 
-# Stage the Risc0 zkVM toolchain (rzup) under .bin/.zk/.
+# Idempotently stage the cargo-risczero Risc0 toolchain entrypoint
+# under .bin/.zk/. Verifies sha256 against the pinned digest. Skips if
+# already present. Mirrors `fetch-fhir` to the byte.
 #
-# Foundation stub at Task 12.1: prints an informational notice and
-# exits 0. Task 12.2 fills in the actual `curl https://risczero.com/install
-# | bash` install logic + sha-pinned tarball verification (mirrors
-# `fetch-fhir`'s sha256-verified tarball pattern). Operators who try
-# `just fetch-zk` at Task 12.1 get a clear "not yet wired" message
-# rather than an unbounded shell-script execution from the web.
+# After staging, operators run `cargo-risczero install` (Task 12.3b
+# deliverable) to provision the RISC-V cross-compiler that compiles
+# `crates/zk_kernel/guest/` for the `riscv32im-risc0-zkvm-elf` target.
+# At Task 12.3a the cargo-risczero binary is the artefact we stage —
+# the cross-compiler install + guest-build invocation are 12.3b moves.
 fetch-zk:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p "{{ZK_INSTALL_DIR}}"
-    if [ -x "{{ZK_RZUP_BIN}}" ]; then
-        echo "rzup already present in .bin/.zk/"
-        "{{ZK_RZUP_BIN}}" --version 2>&1 | head -1 || true
+    if [ -x "{{ZK_CARGO_RISCZERO_BIN}}" ]; then
+        echo "cargo-risczero already present in .bin/.zk/"
+        "{{ZK_CARGO_RISCZERO_BIN}}" --version 2>&1 | head -1 || true
         exit 0
     fi
-    echo "→ Risc0 zkVM toolchain install is a Task 12.2 deliverable"
-    echo "  ADR-032 §3 + §8: foundation-only at Task 12.1; the rzup"
-    echo "  install logic + risc0-zkvm workspace dep land at 12.2 when"
-    echo "  the first kernel-side consumer materialises."
-    echo "  Pinned target: {{ZK_TOOLCHAIN}} v{{ZK_TOOLCHAIN_VERSION}} → {{ZK_INSTALL_DIR}}"
+    asset="cargo-risczero-{{ZK_ARCH}}-{{ZK_OS}}.tgz"
+    url="https://github.com/risc0/risc0/releases/download/v{{ZK_TOOLCHAIN_VERSION}}/${asset}"
+    echo "→ fetching Risc0 cargo-risczero v{{ZK_TOOLCHAIN_VERSION}} ({{ZK_ARCH}}-{{ZK_OS}})"
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    curl -fsSL "$url" -o "$tmp/$asset"
+    actual_sha=$(sha256sum "$tmp/$asset" | awk '{print $1}')
+    if [ "$actual_sha" != "{{ZK_SHA256}}" ]; then
+        echo "sha256 mismatch for $asset"
+        echo "  expected: {{ZK_SHA256}}"
+        echo "  actual:   $actual_sha"
+        exit 1
+    fi
+    tar -xzf "$tmp/$asset" -C "$tmp"
+    bin_path=$(find "$tmp" -type f -name cargo-risczero -perm -u+x | head -1)
+    [ -n "$bin_path" ] || { echo "no executable 'cargo-risczero' in tarball"; exit 1; }
+    install -m 0755 "$bin_path" "{{ZK_CARGO_RISCZERO_BIN}}"
+    "{{ZK_CARGO_RISCZERO_BIN}}" --version 2>&1 | head -1 || true
+    echo "  → Task 12.3b lands the \`cargo-risczero install\` invocation"
+    echo "    + guest-program build + prove/verify body fills (ADR-034 §3)"
 
 # Print ZK kernel + toolchain status.
 zk-status:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "zk-kernel crate: {{ justfile_directory() }}/crates/zk_kernel"
+    echo "guest crate:     {{ justfile_directory() }}/crates/zk_kernel/guest (excluded from workspace; ADR-034 §3)"
     echo "toolchain:       {{ZK_TOOLCHAIN}} v{{ZK_TOOLCHAIN_VERSION}} (locked at ADR-032 §1)"
-    if [ -x "{{ZK_RZUP_BIN}}" ]; then
-        echo "rzup:            $({{ZK_RZUP_BIN}} --version 2>&1 | head -1)"
+    if [ -x "{{ZK_CARGO_RISCZERO_BIN}}" ]; then
+        echo "cargo-risczero:  $({{ZK_CARGO_RISCZERO_BIN}} --version 2>&1 | head -1)"
     else
-        echo "rzup:            missing — run \`just fetch-zk\` (Phase 1 ZK axis only; Task 12.2+)"
+        echo "cargo-risczero:  missing — run \`just fetch-zk\` (Phase 1 ZK axis only)"
     fi
     echo "install dir:     {{ZK_INSTALL_DIR}}"
 
 # Foundation gate (Task 12.1): cargo check + run inline tests for
-# `zk-kernel`. Heavy zkVM proving / verifying lands at Task 12.3.
+# `zk-kernel`. Heavy zkVM proving / verifying lands at Task 12.3b.
 zk-stub-check:
     cargo check --package zk-kernel
     cargo test --package zk-kernel --lib
@@ -573,8 +600,9 @@ zk-stub-check:
 # Runs the witness-specific cargo tests in `crates/zk_kernel`: cap
 # validation, length-prefixed binary encoding, magic / version / payload
 # round-trip, and the canonical `contradictory-bound` SmtTrace fixture.
-# Pure offline — no Risc0 / rzup dependency. Heavy zkVM proving (which
-# DOES need rzup + the risc0-zkvm dep) lands at Task 12.3.
+# Pure offline — no Risc0 / cargo-risczero dependency. Heavy zkVM
+# proving (which DOES need cargo-risczero + the risc0-zkvm dep) lands
+# at Task 12.3b.
 zk-witness-smoke:
     cargo test --package zk-kernel --lib witness
 

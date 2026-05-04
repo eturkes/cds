@@ -5,6 +5,13 @@
 [workspace]
 resolver = "3"
 members = ["crates/kernel", "crates/zk_kernel"]
+# `crates/zk_kernel/guest/` is the Risc0 guest program — built for
+# `riscv32im-risc0-zkvm-elf` via the rzup-installed cross-compiler, NOT
+# for the host `cargo check --workspace` graph. Excluded so the workspace
+# build stays toolchain-agnostic. The guest crate is wired up at Task
+# 12.3a as a scaffold; its body + the matching `risc0-zkvm` workspace
+# host dep + the prove/verify call sites land at Task 12.3b (ADR-034).
+exclude = ["crates/zk_kernel/guest"]
 
 [workspace.package]
 version       = "0.0.0"

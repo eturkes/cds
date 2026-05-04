@@ -1,0 +1,43 @@
+# =============================================================================
+# zk-kernel-guest — Risc0 zkVM guest program (Phase 1, Task 12.3a scaffold)
+# =============================================================================
+# Per ADR-034: this crate is the Risc0 guest program — compiled for the
+# `riscv32im-risc0-zkvm-elf` target via the rzup-installed cross-compiler
+# (`just fetch-zk` stages cargo-risczero v3.0.1 under `.bin/.zk/`). It is
+# intentionally EXCLUDED from the workspace `cargo check --workspace`
+# graph (root `Cargo.toml` `[workspace] exclude`) so the host build stays
+# toolchain-agnostic.
+#
+# Task 12.3a (this scaffold): file structure + package metadata only;
+# `[dependencies]` deliberately empty. The `risc0-zkvm` (host) workspace
+# dep + this crate's `risc0-zkvm` guest dep + the actual guest body
+# (parse witness header → JSON-decode → minimal Alethe replay subset
+# checker → `env::commit` verdict + MUC label hash) land at Task 12.3b
+# alongside the kernel-side `prove` / `verify` body fills.
+
+[package]
+name        = "zk-kernel-guest"
+version     = "0.0.0"
+edition     = "2024"
+license     = "Apache-2.0 WITH LLVM-exception"
+authors     = ["Emir Turkes"]
+description = "CDS ZKSMT post-quantum proof attestation — Risc0 guest program (Phase 1, Task 12.3a scaffold)."
+
+[[bin]]
+name = "zk-kernel-guest"
+path = "src/main.rs"
+
+[dependencies]
+# Intentionally empty at Task 12.3a (ADR-034 §3): the heavy `risc0-zkvm`
+# guest API surface (`risc0_zkvm::guest::env::{read_slice, commit}`)
+# lands at Task 12.3b when the actual guest body is wired up. Mirrors
+# the host-side `risc0-zkvm` deferral pattern (ADR-032 §5 → ADR-033 §3
+# → ADR-034 §3 — first kernel-side consumer is `prove`, not the guest
+# scaffold).
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all      = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

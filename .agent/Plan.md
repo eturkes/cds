@@ -173,7 +173,25 @@ time, not pre-locked here):
 > "flip at last task of phase" discipline). ADR-024 captures the
 > structural decision; the four "Alternatives rejected" entries
 > (single-axis super-task, five-axis split, pre-locked tools, new C7)
-> document the discarded options.
+> document the discarded options. **Task 12.3 was further split into
+> 12.3a + 12.3b on 2026-05-04** for the same reason: the original
+> 12.3 scope bundled (a) sha-pinned cargo-risczero install plumbing,
+> (b) `crates/zk_kernel/guest/` sub-crate scaffolding + workspace
+> exclusion, (c) `risc0-zkvm` workspace + guest dep additions
+> (multi-MB compile), (d) host `prove` / `verify` body fills calling
+> `default_prover()` / `Receipt::verify`, (e) `zk-prove-smoke`
+> Justfile recipe gated on `.bin/.zk/cargo-risczero`, and (f) the
+> end-to-end `extract → prove → verify` round-trip on the canonical
+> `contradictory-bound` `SmtTrace` fixture — too much mass for one
+> session; the foundation/usage boundary cleanly separates the
+> install plumbing + guest scaffold (12.3a — pure-offline, no Risc0
+> dep added) from the heavy dep + body fills + round-trip (12.3b).
+> ADR-034 captures the rationale, the locked sha-pinned tarball
+> digest (cargo-risczero v3.0.1 Linux x86_64,
+> `4e42c49d5e9d8ef85e10b5b8ee6fd9cac8abaccf1685aeb800550febdd77f069`,
+> 72,739,357 bytes), the guest crate scaffolding decisions
+> (excluded from workspace until the dep lands), the per-sub-task
+> gates, and the alternatives rejected.
 
 | #     | Task                                                                                                                                                            | Status       | Session output gate                                                                                       |
 | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------- |
@@ -187,12 +205,13 @@ time, not pre-locked here):
 | 11.4  | Cloud axis close-out — cloud-deployed `contradictory-bound` smoke against `kind`                                                                                  | **DONE**     | git commit `feat: complete Task 11.4 Cloud close-out` — **Cloud axis closed**                             |
 | 12.1  | ZK toolchain selection — Risc0 / SP1 / Halo2 / PLONK 2026 SOTA web-search + `zk_kernel/` crate stub (ADR-032)                                                    | **DONE**     | git commit `feat: complete Task 12.1 ZK toolchain selection`                                              |
 | 12.2  | ZKSMT witness gen — fixed-size SMT-trace serialization + witness extraction (ADR-033)                                                                            | **DONE**     | git commit `feat: complete Task 12.2 ZKSMT witness gen`                                                   |
-| 12.3  | ZKSMT prove + verify — round-trip on canonical `contradictory-bound` fixture                                                                                      | **TODO**     | git commit `feat: complete Task 12.3 ZKSMT prove + verify`                                                |
+| 12.3a | ZKSMT prove + verify install plumbing + guest crate scaffold — sha-pinned cargo-risczero v3.0.1 fetch + `crates/zk_kernel/guest/` skeleton + workspace exclusion (ADR-034) | **DONE**     | git commit `feat: complete Task 12.3a Risc0 install plumbing + guest crate scaffold`                       |
+| 12.3b | ZKSMT prove + verify body fills + canonical round-trip — `risc0-zkvm` workspace dep + guest body + `prove`/`verify` body + `zk-prove-smoke` recipe + `contradictory-bound` round-trip | **TODO**     | git commit `feat: complete Task 12.3b ZKSMT prove + verify body + canonical round-trip`                  |
 | 12.4  | ZKSMT pipeline integration + Phase 1 close-out — `Formal_Verification_Trace.zk_attestation` field + PHASE 1 → 2 + full integration smoke + README Phase 1 → DONE | **TODO**     | git commit `feat: complete Task 12.4 ZKSMT close-out + Phase 1 closed` — **Phase 1 closed**               |
 
 **At any session:** select STRICTLY the lowest-numbered uncompleted
 task. No leapfrogging. Sub-tasks follow the same discipline —
-`8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9.1 < 9.2 < 9.3 < 10.1 < 10.2 < 10.3 < 10.4 < 11.1 < 11.2 < 11.3 < 11.4 < 12.1 < 12.2 < 12.3 < 12.4`.
+`8.1 < 8.2 < 8.3a < 8.3b1 < 8.3b2a < 8.3b2b < 8.4a < 8.4b < 9.1 < 9.2 < 9.3 < 10.1 < 10.2 < 10.3 < 10.4 < 11.1 < 11.2 < 11.3 < 11.4 < 12.1 < 12.2 < 12.3a < 12.3b < 12.4`.
 
 ## 9. Context-Governed Re-Entry Prompt (verbatim)
 
