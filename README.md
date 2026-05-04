@@ -201,7 +201,7 @@ pre-locked here; each axis lands its own architectural-lock ADR
 | 11.3 | Cloud observability — OpenTelemetry + Prometheus + Grafana + Dapr metrics scrape                                                         | **PLANNED** |
 | 11.4 | Cloud axis close-out — cloud-deployed `contradictory-bound` smoke against `kind`                                                         | **PLANNED** |
 | 12.1 | ZK toolchain selection — Risc0 / SP1 / Halo2 / PLONK 2026 SOTA web-search + `zk_kernel/` crate stub (ADR-032)                            | **DONE**    |
-| 12.2 | ZKSMT witness gen — fixed-size SMT-trace serialization + witness extraction                                                              | **PLANNED** |
+| 12.2 | ZKSMT witness gen — fixed-size SMT-trace serialization + witness extraction (ADR-033)                                                    | **DONE**    |
 | 12.3 | ZKSMT prove + verify — round-trip on canonical `contradictory-bound` fixture                                                              | **PLANNED** |
 | 12.4 | ZKSMT pipeline integration + Phase 1 close-out — `zk_attestation` field + PHASE 1 → 2                                                     | **PLANNED** |
 

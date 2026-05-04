@@ -5170,3 +5170,271 @@ DONE, **Cloud axis CLOSED**. FHIR axis status note: 10.1 + 10.2
 sequential-by-task landing carries.
 
 ---
+
+## ADR-033 — ZKSMT witness encoding: ZKSM-magic length-prefixed JSON, host-side caps, `risc0-zkvm` re-deferred to Task 12.3 (Task 12.2)
+
+**Status:** Accepted (Phase 1 — Task 12.2 architectural lock; ZK axis OPEN)
+**Date:** 2026-05-04
+
+**Context.** Task 12.1 (ADR-032) opened the ZK axis with the
+`crates/zk_kernel/` foundation stub: locked Risc0 v3.0.1 as the zkVM,
+declared the `WitnessBlob` / `ZkProof` / `extract_witness` / `prove`
+/ `verify` public API, and returned `NotYetImplemented(<sub-task>)`
+from every entrypoint. ADR-032 §5 + §6 stated intent that the heavy
+`risc0-zkvm` workspace dep + the `fetch-zk` Justfile install logic
+would land at Task 12.2.
+
+Task 12.2's deliverable per Plan §8.2 row 12.2 is "fixed-size
+SMT-trace serialization + witness extraction." Web-searches at
+decision time:
+
+- `Risc0 v3.x guest program SMT verifier 2026 Alethe replay zkVM input`
+  → Risc0 v3.x guests read host-supplied bytes via
+  `risc0_zkvm::guest::env::read_slice` (or `read::<T>()` over
+  `risc0_zkvm::serde`); the host writes them via
+  `ExecutorEnv::builder().write_slice(&bytes).build()` /
+  `.write(&t).build()`. The guest's allocator + std-equivalents
+  support `serde_json` over post-header bytes — no requirement to
+  use Risc0's bespoke serde format on the host side.
+- `fixed-size witness extraction zk-VM 2026 SMT trace serialization`
+  → "fixed-size" in the ZKSMT literature means *bounded +
+  deterministic* (Luick et al., USENIX Security 2024 §3 — "the
+  guest program's memory budget is known up front"), NOT a single
+  hard byte count. A length-prefixed framing with explicit caps
+  satisfies both shape requirements: deterministic encoding for
+  reproducible proving + bounded byte count for guest-side memory
+  budgeting.
+- `cvc5 Alethe proof minimal verifier checker Rust 2026`
+  → No production Rust-native Alethe verifier in 2026; the closest
+  analog is `lean-smt`'s Alethe re-checker (Lean 4) used at Phase 0
+  Task 7. The witness blob therefore carries the cvc5-emitted
+  Alethe text verbatim — Task 12.3 lands the guest-side replay
+  logic (likely a minimal subset checker tuned for the
+  `contradictory-bound` shape; the broader question is a Task 12.4
+  deliverable).
+
+**Decision.**
+
+1. **Length-prefixed binary frame with ZKSM magic.** Witness blobs
+   carry a 12-byte header followed by a `payload_len`-byte JSON
+   payload:
+
+   ```text
+   +----------+----------+-------------+--------------+--------------------+
+   | magic    | version  | reserved    | payload_len  | json payload       |
+   | 4 bytes  | 1 byte   | 3 bytes (0) | u32 LE       | payload_len bytes  |
+   +----------+----------+-------------+--------------+--------------------+
+       "ZKSM"      0x01      0x000000   little-endian   serde_json text
+   ```
+
+   The magic prefix `b"ZKSM"` (ASCII "ZKSMT" minus the trailing T —
+   keeps it 4 bytes) lets the guest fail loud on misframing. The
+   version byte is bumped on any breaking change to the encoding.
+   The 3 reserved bytes (must be zero on encode; ignored on decode)
+   provide forward-compat headroom for future flag bits without an
+   ADR-grade bump.
+
+2. **`SmtTrace` host-side input shape mirrors `FormalVerificationTrace`.**
+   The bounded triple `(theory_signature: Vec<String>, muc_labels:
+   Vec<String>, alethe_proof: String)` mirrors the UNSAT outcome of
+   `cds_kernel::FormalVerificationTrace` one-to-one (`muc` →
+   `muc_labels`, `alethe_proof` → `alethe_proof`) plus the
+   `SmtConstraintMatrix::theories` projection. No new schema —
+   reuses Phase 0's verification trace by reference.
+
+3. **`risc0-zkvm` workspace dep RE-DEFERRED to Task 12.3.** The
+   intent stated at ADR-032 §5 ("`risc0-zkvm` lands at Task 12.2 when
+   `extract_witness` gets its real body") is amended: at Task 12.2
+   `extract_witness` produces host-side bytes via plain
+   `serde_json::to_vec` — NO Risc0 API surface is touched. The
+   first kernel-side consumer of `risc0-zkvm` is `prove` (which
+   instantiates `default_prover()`, builds `ExecutorEnv`, and
+   yields `Receipt`) at Task 12.3. Mirrors the FHIR-axis
+   "first-kernel-side-consumer" pattern from ADR-025 §3 + §8
+   (`fhirbolt` locked at 10.1, Cargo.toml addition deferred to
+   10.4). Avoids the multi-MB compile-time cost during a session
+   that doesn't need it.
+
+4. **`fetch-zk` Justfile install logic RE-DEFERRED to Task 12.3.**
+   Same logic as §3: rzup is needed only to compile the guest ELF
+   (Task 12.3 deliverable), not to produce host-side witness bytes.
+   `fetch-zk` keeps its honest "deferred" stub messaging at Task
+   12.2; the actual sha-pinned tarball install logic mirroring
+   `fetch-fhir` lands at Task 12.3 alongside the first guest
+   compile + the prove call site. ADR-032 §6's intent statement
+   ("Task 12.2 fills in the actual install logic") is amended in
+   line with §3.
+
+5. **Per-field caps + total cap.** Hard upper bounds prevent any
+   single field from dominating the budget:
+
+   | Constant            | Value              | Rationale                                                     |
+   | ------------------- | ------------------ | ------------------------------------------------------------- |
+   | `MAX_WITNESS_BYTES` | `1 << 20` (1 MiB)  | Total cap; canonical `contradictory-bound` blob ~3.5 KiB.     |
+   | `MAX_THEORIES`      | 32                 | SMT-LIB has ~20 named theories; 32 leaves headroom.           |
+   | `MAX_MUC_LABELS`    | 1024               | Real MUCs are O(10); 1024 is generous.                         |
+   | `MAX_ALETHE_BYTES`  | `768 * 1024` (768 KiB) | 75% of total cap; canonical Alethe trace ~3 KiB.          |
+   | `MAX_LABEL_BYTES`   | 256                | Per-label string cap (theory name or MUC label).              |
+
+   Caps fail fast with a structured `ZkError::TraceFieldOverflow`
+   carrying the field name + actual + limit; the byte-encoder is
+   never reached on a cap violation.
+
+6. **`ZkError` extended with witness-specific variants.**
+   `TraceFieldOverflow { field, actual, limit }` (per-field cap),
+   `WitnessTooLarge { actual, limit }` (total cap),
+   `WitnessHeaderTruncated(usize)` (blob shorter than 12-byte
+   header), `WitnessHeaderMagicMismatch` (first 4 bytes ≠ ZKSM),
+   `WitnessVersionUnsupported(u8)` (unknown version byte),
+   `WitnessPayloadLengthMismatch { advertised, actual }` (header
+   `payload_len` disagrees with post-header byte count),
+   `WitnessPayloadEncode(String)` /
+   `WitnessPayloadDecode(String)` (serde_json failures wrapped as
+   strings to keep `ZkError: Send + Sync` and avoid pulling
+   `serde_json::Error` into the public type signature). The
+   foundation `NotYetImplemented(u8)` variant remains for the
+   12.3-pending `prove` / `verify` stubs.
+
+7. **`parse_witness` is part of the public API.** Strictly the
+   inverse of `extract_witness`; required by host-side round-trip
+   tests AND by Task 12.3's host glue when assembling the executor
+   environment. Validates magic + version + length prefix + JSON
+   payload; returns the structured `ZkError` variants from §6 on
+   any malformed-blob path.
+
+8. **Encoding is deterministic.** `serde_json::to_vec` over a
+   `serde::Serialize` struct emits a canonical byte sequence in
+   declaration order; the header bytes are constants. Calling
+   `extract_witness` twice on the same `SmtTrace` yields identical
+   `WitnessBlob.0` — required for stable proving (the same input
+   must hash to the same image-id-input pair across runs).
+   Captured by the `extract_witness_is_deterministic` inline test.
+
+9. **Justfile gains `zk-witness-smoke` recipe.** New recipe runs
+   `cargo test --package zk-kernel --lib witness` — filters the
+   25 witness-specific inline tests (header layout, magic / version
+   / payload round-trip, per-field cap rejections, parse failure
+   modes, deterministic encoding, canonical
+   `contradictory-bound` SmtTrace fixture). Keeps `zk-stub-check`
+   as the broader gate (now covers all 35 inline tests across the
+   crate).
+
+10. **`include_str!` for the canonical Alethe fixture.** The
+    inline test `extract_witness_round_trips_canonical_smt_trace`
+    references `proofs/contradictory-bound.alethe.proof` via
+    `include_str!("../../../proofs/contradictory-bound.alethe.proof")`.
+    Couples the test to a real Phase 0 artefact rather than a
+    hand-rolled inline blob — keeps the SmtTrace shape honest
+    against the actual cvc5 emission.
+
+11. **`Plan.md` row 12.2 status flip + cross-ref.** Row 12.2 is
+    flipped TODO → DONE; the cross-ref is bumped to `(ADR-033)`
+    matching the actual sequential-by-task landing. `README.md`
+    row 12.2 receives the same flip + bump.
+
+12. **No PHASE flip.** Stays at 1; flip 1 → 2 still locked at Task
+    12.4 close-out per ADR-024 §4.
+
+13. **No new workspace deps.** Foundation-only deps continue:
+    `serde`, `serde_json`, `thiserror`. The `[workspace.dependencies]`
+    table is unchanged. The total compile cost of the witness
+    impl is <1 second on a warm cache.
+
+**Consequences.**
+
+- Task 12.3 inherits a working host-side encoder + a typed
+  `WitnessBlob` ready to feed into `ExecutorEnv::builder().
+  write_slice(&blob.0)`. The Risc0 guest program will:
+  1. Read the 12-byte header; validate magic + version.
+  2. Read the advertised `payload_len` more bytes.
+  3. `serde_json::from_slice::<SmtTrace>` on the payload.
+  4. Run the Alethe replay subset checker (Task 12.3 deliverable)
+     against the recovered `SmtTrace`.
+  Steps 1–3 mirror `parse_witness` exactly; the guest may
+  literally re-use the host-side parsing code via a shared
+  `no_std`-compatible module if Task 12.3 measurement justifies.
+- The 1 MiB witness cap is generous for the canonical
+  `contradictory-bound` smoke (which fits in ~3.5 KiB by
+  measurement). Phase 1 close-out smoke at Task 12.4 may need to
+  bump if richer Phase 1 traces (FHIR-driven, multi-resource)
+  approach the cap; bump is a fresh ADR.
+- `WitnessPayloadEncode` is unreachable in practice (serde_json
+  cannot fail on plain owned structs absent allocator failure)
+  but is kept in the error surface for forward-compat. Reviewers
+  can treat its production triggers as "host environment is
+  failing" signals.
+- The `serde_json`-over-bytes encoding is human-debuggable (one
+  can `xxd` a witness blob, skip the 12-byte header, and read
+  the payload as JSON). Useful during Task 12.3 / 12.4 debugging
+  sessions; no production cost (the guest decodes bytes
+  identically regardless of textual form).
+- The `zk_toolchain_is_post_quantum()` invariant remains
+  queryable + true; nothing in this ADR changes the post-quantum
+  posture.
+- ADR-032 §5 + §6's "12.2 lands the heavy dep + install logic"
+  intent statements are explicitly amended in §3 + §4 above; the
+  re-deferral pattern (cite the FHIR-axis precedent) is now a
+  documented project-wide convention for split foundation/usage
+  ADRs. Future ADRs can compose: ADR-N declares the lock + stub,
+  ADR-N+k flips on at first concrete consumer.
+
+**Alternatives rejected.**
+
+- **Add `risc0-zkvm` to `Cargo.toml` at Task 12.2.** Premature.
+  `extract_witness` does not call any Risc0 API. Compile-time
+  cost is ~2 minutes on a cold build for zero Task 12.2
+  deliverable benefit. Defer to 12.3 when `default_prover()` is
+  actually invoked.
+- **Use `risc0-zkvm`'s bespoke serde format
+  (`risc0_zkvm::serde::to_vec`).** Couples the host-side encoder
+  to the heavy dep at 12.2. Both formats are decodable on the
+  guest; `serde_json` keeps the host encoder dep-free. The
+  size-overhead penalty (text vs binary) is negligible at our
+  cap (~3.5 KiB canonical vs 1 MiB cap).
+- **Use `bincode` / `postcard` for binary serialisation.** Adds a
+  workspace dep we don't have. `serde_json` is already pulled in
+  workspace-wide; reusing it is the zero-marginal-cost choice.
+- **Hand-rolled binary encoding (no serde).** Forces a
+  hand-written guest decoder + risk of host/guest drift. The
+  `serde::{Serialize, Deserialize}` pair on `SmtTrace` is
+  symmetric by construction.
+- **Pad the witness to a fixed total byte count
+  (e.g. always 1 MiB).** Wastes ~99.6% of bytes on a canonical
+  trace and inflates prove time (Risc0 hashes the full input).
+  Length-prefixed framing with a hard cap is the cleaner
+  "fixed-size" interpretation per the ZKSMT literature
+  (bounded + deterministic, not single-byte-count).
+- **Skip `parse_witness`; ship encoding-only at 12.2.** Round-trip
+  tests need the inverse; Task 12.3's host glue needs it too.
+  Sibling fn at the same time is cheap.
+- **Embed the canonical Alethe fixture as an inline string
+  constant in the test.** Drift risk: the `proofs/` artefact
+  could change (Phase 0 close-out has it pinned, but Phase 1+
+  may re-emit). `include_str!` couples the test to the
+  authoritative on-disk file.
+- **Make `WitnessBlob` a `Bytes` (zero-copy) instead of `Vec<u8>`.**
+  Adds a `bytes` workspace dep. The blob is small (KiB-scale);
+  zero-copy is premature optimization.
+- **Lift `MAX_WITNESS_BYTES` to 16 MiB.** Premature: canonical
+  smoke fits in 3.5 KiB by 100x. Bump when measurement justifies.
+- **Use `flat_buffers` / `cap'n proto` schema.** Adds a heavy
+  dep + a build-time codegen step. `serde_json` over a
+  hand-written struct is the lower-overhead choice.
+- **Drop the version byte (assume forward-compat via reserved
+  bytes alone).** Version bumps want to be visible at the magic
+  header; reserved bytes are for flag bits within a version.
+- **Let `parse_witness` ignore the reserved bytes.** Already
+  does. (Reserved bytes are encoder-must-zero, decoder-ignore.)
+- **Skip ADR-033; document the encoding in `witness.rs` doc-
+  comments only.** The decision is multi-faceted (encoding
+  format choice + cap choices + dep deferral re-amendment of
+  ADR-032 §5 + §6 + helper-function policy decision) and lives
+  outside any one source file. Mirrors ADR-026's "FHIRcast
+  pub/sub" lock pattern at a smaller scope.
+
+**ADR numbering note.** Sequential-by-task continues: ADR-032 →
+Task 12.1 (ZK axis OPEN), ADR-033 → Task 12.2 (this entry —
+witness encoding). ZK axis status note: 12.1 + 12.2 DONE, 12.3 /
+12.4 OPEN.
+
+---

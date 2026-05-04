@@ -143,11 +143,15 @@ def test_zk_kernel_unsafe_code_forbidden() -> None:
 
 
 def test_zk_kernel_stubs_return_not_yet_implemented_with_subtask_marker() -> None:
-    """Each stub's NotYetImplemented arg points at the sub-task that lands the impl."""
-    witness_text = _read(ZK_KERNEL_WITNESS_RS)
+    """Each pending stub's NotYetImplemented arg points at the sub-task that lands the impl.
+
+    Task 12.2 (witness) has now landed (see `test_zk_witness.py` — the
+    body returns real bytes, NOT `NotYetImplemented(2)`). Tasks 12.3
+    (prove + verify) remain pending; their stubs still carry the
+    sub-task-3 marker so downstream callers stay fail-loud.
+    """
     prove_text = _read(ZK_KERNEL_PROVE_RS)
     verify_text = _read(ZK_KERNEL_VERIFY_RS)
-    assert "ZkError::NotYetImplemented(2)" in witness_text, "witness lands at Task 12.2"
     assert "ZkError::NotYetImplemented(3)" in prove_text, "prove lands at Task 12.3"
     assert "ZkError::NotYetImplemented(3)" in verify_text, "verify lands at Task 12.3"
 
@@ -224,7 +228,17 @@ def test_readme_marks_task_12_1_done_with_adr_032() -> None:
     assert "ADR-032" in row, "README Task 12.1 row must cross-ref ADR-032"
 
 
-def test_scratchpad_advances_active_pointer_to_task_12_2() -> None:
+def test_scratchpad_records_task_12_1_close_out_session() -> None:
+    """At 12.1 close-out the active pointer recorded `Last completed:** Task 12.1`.
+
+    Once Task 12.2 lands, that pointer advances. The historical fact —
+    that Task 12.1 closed out and locked Risc0 at ADR-032 — survives
+    in the session-log section. This foundation test asserts the
+    durable record (session-log heading + ADR-032 reference) rather
+    than the moving active pointer; the active pointer is asserted
+    by the per-sub-task pointer tests in `test_zk_witness.py` etc.
+    """
     text = _read(SCRATCHPAD_PATH)
-    assert "Last completed:** Task 12.1" in text, "scratchpad must record 12.1 as last completed"
-    assert "Next up:** **Task 12.2" in text, "scratchpad must point at Task 12.2 as next up"
+    assert "Task 12.1 close-out (ADR-032)" in text, (
+        "Memory_Scratchpad must preserve the Task 12.1 close-out session-log heading"
+    )

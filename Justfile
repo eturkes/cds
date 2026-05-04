@@ -563,10 +563,20 @@ zk-status:
     echo "install dir:     {{ZK_INSTALL_DIR}}"
 
 # Foundation gate (Task 12.1): cargo check + run inline tests for
-# `zk-kernel`. Heavy zkVM proving / verifying lands at Task 12.2 + 12.3.
+# `zk-kernel`. Heavy zkVM proving / verifying lands at Task 12.3.
 zk-stub-check:
     cargo check --package zk-kernel
     cargo test --package zk-kernel --lib
+
+# Witness extraction smoke (Task 12.2 — ADR-033).
+#
+# Runs the witness-specific cargo tests in `crates/zk_kernel`: cap
+# validation, length-prefixed binary encoding, magic / version / payload
+# round-trip, and the canonical `contradictory-bound` SmtTrace fixture.
+# Pure offline — no Risc0 / rzup dependency. Heavy zkVM proving (which
+# DOES need rzup + the risc0-zkvm dep) lands at Task 12.3.
+zk-witness-smoke:
+    cargo test --package zk-kernel --lib witness
 
 # =============================================================================
 # Dapr 1.17 — slim self-hosted polyglot orchestration (Phase 0, Task 8)
